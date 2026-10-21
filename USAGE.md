@@ -48,9 +48,9 @@ While the preset is anything other than `auto`, a power profile change is
 remembered but does not touch the fans. Selecting `auto` again hands the
 decision back to the profile and applies it immediately.
 
-Gaming mode is reachable *only* through this node and the Mode key, because no
-power profile maps to it: it is the loudest preset and does not belong on a
-battery profile.
+**No power profile maps to gaming mode**, because it is the loudest preset and
+does not belong on a battery profile. Select it through this node, with the Mode
+key, or by writing `fan_mode` directly.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/fan_preset`
 
@@ -290,12 +290,16 @@ echo '1' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_turbo
 **Disclaimer:** This node evaluates an arbitrary WMI read method. It is a
 development aid, not a supported interface.
 
+**Root only, for reading as well as writing** (mode `0600`). Reading it is not
+passive — it evaluates a firmware method — so it is not something an
+unprivileged process should be able to trigger.
+
 The node takes a method ID and an optional argument, then reads that method and
 prints the result:
 
 ```sh
 echo '0xE7' | sudo tee /sys/devices/platform/gigabyte_laptop/debug_method
-cat /sys/devices/platform/gigabyte_laptop/debug_method
+sudo cat /sys/devices/platform/gigabyte_laptop/debug_method
 # method 0xe7 arg 0x0 -> 0x0 (0)
 ```
 
@@ -306,7 +310,7 @@ tells the two apart, and the node says so when the result matches:
 
 ```sh
 echo '0xED 0x5A' | sudo tee /sys/devices/platform/gigabyte_laptop/debug_method
-cat /sys/devices/platform/gigabyte_laptop/debug_method
+sudo cat /sys/devices/platform/gigabyte_laptop/debug_method
 # method 0xed arg 0x5a -> 0x5a (90) [echoed argument: method not implemented]
 ```
 

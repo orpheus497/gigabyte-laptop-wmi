@@ -603,6 +603,52 @@ static int set_fan_mode(struct gigabyte_laptop_wmi *gigabyte, u32 fan_mode)
 	return 0;
 }
 
+static int set_fan_custom_speed(struct gigabyte_laptop_wmi *gigabyte, u32 speed)
+{
+	int ret, output;
+
+	ret = gigabyte_laptop_set_devstate(FAN_CUSTOM_SPEED, speed, &output);
+	if (ret)
+		return ret;
+
+	// On some models, FAN_CUSTOM_SPEED will only set CPU fan speed.
+	if (gigabyte->dual_fan_speed_enabled) {
+		ret = gigabyte_laptop_set_devstate(GPU_FAN_DUTY, speed, &output);
+		if (ret)
+			return ret;
+	}
+
+	gigabyte->fan_custom_speed = speed;
+	return 0;
+}
+
+/*
+ * Turbo is a fan mode plus a duty rather than a bit of its own, so a mode
+ * change out from under it ends it. The duty has to go back first: auto-maximum
+ * mode programs the fans from fan_custom_speed, so leaving turbo's 229 in place
+ * would hand the next mode a duty the user never chose.
+ *
+ * Call with fan_lock held.
+ */
+static int end_fan_turbo(struct gigabyte_laptop_wmi *gigabyte)
+{
+	int ret, output;
+
+	if (!gigabyte->fan_turbo)
+		return 0;
+
+	ret = set_fan_custom_speed(gigabyte, gigabyte->fan_turbo_saved_speed);
+	if (ret)
+		return ret;
+
+	// Best effort, as in fan_turbo_store: the bit is not what holds the fans
+	if (gigabyte_laptop_set_devstate(FAN_TURBO, 0, &output))
+		pr_warn("Could not clear the turbo fan bit\n");
+
+	gigabyte->fan_turbo = 0;
+	return 0;
+}
+
 static ssize_t fan_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
@@ -622,40 +668,43 @@ static ssize_t fan_mode_store(struct device *dev, struct device_attribute *attr,
 		return ret;
 	}
 
-	gigabyte = dev_get_drvdata(dev);
-	guard(mutex)(&gigabyte->fan_lock);
-
-	if (gigabyte->fan_mode == fan_mode) {
-		pr_warn("Already set to that fan mode\n");
-		return count;
-	}
-
+	// Range-checked before anything reads the value, including the
+	// already-set comparison below, which indexes fan_mode_presets
 	if (fan_mode > 5) {
 		pr_err("Invalid fan mode\n");
 		return -EINVAL;
-	} else {
-		ret = set_fan_mode(gigabyte, fan_modes[fan_mode]);
-		if (ret)
-			return ret;
 	}
 
-	gigabyte->fan_mode = fan_mode;
+	gigabyte = dev_get_drvdata(dev);
+	guard(mutex)(&gigabyte->fan_lock);
 
 	/*
 	 * A direct write is as deliberate as a Mode key press, so the preset
 	 * moves with it and a profile switch will not reclaim the fans. The
 	 * custom modes have no preset of their own, so they fall back to auto,
 	 * where the fan_mode > 2 rule protects them instead.
+	 *
+	 * This happens even when the mode is already the one asked for. Writing
+	 * the mode you are already in is still a request to hold it, and leaving
+	 * the preset on auto would let the next profile switch take it away.
 	 */
 	gigabyte->fan_preset = fan_mode < ARRAY_SIZE(fan_mode_presets) ?
 			fan_mode_presets[fan_mode] : FAN_PRESET_AUTO;
 
-	/*
-	 * Turbo is a fan mode plus a duty rather than a bit of its own, so a mode
-	 * change out from under it means it is no longer in effect. Say so instead
-	 * of leaving fan_turbo reading 1 over a state that has been replaced.
-	 */
-	gigabyte->fan_turbo = 0;
+	if (gigabyte->fan_mode == fan_mode) {
+		pr_warn("Already set to that fan mode\n");
+		return count;
+	}
+
+	ret = end_fan_turbo(gigabyte);
+	if (ret)
+		return ret;
+
+	ret = set_fan_mode(gigabyte, fan_modes[fan_mode]);
+	if (ret)
+		return ret;
+
+	gigabyte->fan_mode = fan_mode;
 	return count;
 }
 
@@ -692,13 +741,15 @@ static int apply_fan_preset(struct gigabyte_laptop_wmi *gigabyte)
 	if (gigabyte->fan_mode == mode)
 		return 0;
 
+	ret = end_fan_turbo(gigabyte);
+	if (ret)
+		return ret;
+
 	ret = set_fan_mode(gigabyte, fan_modes[mode]);
 	if (ret)
 		return ret;
 
 	gigabyte->fan_mode = mode;
-	// As in fan_mode_store: a mode change retires any turbo that was on
-	gigabyte->fan_turbo = 0;
 	return 0;
 }
 
@@ -742,25 +793,6 @@ static ssize_t fan_custom_speed_show(struct device *dev, struct device_attribute
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
 
 	return sysfs_emit(buf, "%d\n", gigabyte->fan_custom_speed);
-}
-
-static int set_fan_custom_speed(struct gigabyte_laptop_wmi *gigabyte, u32 speed)
-{
-	int ret, output;
-
-	ret = gigabyte_laptop_set_devstate(FAN_CUSTOM_SPEED, speed, &output);
-	if (ret)
-		return ret;
-
-	// On some models, FAN_CUSTOM_SPEED will only set CPU fan speed.
-	if (gigabyte->dual_fan_speed_enabled) {
-		ret = gigabyte_laptop_set_devstate(GPU_FAN_DUTY, speed, &output);
-		if (ret)
-			return ret;
-	}
-
-	gigabyte->fan_custom_speed = speed;
-	return 0;
 }
 
 static ssize_t fan_custom_speed_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
@@ -1286,7 +1318,7 @@ static DEVICE_ATTR_RO(battery_cycle);
 static DEVICE_ATTR_RO(light_sensor);
 static DEVICE_ATTR_RO(power_on_time);
 static DEVICE_ATTR_RO(has_dgpu_ejector);
-static DEVICE_ATTR_RW(debug_method);
+static DEVICE_ATTR_ADMIN_RW(debug_method);
 
 static struct attribute *gigabyte_laptop_attributes[] = {
 	&dev_attr_fan_mode.attr,

@@ -206,11 +206,12 @@ unimplemented ID comes back through `get_devstate2()`'s buffer branch as the
 argument that was sent. Two consequences:
 
 - **A read of an unsupported ID looks like success and returns your argument.**
-  `debug_method` always sends `0`, so every unimplemented ID reads as `0` —
-  indistinguishable from a real value of `0`. `debug_method` must be extended to
-  take an argument, and validation must use a **sentinel**: read with `0x5A`,
-  and if `0x5A` comes back the ID is not implemented. **Step 2 is not
-  trustworthy until that is done.**
+  `debug_method` originally always sent `0`, so every unimplemented ID read as
+  `0` — indistinguishable from a real value of `0`. **Fixed in Step 1b:** the
+  node now takes `"method [arg]"`, and validation uses a **sentinel** — read
+  with `0x5A`, and if `0x5A` comes back the ID is not implemented. The node says
+  so itself when the result matches the argument. Step 2 was done on that basis
+  and its results are trustworthy; see "Step 2 validation".
 - **It is also why the module loaded before Step 1 hardened the probe.** `0xFC`
   (`LIGHT_SENSOR_NEW`) is absent from AMD firmware, and the probe then did
   `if (ret) return ret` after that read, with init treating probe failure as
@@ -259,9 +260,12 @@ which direction means "boost on". That rests on the fork's testing on a CWH.
 Confirm against `nvidia-smi` in Step 2; if it is backwards, the node is
 self-consistent but semantically inverted.
 
-Because `perf_mode` is write-only, the `platform_profile` handler's `probe`
-must **write** a known profile to make its cached value truthful — the same
-thing `dell-pc.c` does with `thermal_set_mode()` in its probe.
+~~Because `perf_mode` is write-only, the `platform_profile` handler's `probe`
+must **write** a known profile to make its cached value truthful.~~ **Moot: the
+handler shipped over `fan_mode`, not `perf_mode`.** `fan_mode` reads back
+perfectly well, so `gigabyte_laptop_profile_probe()` *reads* the mode the
+firmware is already in and writes nothing — closer to what `dell-pc.c` does with
+its own resync than the forced write this note anticipated.
 
 ### Method IDs we are not using yet
 
@@ -357,11 +361,19 @@ latency-performance     → platform_profile=performance
 ```
 
 So the minimum set the handler must expose is `low-power` (or `quiet`),
-`balanced`, `performance` — a 1:1 fit with `perf_mode` 0/1/2. The moment the
-driver registers, the existing `tuned` setup starts switching GPU TGP with no
-further configuration. `tuned` also contains a power-profiles-daemon D-Bus
-shim, so GNOME/KDE's power menu works through it; `power-profiles-daemon`
-itself is **not** wanted.
+`balanced`, `performance`. The moment the driver registers, the existing `tuned`
+setup starts driving it with no further configuration — **verified on
+hardware**, see "Step 3: profiles over fan policy".
+
+What it drives is **fan policy**, not GPU TGP. This paragraph originally read
+"a 1:1 fit with `perf_mode` 0/1/2 … starts switching GPU TGP", which was the
+plan before the TGP path turned out to be blocked in firmware. The shipped
+handler maps these names to `fan_mode`, and the driver exposes a fourth choice
+(`low-power` *and* `quiet`) so the reverse translation for the desktop indicator
+works; the mapping table is under "Step 3 design: profiles over fan policy".
+
+`tuned` also contains a power-profiles-daemon D-Bus shim, so GNOME/KDE's power
+menu works through it; `power-profiles-daemon` itself is **not** wanted.
 
 ### amd_pmf is one kernel parameter away from binding
 
@@ -503,6 +515,14 @@ tarball built straight from the repo registers a module literally versioned
 substitutes the version first and cleans up any earlier registration including
 that one. The canonical version is **0.2.0**, per both RPM specs and the
 PKGBUILD.
+
+**RPM `Release` is 2, and that is load-bearing.** The pre-rename
+`aorus-laptop-dkms` and `aorus-laptop-kmod-common` were both `0.2.0-1`, the
+same *version* these carry, so `Obsoletes: … < %{version}-%{release}` only
+matches the old package once `Release` clears 1. At `Release: 1` the bound
+excluded the very package it had to replace and the old one stayed installed
+alongside. The Arch `pkgrel` is unaffected, because `replaces=` there is
+unversioned.
 
 ```sh
 sudo bash scripts/install-dkms.sh            # or --no-autoload to skip boot loading
@@ -853,7 +873,8 @@ Both registrations are non-fatal; a diagnostic must not stop the driver loading.
 Watch with `journalctl -kf | grep gigabyte` while pressing the keys. The WMI path
 also self-tests without any keypress, since reading method `0x03` fires
 `Notify (AMW0, 0xD2)` on demand:
-`echo 0x03 > debug_method && cat debug_method`.
+`echo 0x03 > debug_method && cat debug_method` (as root — the node is `0600`,
+since a read evaluates a firmware method).
 
 **`wmi_install_notify_handler()` does not exist on this kernel.** It was
 removed, and the only route is a `struct wmi_driver` with a `.notify` callback

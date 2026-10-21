@@ -11,6 +11,8 @@ license=('GPL2')
 depends=('dkms')
 replaces=('aorus-laptop-dkms')
 conflicts=('aorus-laptop-dkms')
+# Needs a release whose tarball contains gigabyte-laptop.c; releases published
+# before the rename carry aorus-laptop.c and package() below will not find it.
 source=("${url}/releases/download/${pkgver//_/-}/driver.tar.gz")
 sha256sums=("$(curl -sL ${url}/releases/download/${pkgver//_/-}/sum.txt | cut -d ' ' -f1)")
 
