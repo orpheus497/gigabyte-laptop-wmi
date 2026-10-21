@@ -108,40 +108,48 @@ blocked in code), `has_three_fans = has_four_fans = 0` → **2 fans, 3 temps,
 - **No platform profile is registered.** `/sys/class/platform-profile/` exists
   but is **empty**, and `/sys/firmware/acpi/platform_profile` does not exist.
   The slot is free — see "Power profiles" below.
-- **`GBT0005:00` is resolved: ignore it.** It is `Device (GAPD)` under `\_SB`,
-  and its `_STA` exists for side effects rather than to report presence. On the
-  AMD firmware it latches the dGPU off when **CMOS** says it is disabled —
-  `RXCM` reads the extended CMOS index/data ports `0x72`/`0x73`, not the EC —
-  then returns `Zero`:
+- **`GBT0005:00` is a live notify target on this machine — a Step 5 candidate.**
+  Earlier notes said it was an inert side-effect stub; that was the 3VH, and it
+  is **wrong for the 5TH**. On BIOS FB03 it is simply present, with no dGPU
+  latch and no `RXCM` check:
 
   ```asl
-  Name (_HID, EisaId ("GBT0005"))
-  Method (_STA, 0, NotSerialized) {
-      If ((^^PCI0.AMW0.RXCM (0xC7) == One)) {
-          ^^PCI0.GPP0.PG00._OFF ()
-          ^^PCI0.GPP0.WMOF = One
-      }
-      Return (Zero)
+  Device (GAPD) {
+      Name (_HID, EisaId ("GBT0005"))
+      Method (_STA, 0, NotSerialized) { Return (0x0F) }
   }
   ```
 
-  Linux enumerates any `_HID`-bearing node even when `_STA` reports absent,
-  which is exactly why it appears with no driver. **There is nothing for a
-  Linux driver to do with it here.** (The Intel CWH variant can return `0x0F`
-  and is also a notify target via `_Q63` → `Notify (GAPD, 0xCF)`, which is what
-  the Windows UMDF driver listens to. The AMD path has neither.)
+  and the EC fires events at it:
+
+  ```asl
+  Method (_Q63, 0, NotSerialized) { Notify (GAPD, 0xCF) }
+  ```
+
+  That is the behaviour previously thought Intel-only, and it is what the
+  Windows UMDF driver on `ACPI\GBT0005` listens for. Since the GiMate key emits
+  **no i8042 scancode at all** (tested), this is now a leading candidate for it,
+  and an `acpi_driver` with a notify handler is simpler than the WMI route.
 
 ## Firmware reference
 
-`GAMING-A16-3VH-DSDT.dsl` in this repo is a public DSDT from a **GAMING A16
-3VH** — AMD, same `GBTUACPI` firmware generation, and the closest sibling with
-public firmware. Its AML is **41,990 bytes** against this machine's **41,169**,
-so it is very nearly the same table. Use it to look up method bodies and EC
-field names instead of guessing.
+**`GAMING-A16-5TH-DSDT.dsl` is this machine's own firmware** — dumped from BIOS
+FB03 with `acpidump -b` and decompiled with `iasl -d`. Use it in preference to
+everything else. `GAMING-A16-5TH-SSDT12-APMF.dsl` is the SSDT holding `AMDI0100`
+and the APMF interface.
 
-**It is not this machine's firmware.** No public DSDT or hw-probe exists for any
-`5TH`/`GA65TH` unit. Treat everything below as *probable on BIOS FB03*, and
-verify with `debug_method` before relying on it.
+`GAMING-A16-3VH-DSDT.dsl` is the public 3VH DSDT that was used before the real
+dump existed. It turned out to be an excellent reference: **the WMBD and WMBC
+top-level case lists are identical between the two**, and `ECSH` is declared the
+same way down to `_HRV 0x8001`. Kept for cross-generation comparison.
+
+Where they differ, the 5TH is authoritative, and the differences found so far
+are recorded below — `GBT0005` in particular behaves nothing like the 3VH.
+
+`acpidump -b` writes into the **current directory**, so `cd` somewhere scratch
+first. A dump drops ~43 `.dat` files and `iasl -d dsdt.dat ssdt*.dat` produces a
+matching set of `.dsl`. `*.dat` is gitignored; `*.dsl` deliberately is not, so
+firmware kept as reference gets committed on purpose rather than by accident.
 
 ### Method IDs present in the AMD sibling
 
@@ -361,10 +369,19 @@ goes to *every* handler and fails if any returns `-EOPNOTSUPP`, and
 `platform_profile_cycle()` starts returning `-EINVAL` whenever the two
 disagree.
 
-Whether the Gigabyte BIOS exposes `APMF_FUNC_STATIC_SLIDER_GRANULAR` is still
-unknown. Note that the committed 3VH DSDT contains **neither `AMDI0100` nor any
-`APMF` method**, so those live in an **SSDT**, not the DSDT — checking them
-means dumping and decompiling every table, not just `dsdt.dat`.
+**The firmware does implement APMF**, in `GAMING-A16-5TH-SSDT12-APMF.dsl`
+(`ssdt12` in a fresh dump). `Device (PMF)` carries `_HID "AMDI0100"` and
+`Method (APMF, 2, Serialized)` dispatches functions **`0x00` through `0x0E`** —
+a complete implementation, with dedicated memory areas named for functions 9,
+B, C and D (`PF9A`, `PFBA`, `PFCA`, `PFDA`).
+
+Whether `APMF_FUNC_STATIC_SLIDER_GRANULAR` is *advertised* still cannot be read
+statically. Function 0 returns `M159 = M481`, the supported-function bitmask,
+and `M481` is a 32-bit field in `OperationRegion (PMT0, SystemMemory,
+0xB807BC8C, 0x0D)` — runtime BIOS data, not an ASL constant, and `/dev/mem` is
+closed under lockdown. So `amd_pmf.force_load=1` is the way to settle it, and it
+is now a well-motivated test rather than a guess: a BIOS that ships ASL for all
+fifteen APMF functions is unlikely to advertise none of them.
 
 ## Repo layout and conventions
 
@@ -468,11 +485,24 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   wrapper flushed out a third buffer caller — `power_on_time_show()` reads
   **five** bytes — which the old `void *` signature had hidden. Buffer
   destinations are zero-initialised so a short reply cannot expose stack bytes.
-- **`temp3_input` is dead on this machine — ignore it.** `ec_read(0x62)`
-  returns 0, so `temp3` reads `+0.0°C` while `temp1` tracks `k10temp` correctly
-  (46000 vs 46375). That EC offset came from Intel Aero/AORUS units and is
-  wrong, or simply unpopulated, on this AMD EC. `ec_read(0xD)` (auto-max fan
-  mode detect) is unverified for the same reason, but is only reached when the
+- **`temp3_input` is dead on this machine, and the firmware says why.** The
+  `ERAM` embedded-controller field ends with a bare terminator:
+
+  ```asl
+  OperationRegion (ERAM, EmbeddedControl, Zero, 0xFF)
+  Field (ERAM, ByteAcc, Lock, Preserve) {
+      Offset (0x5F), ERBD, 8,
+      Offset (0x60), SMPR, 8,
+      Offset (0x62)
+  }
+  ```
+
+  Nothing is declared *at* `0x62` — the offset is where the field stops. So
+  `ec_read(0x62)` reads an undefined EC byte and returns 0, which is why
+  `temp3` shows `+0.0°C` while `temp1` tracks `k10temp` (46000 vs 46375). The
+  offset came from Intel Aero/AORUS units. CPU and GPU temperature come from
+  `WMBC 0xE1`/`0xE2` (`EC0.CTMP` and friends) and are unaffected.
+  `ec_read(0xD)` is suspect for the same reason, but is only reached when the
   machine is already in custom fan mode at load time.
 - **`power_on_time` is mislabelled on this firmware.** The driver defines
   `POWER_ON_TIME` as `0x63`, but `WMBC 0x63` on this generation returns
@@ -604,21 +634,36 @@ a separate project rather than a blocker.
 **GiMate diagnosis order** (stop `input-remapper` first — it clones the keyboard
 into `input21`/`input22` and will confuse scancode capture):
 
-1. i8042 scancode — `showkey --scancodes` / `evtest /dev/input/event1`.
-   **Look specifically for `KEY_KPEQUAL` (117).** Two independent sources agree
-   the GiMate key presents as "Keypad Equals": the AERO X16 1VH RGB project
-   reports scancode `0x70067` (HID keyboard usage `0x67`) → `KEY_KPEQUAL`, and
-   the Windows GiHATE project reports PS/2 set-1 scan `0x59` / `VK_CLEAR`,
-   which is the same physical key. *Reported, not verified on this unit.*
-   If it emits a usable scancode, `keyd` or a udev hwdb entry solves it with no
-   kernel work — and there is currently **no hwdb entry for any modern Gigabyte
-   laptop** (`60-keyboard.hwdb` has only the ancient `U2442` and `i1520M`).
-2. WMI notify `0xD2` on `ABBC0F72` — `acpi_listen`. Strong prior: the bundled
-   AORUS DSDT fires `Notify (AMW0, 0xD2)` from inside `WMBC`
-   (`AORUS-17X-VF-DSDT.dsl:125336`). The driver defines `WMI_EVENT` and never
-   uses it — no `wmi_install_notify_handler`, no input device, no
-   `sparse_keymap`.
+**Tested on hardware with `showkey --scancodes`:**
+
+| Key | Result |
+|---|---|
+| **GiMate** | **nothing** — no scancode at all |
+| **Fn+F7** ("Mode") | **nothing** |
+| Fn+Space | works already, toggles the keyboard backlight |
+| Fn+F12 | `e0 5b  23  a3  e0 db` = Super press, `h`, `h` release, Super release |
+
+So the `KEY_KPEQUAL` hypothesis from the AERO X16 and GiHATE projects is
+**disproven for this unit**, and the cheap userspace route — `keyd` or a udev
+hwdb entry — is off the table for GiMate and Mode. Fn+Space is handled inside
+the EC and needs nothing from us. Fn+F12 shows the EC synthesising ordinary key
+combos for some Fn keys, which is why those work without a driver.
+
+Remaining candidates, both needing kernel work:
+
+1. **`_Q63` → `Notify (GAPD, 0xCF)`** on `GBT0005`, which `_STA` reports present
+   on this BIOS. An `acpi_driver` with a notify handler. Simplest of the two,
+   and the Windows driver binds exactly here.
+2. **`_Q45` → `SMGR(WEVN, WEVS)` → `WMBC(0, 0x03, n)` → `Notify (AMW0, 0xD2)`**,
+   the generic WMI event path. The driver defines `WMI_EVENT` and never uses it
+   — no `wmi_install_notify_handler`, no input device, no `sparse_keymap`.
 3. The `\_SB_.I2CB.ECSH` i2c-HID pipe.
+
+**Cheap discriminator before writing either handler:** `gpe0A` is the EC's GPE
+and its firing count is world-readable at
+`/sys/firmware/acpi/interrupts/gpe0A`. If pressing GiMate increments it, the EC
+*is* raising a query and only the handler is missing. If it does not move, the
+key never reaches ACPI and only the ENE pipe is left.
 
 On USB Gigabyte models the vendor-HID path carries report ID `0x04` with
 payload `00 00 84` = Mode key and `00 00 91` = GigaMate key (GigaMate's
