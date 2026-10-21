@@ -25,7 +25,8 @@ Everything here is verified from the live machine, not assumed.
 | BIOS | AMI `FB03`, `12/23/2025` → `dmi_get_bios_year()` = 2025 |
 | EC firmware | 3.3 |
 | CPU | AMD Ryzen 7 170, 8C/16T, `amd-pstate-epp` |
-| GPU | NVIDIA RTX 5050 Laptop + amdgpu iGPU |
+| APU silicon | **Rembrandt** (Zen 3+). Host bridge `1022:14b5` = `AMD_CPU_ID_RMB`, `Rembrandt Data Fabric`, `Rembrandt [Radeon 680M]` `1002:1681`. "Ryzen 7 170" is rebranded Rembrandt, not new silicon. |
+| GPU | NVIDIA `GB207M [RTX 5050 Max-Q / Mobile]` `10de:2d98` + amdgpu iGPU |
 | OS | Fedora 44, kernel 7.2.11-200.fc44.x86_64 |
 | Secure Boot | **enabled**, lockdown = `integrity` |
 
@@ -63,11 +64,105 @@ blocked in code), `has_three_fans = has_four_fans = 0` → **2 fans, 3 temps,
   → `/dev/hidraw2`, ACPI path `\_SB_.I2CB.ECSH`, vendor usage page `0xFF00`,
   report ID `0x0B`, symmetric 41-byte in/out, bound only to `hid-generic`.
   Protocol undocumented.
-- **No `/sys/firmware/acpi/platform_profile`.** Nothing on this machine
-  registers one.
+- **No platform profile is registered.** `/sys/class/platform-profile/` exists
+  but is **empty**, and `/sys/firmware/acpi/platform_profile` does not exist.
+  The slot is free — see "Power profiles" below.
 - **`GBT0005:00`** is an unbound Gigabyte ACPI device (also present on machines
   as old as the Aero 15XV8). Windows loads a vendor driver for it. Purpose
   unknown; needs a DSDT dump to investigate. Neither bundled `.dsl` contains it.
+
+## Power profiles
+
+### This kernel uses the new multi-handler class API
+
+`include/linux/platform_profile.h` on 7.2 matches current master exactly.
+`probe`, `profile_get` and `profile_set` are **mandatory** (the core does
+`WARN_ON_ONCE` and returns `-EINVAL` otherwise); `hidden_choices` is optional;
+`probe` must set **at least one** bit or registration fails with "Failed to
+register platform_profile class device with empty choices".
+
+```c
+struct platform_profile_ops {
+	int (*probe)(void *drvdata, unsigned long *choices);
+	int (*hidden_choices)(void *drvdata, unsigned long *choices);
+	int (*profile_get)(struct device *dev, enum platform_profile_option *profile);
+	int (*profile_set)(struct device *dev, enum platform_profile_option profile);
+};
+struct device *devm_platform_profile_register(struct device *dev, const char *name,
+					      void *drvdata,
+					      const struct platform_profile_ops *ops);
+int platform_profile_cycle(void);
+void platform_profile_notify(struct device *dev);
+```
+
+Eight slots: `low-power`, `cool`, `quiet`, `balanced`, `balanced-performance`,
+`performance`, `max-power`, `custom`.
+
+Registering creates `/sys/class/platform-profile/platform-profile-N/{name,choices,profile}`
+**and** the legacy aggregate `/sys/firmware/acpi/platform_profile`, which
+`drivers/acpi/platform_profile.c` maintains as the intersection of all
+handlers' choices, reading `custom` when handlers disagree.
+
+Closest reference implementation is `drivers/platform/x86/dell/dell-pc.c`: it
+passes `NULL` drvdata, omits `hidden_choices`, and its `probe` resyncs hardware
+to the firmware's current mode. `amd/pmf/sps.c` is the model for
+`hidden_choices`.
+
+`platform_profile_cycle()` is what `asus-wmi` calls from its hotkey handler, so
+**Step 3 and Step 5 share an implementation**. Caveats from the core: it
+advances every registered handler in lockstep, returns `-EINVAL` when the
+aggregate reads `custom`, stops at the first failing `profile_set` leaving
+earlier handlers changed, and notifies by itself. Use
+`platform_profile_notify()` only when the EC changes mode on its own.
+
+### tuned already drives this — keep tuned, do not install PPD
+
+Fedora 44's `tuned` ships `plugins/plugin_acpi.py`, and it writes the **legacy**
+path, not the class path. `tuned/ppd/controller.py` hardcodes
+`PLATFORM_PROFILE_PATH = "/sys/firmware/acpi/platform_profile"` and monitors it.
+The active profile already requests it:
+
+```ini
+balanced                → platform_profile=balanced
+powersave               → platform_profile=low-power|quiet
+throughput-performance  → platform_profile=performance
+latency-performance     → platform_profile=performance
+```
+
+So the minimum set the handler must expose is `low-power` (or `quiet`),
+`balanced`, `performance` — a 1:1 fit with `perf_mode` 0/1/2. The moment the
+driver registers, the existing `tuned` setup starts switching GPU TGP with no
+further configuration. `tuned` also contains a power-profiles-daemon D-Bus
+shim, so GNOME/KDE's power menu works through it; `power-profiles-daemon`
+itself is **not** wanted.
+
+### amd_pmf is one kernel parameter away from binding
+
+`amd_pmf` is loaded but unbound. The platform device
+`/sys/devices/platform/AMDI0100:00` exists with no `driver` link, so
+`amd_pmf_probe()` ran and returned `-ENODEV`. Exactly one gate fails:
+
+```c
+// drivers/platform/x86/amd/pmf/core.c
+{"AMDI0100", 0x100},   // this machine
+if (id->driver_data == 0x100 && !force_load)
+	return -ENODEV;
+```
+
+The host bridge gate passes (`1022:14b5` is `AMD_CPU_ID_RMB`, in
+`pmf_pci_ids`), and `force_load` reads `N`. AMD gates `AMDI0100` behind
+`force_load` and documents it as "Force load this driver on supported older
+platforms (experimental)" — consistent with this being Rembrandt.
+
+If it binds, `amd_pmf_init_sps()` registers a **second** handler named
+`amd-pmf` with `low-power`/`balanced`/`performance` visible and
+`quiet`/`balanced-performance` hidden, governing APU/SMU power while ours
+governs GPU TGP and fans. Consequences to design around: the legacy aggregate
+becomes the intersection, disagreement surfaces as `custom`, a legacy write
+goes to *every* handler and fails if any returns `-EOPNOTSUPP`, and
+`platform_profile_cycle()` starts returning `-EINVAL` whenever the two
+disagree. Whether the Gigabyte BIOS exposes
+`APMF_FUNC_STATIC_SLIDER_GRANULAR` is unknown without the DSDT.
 
 ## Repo layout and conventions
 
@@ -218,7 +313,7 @@ Both commits build clean with `-Wall -Wextra`.
 | 0 | DKMS install, load, verify hwmon channels appear | low |
 | 1 | Clamp the `memcpy`; make optional probe reads non-fatal | low |
 | 2 | Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` via `debug_method` | medium |
-| 3 | Register a real `platform_profile` handler | low |
+| 3 | Register a `platform_profile` handler over `perf_mode` + `dynamic_boost` | low |
 | 4 | Writable `pwm1`/`pwm2` for CoolerControl | medium |
 | 5 | GiMate button — diagnose, then notify handler + keymap | low |
 | 6 | RGB over `/dev/hidraw2` (report `0x0B`, 41 bytes) | high |
@@ -241,15 +336,47 @@ into `input21`/`input22` and will confuse scancode capture):
 
 ## Open decisions
 
-- **Step 3 interface shape** — whether `perf_mode` survives alongside a
-  `platform_profile` handler, or is replaced by it.
-- **`tuned` vs `power-profiles-daemon`** — currently `tuned` on
-  `balanced-battery`, PPD inactive. Affects Step 3 wiring.
 - **Upstreaming** — the probe fixes, the `gpu_boost` oops (#45) and the duty
   clamp (#46) are all plausibly acceptable upstream, which would reduce rebase
   burden.
 
 ## Settled decisions
+
+### Step 3 design
+
+- **A profile switch sets `perf_mode` and `dynamic_boost` only.** Fan settings
+  are deliberately left alone, so a custom fan curve survives profile changes.
+  Target mapping:
+
+  | Profile | `perf_mode` | `dynamic_boost` |
+  |---|---|---|
+  | `quiet` | 0 eco | off |
+  | `low-power` | 0 eco | off |
+  | `balanced` | 1 | off |
+  | `balanced-performance` | 1 | on |
+  | `performance` | 2 boost | on |
+
+- **Keep the raw `perf_mode` node alongside `platform_profile`.**
+  `platform_profile` is the canonical writer; `perf_mode` reads through the
+  same stored value and stays available for scripting and for debugging a bad
+  mapping. One source of truth in the driver, two views onto it — they must not
+  be able to disagree.
+- **Test `amd_pmf.force_load=1` before writing Step 3**, so it is known whether
+  the handler will be sharing the aggregate with `amd-pmf`.
+  `sudo grubby --update-kernel=ALL --args="amd_pmf.force_load=1"`, reboot, then
+  read `/sys/class/platform-profile/*/{name,profile,choices}`. Revert with
+  `grubby --remove-args`.
+- **Keep `tuned`; do not install `power-profiles-daemon`.**
+
+### Step 2 validation
+
+Read `0xED`, `0xE7` and `0x7D` through `debug_method` and confirm sane values
+**before any write**. Then enable `fan_turbo` for roughly 3 seconds on AC while
+idle, watching `fan1_input`/`fan2_input`, and confirm the fans resume on
+disable. The short burst is deliberate: this is the path that touches the duty
+ceiling which stopped fans on the AERO 17-XA (upstream #46).
+
+### Other
 
 - **No Windows dual-boot on this machine.** A Windows USB install is available
   as a later option if Step 6 needs GiMate traffic captured. Until then, RGB
@@ -258,3 +385,20 @@ into `input21`/`input22` and will confuse scancode capture):
 - CPU power management is out of scope. `amd-pstate-epp` with `dynamic_epp` and
   `prefcore` already works; this driver must not touch it. The gap is GPU TGP
   and fan policy.
+
+## Pending root-only diagnostics
+
+Neither can run from a non-interactive shell; they need a password.
+
+```sh
+# DSDT dump — identifies GBT0005, shows whether APMF methods exist,
+# and shows what \_SB_.I2CB.ECSH is wired to
+sudo acpidump -b && iasl -d dsdt.dat
+
+# Live capture on the ECSH vendor pipe. Press GiMate / Fn+Space / Mode
+# while this runs. Read-only; it only listens.
+sudo timeout 20 cat /dev/hidraw2 | xxd
+```
+
+If bytes appear on `hidraw2` when GiMate is pressed, Steps 5 and 6 both open up
+considerably.
