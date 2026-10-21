@@ -1129,20 +1129,63 @@ Read the field widths before believing a method sets a duty:
 now reads `56` instead of `22`. `pwm_enable` reporting was also wrong upstream
 and is fixed — see the enum note below.
 
-**Untried leads, in order of promise:**
+**`0x46`/`0x47` tried and rejected — three mechanisms down.**
 
-1. **`0x46` `CPU_FAN_DUTY` with `0x47` `GPU_FAN_DUTY`.** `0x46` writes `FDTY`
-   *and* `FAN1`; `0x47` writes `GDTY` *and* `FAN2`. Between them they set both
-   the live duty and the target for each fan, which is a different and more
-   direct combination than anything tried. The driver marks both `// Aero 15 VB`
-   under "Adding support (WIP)" and has never written `0x46` at all. This is the
-   most likely candidate.
-2. **The 15-point custom curve**, `fan_mode 3` plus `fan_curve_index` and
-   `fan_curve_data` (`0x68` → `XFNW`). This is the firmware's own proportional
-   mechanism, so it should work by construction; it is a curve rather than a
-   duty, so it suits a profile better than it suits CoolerControl. GigaMate
-   reports the indexed store is inert on an AERO X16's EC firmware, which is a
-   different model and worth testing here rather than assuming.
+```
+fan_mode 3, idling at ~45C, 0x46 and 0x47 written together each step:
+duty 30 -> 1666 RPM
+duty 40 -> 1657 RPM
+duty 50 -> 1666 RPM
+duty 60 -> 1666 RPM
+duty 70 -> 1666 RPM
+```
+
+Flat, and flat at exactly the idle figure. **The test was also badly designed,
+and the reasoning behind it was wrong — both worth recording so neither is
+repeated:**
+
+- **`fan_mode 3` is the wrong mode to test a duty in.** Mode 3 sets `TENF`,
+  which is the *curve* mode: the EC drives the fans from `XFNW`, so its control
+  loop overwrites any duty on its next cycle. A duty can only stick in a mode
+  where the EC is not computing one.
+- **`FDTY` is the EC's output, not an input.** The driver reads `pwm1` from
+  `0x50`, which returns `FDTY` — the live duty. Writing the register the EC
+  publishes its own result into was never going to hold.
+- **The claim that this was "a combination nothing had tried" was wrong.**
+  `0x70` already writes `FAN1` and `FAN2`, and those were ignored. Adding
+  `FDTY`/`GDTY` to targets that are already ignored is not a new mechanism.
+
+**The decisive finding is that the DSDT cannot answer this.** Every reference to
+`FDTY`, `GDTY`, `FAN1`, `FAN2`, `TENF`, `ADJF`, `GFAN` and `TFAN` in the whole
+table is inside `WMBD` (assigning it) or `WMBC` (returning it). **No AML reads
+or tests any of them.** The methods are a pure pass-through to EC RAM, and what
+the EC's own firmware does with those bytes is not in any table we can dump. So
+there is no more static analysis to do here — only experiments, and only in
+modes where the EC is not running a curve.
+
+Field widths, for reference: `TFAN`, `GFAN`, `TENF`, `ADJF` are **1 bit**;
+`FAN1`, `FAN2`, `FDTY`, `GDTY`, `FLVL` are **8**; `XFNW` is **24**.
+
+**The one lead left: the 15-point curve.** `fan_mode 3` plus `fan_curve_index`
+and `fan_curve_data` (`WMBD 0x68` → `XFNW`). It is the firmware's own
+proportional mechanism, which is the argument for it, and unlike every duty
+write **it can be verified**: `WMBC 0x68` writes a request index to `XFNR`,
+sleeps 100 ms and returns `XFN1`, so a written point can be read back.
+
+```asl
+Case (0x68) { ^^SBRG.EC0.XFNR = Arg2
+              Sleep (0x64)
+              Return (^^SBRG.EC0.XFN1) }
+```
+
+That read-back is what makes it worth trying: it distinguishes "the store does
+not work" from "the store works and the EC ignores the curve", which none of the
+duty experiments could. GigaMate reports the indexed store is inert on an
+AERO X16, a different model — test rather than assume.
+
+Note the driver's current `fan_curve_data_store()` builds `data << 8 | index`,
+with a commented-out alternative packing speed/temp/index, and `XFNW` is 24
+bits. The packing is a guess and the read-back is the way to confirm it.
 
 **Test write methods through a debug node, not through hwmon.** ✅ **Done** —
 `debug_method_write` takes `"method arg"`, performs the WMBD write on store and
@@ -1158,8 +1201,12 @@ Three things it does deliberately:
 - **Takes `fan_lock`**, so a poke cannot land inside `set_fan_mode()`'s
   multi-step sequence. It cannot keep the cached fan state honest — nothing can,
   for an arbitrary write — so rewrite `fan_mode` or `fan_preset` afterwards.
-- **Reports "not implemented"** when the reply is a buffer, which is the
-  write-side form of the WMBC sentinel.
+- **Reports the reply rather than interpreting it.** A buffer back means
+  *either* a case that assigned its field and fell through without a `Return`,
+  *or* `Default { Return (Arg2) }` echoing the argument because there is no case
+  for that ID — the two are indistinguishable here, so the node says so and
+  points at the EC field, which is the only thing that settles it. An earlier
+  version claimed "not implemented" for a buffer and was wrong on hardware.
 
 ### Step 3: profiles over fan policy — verified on hardware
 

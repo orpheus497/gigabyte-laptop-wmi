@@ -2243,8 +2243,15 @@ static int __init gigabyte_laptop_init(void)
 
 	/*
 	 * Registered after probe, so the fan mode it syncs from has been read.
-	 * devm ties it to the platform device, so platform_device_unregister()
-	 * in exit releases it.
+	 *
+	 * devm is correct here and the non-devm API would be a regression, so
+	 * resist "fix" suggestions to swap it. The class device is tied to
+	 * `gigabyte->pdev->dev`, and gigabyte_laptop_exit() calls
+	 * platform_device_unregister() on exactly that device, which releases
+	 * devres — and it does so *before* kfree(gigabyte), so profile_get and
+	 * profile_set cannot run against freed drvdata. Calling
+	 * platform_profile_remove() as well would be a second teardown of the
+	 * same registration.
 	 */
 	gigabyte->ppdev = devm_platform_profile_register(&gigabyte->pdev->dev,
 			GIGABYTE_LAPTOP_FILE, gigabyte, &gigabyte_laptop_profile_ops);

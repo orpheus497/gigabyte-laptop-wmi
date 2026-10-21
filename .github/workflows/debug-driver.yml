@@ -13,7 +13,7 @@ jobs:
       - name: Generate archive
         run: |
           sed -e "s/@PKGVER@/0.2.0/" -i dkms.conf
-          tar -czf driver.tar.gz Makefile gigabyte-laptop.c dkms.conf
+          tar -czf driver.tar.gz Makefile gigabyte-laptop.c dkms.conf gigabyte-laptop.conf
       - name: Upload artifact
         id: create_release
         uses: actions/upload-artifact@v7

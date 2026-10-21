@@ -212,7 +212,15 @@ All VE and newer models (e.g. Aero 16 XE5) return four 8-bit values, while older
 
 Aero/AORUS laptops support reading the current PWM for each fan. This should not be confused with the custom fan speed, which returns the PWM for use in custom fan mode.
 
-The sysfs and HWMON nodes are read-only, and stay that way until a firmware mechanism is found that actually sets a proportional duty. Two were tried on a Gigabyte Gaming A16 and neither worked: method `0x6A` writes a single bit and runs the fans flat out, and method `0x70` ignored the target entirely and *stopped both fans* when asked for 100%. The sysfs node will only return the PWM for the CPU fan, while the HWMON nodes have separate channels for CPU and GPU fans.
+The sysfs and HWMON nodes are read-only, and stay that way until a firmware mechanism is found that actually sets a proportional duty. Three were tried on a Gigabyte Gaming A16 and none worked:
+
+- `0x6A` writes `ADJF`, a **single bit**, and runs the fans flat out.
+- `0x70` writes the per-fan targets and *ignored* them, then **stopped both fans** when asked for 100%.
+- `0x46`/`0x47` write the duty and the target together, and the fans did not move across 30-70%.
+
+The embedded controller decides what to do with those bytes, and no ACPI method
+reads them back as anything but storage, so there is nothing left to analyse —
+only experiments. The sysfs node will only return the PWM for the CPU fan, while the HWMON nodes have separate channels for CPU and GPU fans.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/fan_pwm`
 
@@ -328,16 +336,21 @@ you read it; reading reports what the last one did.
 ```sh
 echo '0x7D 1' | sudo tee /sys/devices/platform/gigabyte_laptop/debug_method_write
 sudo cat /sys/devices/platform/gigabyte_laptop/debug_method_write
-# method 0x7d arg 0x1 -> wrote, reply 0x0 (0)
+# method 0x7d arg 0x1 -> wrote, replied with a buffer (void case, or no case for this ID -- check the field)
 ```
 
-The node reports what the firmware replied, because on the write side that does
-not settle whether the method exists:
+Method `0x7D` is one of the cases that assigns its field and falls through
+without a `Return`, which is why it answers that way rather than with a value.
+A method that does return one reads back as:
 
 ```text
-method 0x7d arg 0x1 -> wrote, replied 0x0 (0)
-method 0x7d arg 0x1 -> wrote, replied with a buffer (void case, or no case for this ID -- check the field)
-method 0x7d arg 0x1 -> wrote, no reply (void case)
+method 0x46 arg 0x32 -> wrote, replied 0x32 (50)
+```
+
+and one whose reply carries nothing at all reads back as:
+
+```text
+method 0xfa arg 0x0 -> wrote, no reply (void case)
 ```
 
 A third of this firmware's `WMBD` cases assign their embedded-controller field
