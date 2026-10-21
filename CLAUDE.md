@@ -149,6 +149,55 @@ WMBC (read):  46 47 50 57 61 63 64 65 67 68 6A 6B 6F 70 71 7D 80 87 88 A1
 All three ported IDs are present on **AMD** firmware, which is the main thing
 Phase 2 needed: `0xED`, `0xE7`, `0x7D`.
 
+### WMBC echoes unknown method IDs — this breaks naive validation
+
+Both methods end with a catch-all:
+
+```asl
+Default { Return (Arg2) }
+```
+
+and `wmi_evaluate_method()` passes `Arg2` as a 4-byte **buffer**, so an
+unimplemented ID comes back through `get_devstate2()`'s buffer branch as the
+argument that was sent. Two consequences:
+
+- **A read of an unsupported ID looks like success and returns your argument.**
+  `debug_method` always sends `0`, so every unimplemented ID reads as `0` —
+  indistinguishable from a real value of `0`. `debug_method` must be extended to
+  take an argument, and validation must use a **sentinel**: read with `0x5A`,
+  and if `0x5A` comes back the ID is not implemented. **Step 2 is not
+  trustworthy until that is done.**
+- **It is also why the module still loads.** `0xFC` (`LIGHT_SENSOR_NEW`) is
+  absent from AMD firmware, and the probe does `if (ret) return ret` after that
+  read, with init treating probe failure as fatal. The Default rescues it: the
+  read "succeeds" with zeroes, `light_sensor_result[0] != 0xF7`, and probe
+  carries on to the old light-sensor path — which is equally absent and equally
+  harmless. The unbounded `memcpy` is not reachable here either, because the
+  echoed buffer is only 4 bytes. Still worth clamping, but it is hygiene rather
+  than a live hazard.
+
+Every other WMI read the probe performs *is* implemented in AMD WMBC: `0x57`,
+`0x71`, `0x67`, `0x6A`, `0x6B`, `0x64`, `0x65`, `0x68`, plus `0xE7`. The only
+non-WMI risk in probe is `ec_read(0xD)`, reached only when the machine is
+already in custom fan mode at load time.
+
+### Firing the event synthetically
+
+`WMBC` short-circuits before its switch:
+
+```asl
+Method (WMBC, 3, Serialized) {
+    If ((Arg1 == 0x03)) { Notify (AMW0, 0xD2) ; Return (Arg1) }
+    Else { Switch (Arg1) { ... } }
+}
+```
+
+So **method ID `0x03` fires the WMI event on demand**. Once a notify handler
+exists, reading `0x03` is a self-test for the whole event path that needs no
+hotkey press. Note the corollary for Step 5: a notify with no registered
+handler is dropped by `wmi.ko`, so `acpi_listen` will likely show nothing
+today — testing the event path properly requires the handler first.
+
 Asymmetries that matter:
 
 | ID | Node | Firmware behaviour |
@@ -156,6 +205,14 @@ Asymmetries that matter:
 | `0xED` | `perf_mode` | **WMBD only — write-only.** No WMBC case, so the mode in effect cannot be read back. |
 | `0xE7` | `dynamic_boost` | WMBD writes, WMBC returns `NPCF.DBAC`. Writing `0` sets `DBAC = 1`, so **DBAC is already in the node's sense** — invert on write only, never on read. |
 | `0x7D` | `fan_turbo` | WMBD writes and WMBC reads `EC0.TFAN`. Confirms `0x7D` is a plain EC bit, consistent with it not holding the fans on its own. |
+| `0x51` | `gpu_boost` | **WMBD only — write-only.** `gpu_boost` reports the last written value, 0 after a cold boot. |
+| `0x6D`/`0x6E` | `battery_cycle` | Absent from both. Reads return the echoed argument, i.e. `0`, not an error. |
+
+One caveat on `dynamic_boost` that the firmware cannot settle: the ASL proves
+the node **round-trips** (`write 0` → `DBAC = 1` → reads back `1`), but not
+which direction means "boost on". That rests on the fork's testing on a CWH.
+Confirm against `nvidia-smi` in Step 2; if it is backwards, the node is
+self-consistent but semantically inverted.
 
 Because `perf_mode` is write-only, the `platform_profile` handler's `probe`
 must **write** a known profile to make its cached value truthful — the same
@@ -437,11 +494,16 @@ Both commits build clean with `-Wall -Wextra`.
 |---|---|---|
 | 0 | DKMS install, load, verify hwmon channels appear | low |
 | 1 | Clamp the `memcpy`; make optional probe reads non-fatal | low |
-| 2 | Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` via `debug_method` | medium |
+| **1b** | **Extend `debug_method` to take an argument** — prerequisite for Step 2 | low |
+| 2 | Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel | medium |
 | 3 | Register a `platform_profile` handler over `perf_mode` + `dynamic_boost` | low |
 | 4 | Writable `pwm1`/`pwm2` for CoolerControl | medium |
 | 5 | GiMate button — diagnose, then notify handler + keymap | low |
-| 6 | RGB over `/dev/hidraw2` (report `0x0B`, 41 bytes) | high |
+| 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
+
+Step 1 is **not** a blocker for Step 0 — the WMBC Default rescues the one
+missing probe read, so the module is expected to load as committed. Step 1b
+*is* a blocker for Step 2.
 
 Step 2 gates everything GPU-related. Step 6 is open-ended research; treat it as
 a separate project rather than a blocker.
