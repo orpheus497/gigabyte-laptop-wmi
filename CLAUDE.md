@@ -172,6 +172,21 @@ Neither is committed here, and `*.dat` being gitignored means a stray
 serial number live in SMBIOS/DMI rather than in ACPI, and are not in these
 files either.
 
+**Audited 22 Oct 2025, working tree and full history, and clean.** No `MSDM`,
+`SLIC` or `SLIT`; no serial number, asset tag or MAC address; no keys,
+credentials or tokens; and no username or hostname anywhere in tracked content.
+Two things look alarming in a naive grep and are not:
+
+- **`Serial` appears hundreds of times in the DSDTs.** Every hit is the AML
+  keyword — `Serialized`, `NotSerialized`, `SerialBus`. There are no serial
+  numbers.
+- **`ToUUID` appears throughout.** All are `_DSM`/`_OSC` *interface* UUIDs,
+  which are published constants shared by every machine implementing that
+  interface, not system UUIDs. The one outside an `Arg0 ==` comparison is
+  Microsoft'''s "Generic Buttons Device" HID.
+
+Re-run the audit the same way after committing any new firmware dump.
+
 ### Method IDs present in the AMD sibling
 
 Verified by reading the `Switch` case lists directly:
@@ -226,6 +241,58 @@ Every other WMI read the probe performs *is* implemented in AMD WMBC: `0x57`,
 `0x71`, `0x67`, `0x6A`, `0x6B`, `0x64`, `0x65`, `0x68`, plus `0xE7`. The only
 non-WMI risk in probe is `ec_read(0xD)`, reached only when the machine is
 already in custom fan mode at load time.
+
+### A third of WMBD's setters return nothing, and that read as failure
+
+The mirror image of the WMBC echo problem, found from a spurious warning in the
+load log and then confirmed against the DSDT. `WMBD` cases split two ways:
+
+```asl
+Case (0x71) { ^^SBRG.EC0.GFAN = Zero
+              ^^SBRG.EC0.FANB = Arg2
+              Return (^^SBRG.EC0.FANB) }     // returns a value
+
+Case (0x7D) { ^^SBRG.EC0.TFAN = Arg2 }       // assigns and falls out
+```
+
+Counted at the switch's own indent level:
+
+```
+return a value (22):  46 47 50 57 61 64 65 66 67 68 6A 6B 70 71 80 87 88 A1 C4 CA E7 F6
+return NOTHING (11):  51 63 7D A3 C7 C9 CB D9 E6 ED FA
+```
+
+`wmi_evaluate_method()` succeeds for a void method but leaves the reply buffer
+empty, so `gigabyte_laptop_set_devstate()` found no integer and returned
+`-EINVAL` — **after the EC field had already been assigned.** Three of the
+eleven are written by this driver:
+
+| ID | Node | What the spurious failure did |
+|---|---|---|
+| `0xED` | `perf_mode` | Every write returned `-EINVAL` to userspace and never cached the value, so the node could not report the mode it had just set |
+| `0x51` | `gpu_boost` | Same |
+| `0x7D` | `fan_turbo` | Logged "Could not clear the turbo fan bit" on a clear that had in fact succeeded |
+
+**Fixed**, and the fix distinguishes three cases rather than blanket-tolerating:
+
+- **empty reply** → the write landed, success with nothing to report
+- **integer** → success, value returned as before
+- **buffer** → `WMBD` ends in `Default { Return (Arg2) }` and `Arg2` arrives as
+  a 4-byte buffer, so a buffer back means **the firmware has no case for this
+  ID**. Now `-EOPNOTSUPP`, which is the write-side equivalent of the WMBC
+  sentinel and strictly more information than the old `-EINVAL`.
+
+Two consequences worth carrying forward:
+
+- **This probably explains the fork's `fan_turbo` history.** Phase 2 notes that
+  writing `0x7D` on enable "did not hold the fans" on the CWH, which is why
+  turbo latches a duty plus fixed mode instead. A write that returned `-EINVAL`
+  while actually landing would look exactly like a method that does nothing.
+  Worth re-testing `0x7D` on its own now that the write reports honestly.
+- **`perf_mode`'s TGP conclusion is unaffected.** The writes were landing all
+  along — the AML executes before the method returns — so "firmware blocks the
+  TGP path" still stands. What changes is that the node now reports success and
+  caches, instead of erroring on every write.
 
 ### Firing the event synthetically
 
@@ -464,14 +531,20 @@ machine does not end up carrying both.
 | `master` | Pristine upstream tracking. **Never commit here.** |
 | `a16-5th` | Integration branch. All work lands here. |
 
-Remotes: `a16` = the A16 fork. **`origin` is currently absent** — `master` still
-sits at upstream's `4b817ea`, so the history is intact, but there is nothing to
-fetch upstream updates from. The cherry-pick strategy below needs it back:
+Remotes, all three present:
 
-```sh
-git remote add origin https://github.com/tangalbert919/gigabyte-laptop-wmi.git
-git fetch origin
-```
+| Remote | Points at | Role |
+|---|---|---|
+| `origin` | `orpheus497/gigabyte-laptop-wmi` | **our fork — push here** |
+| `upstream` | `tangalbert919/gigabyte-laptop-wmi` | the project this forks; fetch only |
+| `a16` | `JoseLopez36/gigabyte-laptop-wmi-A16` | the A16 fork Phase 2 ported from |
+
+Note the naming: `upstream` is the *project*, not `origin`. A habitual
+`git fetch origin && git rebase origin/master` therefore rebases onto our own
+fork, not the project. Upstream updates come from
+`git fetch upstream && git log upstream/master`.
+
+`master` still sits at upstream's `4b817ea`, untouched.
 
 ### Why the fork is ported, not merged
 
@@ -681,7 +754,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~1b~~ | ~~Extend `debug_method` to take an argument~~ **done** | low |
 | ~~2~~ | ~~Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel~~ **done** — all three confirmed; GPU TGP closed as firmware-blocked | medium |
 | ~~3~~ | ~~`platform_profile` handler~~ **done** — over fan policy, not GPU power | low |
-| 4 | Writable `pwm1`/`pwm2` — **two mechanisms tried and rejected**, read scaling kept | medium |
+| 4 | Writable `pwm1`/`pwm2` — **two mechanisms tried and rejected**, read scaling kept. **The only functional gap left.** | medium |
 | ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** — both keys scan in and are bound in KDE | low |
 | 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
 
@@ -952,9 +1025,32 @@ supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 
 ## Open decisions
 
-- **Upstreaming** — the probe fixes, the `gpu_boost` oops (#45) and the duty
-  clamp (#46) are all plausibly acceptable upstream, which would reduce rebase
-  burden.
+- **Which Step 4 lead to try next**, and whether a write-side debug node should
+  land before it. See the Step 4 section.
+
+## Decided: upstreaming comes last
+
+Patches go to `tangalbert919/gigabyte-laptop-wmi` **after** the goals here are
+met, not incrementally. The fork exists at `origin` so the work has somewhere to
+live meanwhile.
+
+Sorted by how likely each is to be accepted, for when that time comes:
+
+| Candidate | Why it should go up |
+|---|---|
+| `gpu_boost_store()` oops (#45) | Dereferenced `gigabyte` before assigning it; any write oopsed the kernel |
+| Duty clamp (#46) | Duties above `FAN_DUTY_MAX` stop the fans on an AERO 17-XA |
+| Void-WMBD tolerance | `set_devstate()` reported `-EINVAL` for a third of this firmware's setters; see below |
+| Probe hardening | One absent optional method no longer aborts the whole module |
+| `memcpy` clamp | Size-aware getter; the old `void *` hid a five-byte caller |
+| `pwm_enable` enum | Upstream had `AUTO` and `MANUAL` the wrong way round vs the hwmon ABI |
+| `hwmon_read()` error propagation | Returned success with `*val` unwritten on a failed read |
+| NULL-safe DMI family match | Four unchecked `strcmp`s on `DMI_PRODUCT_FAMILY` |
+| `fan_lock` | Three entry points doing read-modify-write on `fan_mode` unserialised |
+
+The rename, the `fan_preset` ring and the hotkey input device are this fork's
+own direction and should **not** be offered upstream without asking first — the
+rename in particular would break every downstream packaging reference.
 
 ## Settled decisions
 
@@ -1170,6 +1266,26 @@ GiMate keeps `KEY_PROG1`, so it stays bindable.
 would give the key the three battery profiles, which is the opposite of what
 this is for.
 
+**Verified on hardware**, 22 Oct 2025, on the installed build:
+
+```
+$ journalctl -k | grep "Mode key"
+gigabyte_laptop: Mode key: fan preset normal
+
+$ cat fan_preset   -> normal
+$ cat fan_mode     -> 0          (normal, as the preset says)
+$ cat platform_profile -> balanced
+```
+
+Note the last line: the profile reads `balanced`, which maps to silent, yet the
+fans are on normal. That is the precedence rule working — the preset is pinned,
+so the profile is recorded and not applied.
+
+The notification channel is `sysfs_notify()` on `fan_preset`, plus the
+`pr_info` above. There is no D-Bus or uevent signal; a desktop OSD would
+`poll()` the attribute. `platform_profile_notify()` is deliberately not called,
+because the profile has not changed — only which axis is in charge of the fans.
+
 **Precedence rule, so profiles and CoolerControl do not fight.** The hwmon ABI
 carries the state, and this driver maps it from `fan_mode`:
 
@@ -1201,6 +1317,27 @@ performance mode is write-only exactly as the ASL said. `0xE7` does not echo,
 so dynamic boost really is implemented here, and it currently reads `0` — off.
 That also validates the sentinel technique itself: the two cases are now
 distinguishable, which they were not before Step 1b.
+
+### Ending turbo by changing the fan mode — validated on hardware
+
+Separate from `fan_turbo 0`, and the path `end_fan_turbo()` exists for. With
+`fan_custom_speed` at **100** beforehand:
+
+```
+echo 1 > fan_turbo     # fans to full
+echo 4 > fan_mode      # ends turbo through the mode change
+fan_custom_speed -> 100   (not 229)
+fan_turbo        -> 0
+```
+
+The duty came back rather than staying at `FAN_DUTY_MAX`. That mattered
+specifically for **mode 4**, auto-maximum, which programs the fans straight
+from `fan_custom_speed` — so before the fix, asking for mode 4 while turbo was
+on silently inherited turbo's duty. Modes 0-2 ignore the duty and hid the bug.
+
+The run also produced `Could not clear the turbo fan bit`, which turned out to
+be the void-WMBD problem above rather than a real failure. The clear had
+worked.
 
 ### `fan_turbo` works — validated on hardware
 

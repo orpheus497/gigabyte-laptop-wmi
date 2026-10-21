@@ -286,12 +286,28 @@ static int gigabyte_laptop_set_devstate(u32 method_id, u32 arg2, int *result)
 		return -EIO;
 
 	obj = buffer.pointer;
-	if (obj && obj->type == ACPI_TYPE_INTEGER)
+
+	/*
+	 * A third of this firmware's WMBD cases assign their EC field and fall
+	 * off the end of the Switch with no Return -- 0x51, 0x7D and 0xED among
+	 * the ones written here. The assignment has already happened by then, so
+	 * an empty reply is a completed write with nothing to report, not a
+	 * failure. Reporting it as one made perf_mode and gpu_boost return
+	 * -EINVAL on every write and never cache the value they had just set.
+	 *
+	 * A buffer reply is different: WMBD ends in Default { Return (Arg2) },
+	 * and Arg2 arrives as a 4-byte buffer, so getting one back means the
+	 * firmware has no case for this ID at all.
+	 */
+	if (!obj) {
+		*result = 0;
+	} else if (obj->type == ACPI_TYPE_INTEGER) {
 		*result = obj->integer.value;
-	else {
+	} else {
 		kfree(obj);
-		return -EINVAL;
+		return -EOPNOTSUPP;
 	}
+
 	kfree(obj);
 	return 0;
 }
@@ -642,8 +658,9 @@ static int end_fan_turbo(struct gigabyte_laptop_wmi *gigabyte)
 		return ret;
 
 	// Best effort, as in fan_turbo_store: the bit is not what holds the fans
-	if (gigabyte_laptop_set_devstate(FAN_TURBO, 0, &output))
-		pr_warn("Could not clear the turbo fan bit\n");
+	ret = gigabyte_laptop_set_devstate(FAN_TURBO, 0, &output);
+	if (ret)
+		pr_warn("Could not clear the turbo fan bit (%d)\n", ret);
 
 	gigabyte->fan_turbo = 0;
 	return 0;
