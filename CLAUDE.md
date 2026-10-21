@@ -88,16 +88,113 @@ blocked in code), `has_three_fans = has_four_fans = 0` → **2 fans, 3 temps,
   **no USB `0414:8105` keyboard** on this unit, so both published Gigabyte RGB
   tools ([Luminous418 LampArray](https://github.com/Luminous418/Gigabyte-Gaming-A16-Linux-KB-Drivers),
   [GigaMate pyusb](https://github.com/goodeesh/GigaMate)) cannot work here.
-- **RGB/hotkey candidate channel:** `/sys/bus/hid/devices/0018:6243:0001.0003`
-  → `/dev/hidraw2`, ACPI path `\_SB_.I2CB.ECSH`, vendor usage page `0xFF00`,
-  report ID `0x0B`, symmetric 41-byte in/out, bound only to `hid-generic`.
-  Protocol undocumented.
+- **The RGB/hotkey channel is an ENE Technology embedded controller.**
+  `/sys/bus/hid/devices/0018:6243:0001.0003` → `/dev/hidraw2`, ACPI path
+  `\_SB_.I2CB.ECSH`, vendor usage page `0xFF00`, report ID `0x0B`, symmetric
+  41-byte in/out, bound only to `hid-generic`. Identified from firmware: the
+  AMD DSDT declares `_HID "1025174B"` with `_CID "PNP0C50"` (HID-over-I2C) at
+  I²C address `0x05` on `\_SB.I2CB`, and the Intel CWH declares the *same*
+  device as `_HID "ENES6243"`. ENE Technology is Taiwan stock code 6243, which
+  is also the HID vendor ID `0x6243`. So this is an ENE EC exposed as i2c-HID.
+  The report protocol is still undocumented — nobody has driven RGB on a
+  non-USB Gigabyte keyboard.
 - **No platform profile is registered.** `/sys/class/platform-profile/` exists
   but is **empty**, and `/sys/firmware/acpi/platform_profile` does not exist.
   The slot is free — see "Power profiles" below.
-- **`GBT0005:00`** is an unbound Gigabyte ACPI device (also present on machines
-  as old as the Aero 15XV8). Windows loads a vendor driver for it. Purpose
-  unknown; needs a DSDT dump to investigate. Neither bundled `.dsl` contains it.
+- **`GBT0005:00` is resolved: ignore it.** It is `Device (GAPD)` under `\_SB`,
+  and its `_STA` exists for side effects rather than to report presence. On the
+  AMD firmware it latches the dGPU off when the EC says it is disabled, then
+  returns `Zero`:
+
+  ```asl
+  Name (_HID, EisaId ("GBT0005"))
+  Method (_STA, 0, NotSerialized) {
+      If ((^^PCI0.AMW0.RXCM (0xC7) == One)) {
+          ^^PCI0.GPP0.PG00._OFF ()
+          ^^PCI0.GPP0.WMOF = One
+      }
+      Return (Zero)
+  }
+  ```
+
+  Linux enumerates any `_HID`-bearing node even when `_STA` reports absent,
+  which is exactly why it appears with no driver. **There is nothing for a
+  Linux driver to do with it here.** (The Intel CWH variant can return `0x0F`
+  and is also a notify target via `_Q63` → `Notify (GAPD, 0xCF)`, which is what
+  the Windows UMDF driver listens to. The AMD path has neither.)
+
+## Firmware reference
+
+`GAMING-A16-3VH-DSDT.dsl` in this repo is a public DSDT from a **GAMING A16
+3VH** — AMD, same `GBTUACPI` firmware generation, and the closest sibling with
+public firmware. Its AML is **41,990 bytes** against this machine's **41,169**,
+so it is very nearly the same table. Use it to look up method bodies and EC
+field names instead of guessing.
+
+**It is not this machine's firmware.** No public DSDT or hw-probe exists for any
+`5TH`/`GA65TH` unit. Treat everything below as *probable on BIOS FB03*, and
+verify with `debug_method` before relying on it.
+
+### Method IDs present in the AMD sibling
+
+Verified by reading the `Switch` case lists directly:
+
+```
+WMBD (write): 02 03 46 47 50 51 57 61 63 64 65 66 67 68 6A 6B 70 71 7D 80
+              87 88 A1 A3 C4 C7 C9 CA CB D9 E6 E7 ED F6 FA
+WMBC (read):  46 47 50 57 61 63 64 65 67 68 6A 6B 6F 70 71 7D 80 87 88 A1
+              A2 A3 C4 C7 C9 CA D9 E1 E2 E3 E4 E5 E6 E7 EB EF F6
+```
+
+All three ported IDs are present on **AMD** firmware, which is the main thing
+Phase 2 needed: `0xED`, `0xE7`, `0x7D`.
+
+Asymmetries that matter:
+
+| ID | Node | Firmware behaviour |
+|---|---|---|
+| `0xED` | `perf_mode` | **WMBD only — write-only.** No WMBC case, so the mode in effect cannot be read back. |
+| `0xE7` | `dynamic_boost` | WMBD writes, WMBC returns `NPCF.DBAC`. Writing `0` sets `DBAC = 1`, so **DBAC is already in the node's sense** — invert on write only, never on read. |
+| `0x7D` | `fan_turbo` | WMBD writes and WMBC reads `EC0.TFAN`. Confirms `0x7D` is a plain EC bit, consistent with it not holding the fans on its own. |
+
+Because `perf_mode` is write-only, the `platform_profile` handler's `probe`
+must **write** a known profile to make its cached value truthful — the same
+thing `dell-pc.c` does with `thermal_set_mode()` in its probe.
+
+### Method IDs we are not using yet
+
+Worth knowing these exist on AMD firmware, all verified in both directions
+unless noted:
+
+| ID | EC field | What it is |
+|---|---|---|
+| `0xF6` | `EC0.KBLL` (8-bit) | **Keyboard backlight brightness**, read *and* write |
+| `0xD9` | `EC0.KBAT` (1-bit) | Keyboard backlight auto/timeout |
+| `0xC9` | — | Fn-lock |
+| `0xC7` | `EC0.MUTE` | Mute status |
+| `0x87` / `0x88` | — | Power LED / battery LED |
+| `0xE6` | — | dGPU mux (0 dynamic, 1 discrete, 2 MS-Hybrid) |
+| `0x63` | `WXCM 0xD2`–`0xD6` | Five bytes in, five back. RGB-shaped, see Step 6 |
+| `0x03` | — | Fires the WMI event synthetically: `WMBC(0, 0x03, n)` → `Notify (AMW0, 0xD2)` |
+
+`0xF6` is the significant one: **keyboard backlight brightness is reachable
+over WMI on AMD A16 firmware**, independent of the ENE colour protocol. Nowng's
+AERO X16 fork already implements it as a `keyboard_brightness` node.
+
+### The 0xD2 event chain, decoded
+
+All three sibling DSDTs implement the same path, which answers what the event
+carries:
+
+```
+EC query _Q45 → SMGR(WEVN, WEVS)
+SMGR(a,b)     → DEVS[0]=a, DEVS[1]=b ; AMW0.WMBC(0, 0x03, a)
+WMBC(_,0x03,_)→ Notify (AMW0, 0xD2)
+_WED(0xD2)    → returns DEVS, a 4-byte buffer {WEVN, WEVS, 0xBB, 0xCC}
+```
+
+So byte 0 is the EC's event number and byte 1 its state. `WEVS`/`WEVN` are EC
+fields at offsets `0x01`/`0x02` of the `PECM` region, at `0xFC7E0800` on AMD.
 
 ## Power profiles
 
@@ -352,15 +449,53 @@ a separate project rather than a blocker.
 **GiMate diagnosis order** (stop `input-remapper` first — it clones the keyboard
 into `input21`/`input22` and will confuse scancode capture):
 
-1. i8042 scancode — `showkey --scancodes` / `evtest /dev/input/event1`. If it
-   emits an unmapped scancode, `keyd` or a udev hwdb entry solves it with no
-   kernel work.
+1. i8042 scancode — `showkey --scancodes` / `evtest /dev/input/event1`.
+   **Look specifically for `KEY_KPEQUAL` (117).** Two independent sources agree
+   the GiMate key presents as "Keypad Equals": the AERO X16 1VH RGB project
+   reports scancode `0x70067` (HID keyboard usage `0x67`) → `KEY_KPEQUAL`, and
+   the Windows GiHATE project reports PS/2 set-1 scan `0x59` / `VK_CLEAR`,
+   which is the same physical key. *Reported, not verified on this unit.*
+   If it emits a usable scancode, `keyd` or a udev hwdb entry solves it with no
+   kernel work — and there is currently **no hwdb entry for any modern Gigabyte
+   laptop** (`60-keyboard.hwdb` has only the ancient `U2442` and `i1520M`).
 2. WMI notify `0xD2` on `ABBC0F72` — `acpi_listen`. Strong prior: the bundled
    AORUS DSDT fires `Notify (AMW0, 0xD2)` from inside `WMBC`
    (`AORUS-17X-VF-DSDT.dsl:125336`). The driver defines `WMI_EVENT` and never
    uses it — no `wmi_install_notify_handler`, no input device, no
    `sparse_keymap`.
 3. The `\_SB_.I2CB.ECSH` i2c-HID pipe.
+
+On USB Gigabyte models the vendor-HID path carries report ID `0x04` with
+payload `00 00 84` = Mode key and `00 00 91` = GigaMate key (GigaMate's
+`0414_8105.json`, corroborated byte-for-byte by GiHATE). Those handlers are all
+hard-wired to USB `0414:8105` interface 2, so **none of them work here** —
+GigaMate's README explicitly carves out "laptops without a Gigabyte USB
+keyboard (e.g. GIGABYTE GAMING A16)". No project anywhere handles this key on a
+PS/2 Gigabyte keyboard.
+
+### Step 6 leads, in order of cost
+
+1. **`0xF6` / `KBLL` over WMI** — brightness only, but it is read/write, in
+   firmware, on AMD, and needs no reverse engineering. Do this first.
+2. **`WMBD 0x63`** — writes five bytes to `WXCM 0xD2`–`0xD6`, `WMBC 0x63` reads
+   them back. GigaMate's `research.md` lists this under "What Didn't Work" on an
+   AERO X16 because it "doesn't reach the USB RGB controller" — but **this
+   machine has no USB RGB controller**, the keyboard is behind the ENE part.
+   Whether it reaches the ENE controller on a PS/2 unit is untested by anyone.
+   Cheap experiment, genuinely unknown outcome. *Hypothesis, not a finding.*
+3. **The 41-byte `0x0B` pipe on `/dev/hidraw2`.** The closest precedent is the
+   ASUS ITE5570 family (`vrgb` issue #1), where firmware-mode report `0x0B` and
+   a separate colour report `0x05` are used over i2c-HID, and one reporter
+   needed to "arm" the controller on a cold boot by writing vendor-page feature
+   reports. That two-report shape is the most likely form here. `hid-feature`
+   from `hidutils` lists vendor-page fields usefully.
+
+Dead ends, confirmed: `hid-lamparray` is at v7 upstream (2026-10-20, not
+merged) but keys on usage page `0x59`, and ours is `0xFF00`. OpenRGB's
+LampArray detector is `REGISTER_HID_DETECTOR_PU_ONLY(..., 0x59, 0x01)` — also
+page-gated, so it will not see this device. Its `GigabyteAorusLaptopController`
+is USB-only on page `0xFF01` with an 8-byte report `0x08`. `opengigabyte`
+supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 
 ## Open decisions
 
