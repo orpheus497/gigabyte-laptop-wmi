@@ -41,6 +41,24 @@ if [ "$(id -u)" -ne 0 ]; then
 	exit 1
 fi
 
+# /proc/modules is the authoritative list of resident modules. Read it with no
+# pipeline: `lsmod | grep -q` looks right but fails under pipefail, because
+# grep -q exits on the first match and lsmod then dies of SIGPIPE.
+module_loaded() {
+	local m
+	while read -r m _; do
+		[ "$m" = "$1" ] && return 0
+	done < /proc/modules
+	return 1
+}
+
+# rmmod, not modprobe -r: modprobe resolves a module through its file, so it
+# reports "not found" for a module that is resident after its .ko has gone.
+module_unload() {
+	module_loaded "$1" || return 0
+	rmmod "$1"
+}
+
 cd "$(dirname "$0")/.."
 
 # The driver was called aorus-laptop until the rename. Anything left from that
@@ -49,14 +67,12 @@ cd "$(dirname "$0")/.."
 echo "== Removing the pre-rename aorus-laptop install, if present =="
 # Both modules claim the same WMI devices and poke the same EC, so refuse to
 # continue while the old one is still resident rather than install alongside it.
-if [ -d /sys/module/aorus_laptop ]; then
-	if ! modprobe -r aorus_laptop; then
-		echo "Could not unload the old aorus_laptop module." >&2
-		echo "It claims the same WMI devices as gigabyte-laptop, so installing" >&2
-		echo "alongside it would leave two drivers on one EC. Close whatever is" >&2
-		echo "using it, or reboot, then run this again." >&2
-		exit 1
-	fi
+if ! module_unload aorus_laptop; then
+	echo "Could not unload the old aorus_laptop module." >&2
+	echo "It claims the same WMI devices as gigabyte-laptop, so installing" >&2
+	echo "alongside it would leave two drivers on one EC. Close whatever is" >&2
+	echo "using it, or reboot, then run this again." >&2
+	exit 1
 fi
 while read -r ver; do
 	[ -n "$ver" ] || continue
@@ -110,13 +126,11 @@ echo "== Loading =="
 # If the old module is in use the removal fails, and modprobe below would then
 # be a no-op on the already-loaded copy. Say so rather than imply the new build
 # is live.
-if [ -d /sys/module/gigabyte_laptop ]; then
-	if ! modprobe -r gigabyte_laptop; then
-		echo "WARNING: could not unload the running gigabyte_laptop." >&2
-		echo "         The previously loaded module stays active until you" >&2
-		echo "         unload it manually or reboot. The new build is installed" >&2
-		echo "         but NOT running." >&2
-	fi
+if ! module_unload gigabyte_laptop; then
+	echo "WARNING: could not unload the running gigabyte_laptop." >&2
+	echo "         The previously loaded module stays active until you" >&2
+	echo "         unload it manually or reboot. The new build is installed" >&2
+	echo "         but NOT running." >&2
 fi
 modprobe gigabyte-laptop || echo "WARNING: modprobe gigabyte-laptop failed" >&2
 
@@ -135,7 +149,7 @@ echo
 
 # Say plainly whether the code just built is the code now running. Getting this
 # wrong silently costs a debugging session chasing symptoms of an old build.
-if [ ! -d /sys/module/gigabyte_laptop ]; then
+if ! module_loaded gigabyte_laptop; then
 	echo "WARNING: the module is installed but not loaded." >&2
 	echo "         Load it with: modprobe gigabyte-laptop" >&2
 	exit 1
