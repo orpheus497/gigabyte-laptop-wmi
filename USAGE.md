@@ -248,3 +248,41 @@ cat /sys/devices/platform/gigabyte_laptop/debug_method
 ```
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/debug_method`
+
+## Power profiles
+
+The driver registers a `platform_profile` handler, so the desktop's power
+profile selector drives the fan policy:
+
+| Profile | Fan mode |
+|---|---|
+| `quiet` | silent |
+| `balanced` | normal |
+| `performance` | gaming |
+
+**Nodes:**
+
+```text
+/sys/class/platform-profile/platform-profile-0/profile
+/sys/firmware/acpi/platform_profile
+```
+
+The second is the aggregate the ACPI core maintains, and is what `tuned` and
+power-profiles-daemon write.
+
+**Example:** To switch to the performance fan policy:
+
+```sh
+echo 'performance' | sudo tee /sys/firmware/acpi/platform_profile
+```
+
+A profile switch deliberately does **nothing to the fans** while they are not
+under embedded-controller control — that is, while the fan mode is the custom
+curve, a held duty, or full speed. Those are all deliberate choices, and a
+profile arriving from the desktop should not override them. The profile is still
+remembered and takes effect the next time it is set once the fans are back under
+controller control.
+
+On Gigabyte Gaming models this selects fan policy only. It does not change the
+discrete GPU's power budget: that is governed by the NVIDIA platform controller
+interface rather than by the embedded controller.

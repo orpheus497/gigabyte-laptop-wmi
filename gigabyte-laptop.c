@@ -16,6 +16,7 @@
 #include <linux/input/sparse-keymap.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
+#include <linux/platform_profile.h>
 #include <linux/module.h>
 #include <linux/wmi.h>
 #include <linux/string.h>
@@ -91,7 +92,10 @@ struct fan_curve_data {
 struct gigabyte_laptop_wmi {
 	struct platform_device *pdev;
 	struct device *hwmon_dev;
+	struct device *ppdev;
 	struct fan_curve_data fan_curve;
+
+	enum platform_profile_option profile;
 
 	int fan_mode;
 	int fan_custom_speed;
@@ -1231,6 +1235,102 @@ static int check_sku(const char *dmi_sku, const char *end) {
 	return -1;
 }
 
+/* Platform profile ***************************************/
+
+/*
+ * Profiles select a fan policy, not a GPU power budget. The budget was the
+ * original plan, but this firmware's TGP path is unreachable: nvidia-powerd
+ * cannot read the SBIOS power-limit table, so the NPCF values perf_mode writes
+ * are never applied. Fan policy is entirely within the EC and works.
+ *
+ * tuned already asks for these three names, so the desktop drives them with no
+ * further configuration.
+ */
+static int gigabyte_laptop_profile_to_fan_mode(enum platform_profile_option profile)
+{
+	switch (profile) {
+		case PLATFORM_PROFILE_QUIET:
+			return 1; // silent
+		case PLATFORM_PROFILE_BALANCED:
+			return 0; // normal
+		case PLATFORM_PROFILE_PERFORMANCE:
+			return 2; // gaming
+		default:
+			return -EOPNOTSUPP;
+	}
+}
+
+static int gigabyte_laptop_profile_probe(void *drvdata, unsigned long *choices)
+{
+	struct gigabyte_laptop_wmi *gigabyte = drvdata;
+
+	set_bit(PLATFORM_PROFILE_QUIET, choices);
+	set_bit(PLATFORM_PROFILE_BALANCED, choices);
+	set_bit(PLATFORM_PROFILE_PERFORMANCE, choices);
+
+	// Start from the fan mode the firmware is already in, as dell-pc.c does
+	switch (gigabyte->fan_mode) {
+		case 1:
+			gigabyte->profile = PLATFORM_PROFILE_QUIET;
+			break;
+		case 2:
+			gigabyte->profile = PLATFORM_PROFILE_PERFORMANCE;
+			break;
+		default:
+			gigabyte->profile = PLATFORM_PROFILE_BALANCED;
+			break;
+	}
+	return 0;
+}
+
+static int gigabyte_laptop_profile_get(struct device *dev,
+				enum platform_profile_option *profile)
+{
+	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+
+	*profile = gigabyte->profile;
+	return 0;
+}
+
+static int gigabyte_laptop_profile_set(struct device *dev,
+				enum platform_profile_option profile)
+{
+	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+	int ret, mode;
+
+	mode = gigabyte_laptop_profile_to_fan_mode(profile);
+	if (mode < 0)
+		return mode;
+
+	gigabyte->profile = profile;
+
+	/*
+	 * Remember the choice but leave the fans alone when the user holds
+	 * them. A custom curve, a held duty and full speed are all deliberate,
+	 * and a profile switch arriving from the desktop should not pull them
+	 * out from under whatever set them. The profile applies on the next
+	 * switch after the fans are back under EC control.
+	 */
+	if (gigabyte->fan_mode > 2)
+		return 0;
+
+	if (gigabyte->fan_mode == mode)
+		return 0;
+
+	ret = set_fan_mode(gigabyte, fan_modes[mode]);
+	if (ret)
+		return ret;
+
+	gigabyte->fan_mode = mode;
+	return 0;
+}
+
+static const struct platform_profile_ops gigabyte_laptop_profile_ops = {
+	.probe = gigabyte_laptop_profile_probe,
+	.profile_get = gigabyte_laptop_profile_get,
+	.profile_set = gigabyte_laptop_profile_set,
+};
+
 /* Hotkey events ******************************************/
 
 /*
@@ -1694,6 +1794,19 @@ static int __init gigabyte_laptop_init(void)
 	if (result) {
 		pr_err("Probe failed\n");
 		goto fail_probe;
+	}
+
+	/*
+	 * Registered after probe, so the fan mode it syncs from has been read.
+	 * devm ties it to the platform device, so platform_device_unregister()
+	 * in exit releases it.
+	 */
+	gigabyte->ppdev = devm_platform_profile_register(&gigabyte->pdev->dev,
+			GIGABYTE_LAPTOP_FILE, gigabyte, &gigabyte_laptop_profile_ops);
+	if (IS_ERR(gigabyte->ppdev)) {
+		pr_warn("Could not register platform profile (%ld)\n",
+			PTR_ERR(gigabyte->ppdev));
+		gigabyte->ppdev = NULL;
 	}
 
 	/*
