@@ -90,7 +90,7 @@ rm -rf $RPM_BUILD_ROOT
 
 
 %changelog
-* Tue Oct 21 2025 Albert Tang <tangalbert919@yahoo.com> - 0.2.0-2
+* Thu Oct 22 2026 Albert Tang <tangalbert919@yahoo.com> - 0.2.0-2
 - Rename the driver from aorus-laptop to gigabyte-laptop
 
 * Fri Nov 1 2024 Albert Tang <tangalbert919@yahoo.com> - 0.1.0

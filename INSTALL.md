@@ -16,8 +16,16 @@ This module can be installed using DKMS. You can download the driver tarball fro
 ```
 dkms ldtarball driver.tar.gz
 dkms install gigabyte-laptop/<version>
-# For loading at boot:
+```
+
+`dkms ldtarball` unpacks into the DKMS tree, not the current directory, so the
+`/etc/modules-load.d` entry has to come out of the archive or the installed
+source. Either of these, if you want loading at boot:
+```
+tar -xzf driver.tar.gz gigabyte-laptop.conf
 sudo install -m 644 gigabyte-laptop.conf /etc/modules-load.d/
+# or, once dkms install has run:
+sudo install -m 644 /usr/src/gigabyte-laptop-<version>/gigabyte-laptop.conf /etc/modules-load.d/
 ```
 
 If you have this repository checked out locally, the simplest route is the

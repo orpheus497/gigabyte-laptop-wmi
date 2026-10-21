@@ -45,8 +45,14 @@ The fan preset decides *what* chooses the fan mode. It takes a name:
 | `gaming` | pin gaming (`fan_mode` 2) |
 
 While the preset is anything other than `auto`, a power profile change is
-remembered but does not touch the fans. Selecting `auto` again hands the
-decision back to the profile and applies it immediately.
+remembered but does not touch the fans. Selecting `auto` again hands the decision
+back to the profile.
+
+`auto` applies the profile **immediately only while the fan mode is 0, 1 or 2**.
+Above that — the custom curve, a held duty, or full speed — it defers instead,
+leaving the fans where they are, because those are deliberate states that
+outrank a policy selection. The profile then takes effect on the next switch
+once the fans are back on one of the three embedded-controller presets.
 
 **No power profile maps to gaming mode**, because it is the loudest preset and
 does not belong on a battery profile. Select it through this node, with the Mode

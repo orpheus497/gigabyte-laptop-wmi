@@ -60,9 +60,23 @@ not transferable without checking:
 
 Two consequences:
 
-- **DMI matching is safe across gens.** The driver's match table keys on
-  `DMI_BOARD_VENDOR` + `DMI_PRODUCT_FAMILY` (`GIGABYTE GAMING`), never on the
-  gen suffix, so the gate passes regardless.
+- **DMI matching is safe across gens, and deliberately broad.** The driver's
+  match table keys on `DMI_BOARD_VENDOR` + `DMI_PRODUCT_FAMILY`
+  (`GIGABYTE GAMING`), never on the gen suffix, so the gate passes regardless.
+  Narrowing it to validated SKUs has been suggested and is **wrong for this
+  project**: upstream supports a family, not one machine, and a `GA65TH`-only
+  entry would drop every other Gigabyte Gaming model.
+
+  It is safe because an absent method now degrades harmlessly in both
+  directions, which is understood rather than hoped for. A **read** of an
+  unimplemented ID hits `WMBC`'s `Default { Return (Arg2) }` and echoes the
+  argument, and every such read in probe is non-fatal since Step 1. A **write**
+  hits the same `Default` in `WMBD` and simply does not land. So on a
+  generation lacking `0xE7`, `0xED` or `0x7D`, the nodes appear and do nothing
+  — which is the same outcome as on this machine, where `0xED` is write-only
+  and the TGP path is firmware-blocked. The one real risk would be a method ID
+  that means something *different* on another generation, and nothing seen so
+  far suggests the Gaming block is reused that way.
 - **Method IDs are not safe across gens.** `0xED`, `0xE7` and `0x7D` arrived
   validated only on `CWH` — a different generation on Intel, where this is AMD
   Rembrandt. **All three have since been checked on `GA65TH`** and are recorded
@@ -174,7 +188,7 @@ Neither is committed here, and `*.dat` being gitignored means a stray
 serial number live in SMBIOS/DMI rather than in ACPI, and are not in these
 files either.
 
-**Audited 22 Oct 2025, working tree and full history, and clean.** No `MSDM`,
+**Audited 22 Oct 2026, working tree and full history, and clean.** No `MSDM`,
 `SLIC` or `SLIT`; no serial number, asset tag or MAC address; no keys,
 credentials or tokens; and no username or hostname anywhere in tracked content.
 Two things look alarming in a naive grep and are not:
@@ -1390,7 +1404,7 @@ GiMate keeps `KEY_PROG1`, so it stays bindable.
 would give the key the three battery profiles, which is the opposite of what
 this is for.
 
-**Verified on hardware**, 22 Oct 2025, on the installed build:
+**Verified on hardware**, 22 Oct 2026, on the installed build:
 
 ```
 $ journalctl -k | grep "Mode key"

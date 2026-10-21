@@ -80,6 +80,6 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Wed Oct 22 2025 Albert Tang <tangalbert919@yahoo.com> - 0.2.0-2
+* Thu Oct 22 2026 Albert Tang <tangalbert919@yahoo.com> - 0.2.0-2
 - Rename the driver from aorus-laptop to gigabyte-laptop
 - Ship the /etc/modules-load.d entry, which has no modalias to autoload it

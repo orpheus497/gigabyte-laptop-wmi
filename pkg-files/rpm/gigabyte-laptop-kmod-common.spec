@@ -31,5 +31,5 @@ install -p -m 0644 -D %{SOURCE0} %{buildroot}%{_sysconfdir}/modules-load.d/gigab
 %{_sysconfdir}/modules-load.d/gigabyte-laptop.conf
 
 %changelog
-* Wed Oct 22 2025 Albert Tang <tangalbert919@yahoo.com> - 0.2.0-2
+* Thu Oct 22 2026 Albert Tang <tangalbert919@yahoo.com> - 0.2.0-2
 - Rename the driver from aorus-laptop to gigabyte-laptop
