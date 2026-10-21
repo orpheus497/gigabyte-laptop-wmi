@@ -555,12 +555,14 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   and logs `ASUS Management GUID not found`. ASUS's Eee PC interface and
   Gigabyte's AMW0 share the same AMI-derived GUID block. This must be
   blacklisted before working on the GiMate button.
-- **Kernel cmdline carries leftovers from earlier fan-control attempts:**
-  `acpi_osi=Linux acpi_enforce_resources=lax`. The latter relaxes ACPI resource
-  conflict checks (needed for `ec_sys`-style direct EC poking, not for this
-  driver). The former forces the firmware's Linux `_OSI` path and may be hiding
-  vendor functionality gated on `_OSI("Windows ...")` — a live variable for the
-  GiMate button.
+- **Kernel cmdline leftovers, and `acpi_osi=Linux` is now implicated.**
+  `acpi_osi=Linux acpi_enforce_resources=lax` are both leftovers from the
+  earlier fan-control attempts. `acpi_enforce_resources=lax` relaxes ACPI
+  resource conflict checks, which `ec_sys`-style direct EC poking needed and
+  this driver does not. `acpi_osi=Linux` forces the firmware's Linux `_OSI`
+  branch, and is the leading explanation for `nvidia-powerd` failing to read
+  the SBIOS power-limit table — see the `perf_mode` findings under Step 2.
+  Remove both.
 
 ## Phase status
 
@@ -928,13 +930,80 @@ so dynamic boost really is implemented here, and it currently reads `0` — off.
 That also validates the sentinel technique itself: the two cases are now
 distinguishable, which they were not before Step 1b.
 
-Still outstanding: the write side. `perf_mode` 0/1/2 against
-`nvidia-smi -q -d POWER` (settles **D3**), `dynamic_boost` direction against the
-same (settles **D4** — the ASL proves the node round-trips but not which way
-means "on"), and `fan_turbo` for roughly 3 seconds on AC while idle, watching
-`fan1_input`/`fan2_input` and confirming the fans resume on disable. The short
-burst is deliberate: that path touches the duty ceiling which stopped fans on
-the AERO 17-XA (upstream #46).
+### `fan_turbo` works — validated on hardware
+
+```
+before:  pwm=22  fan1=1657  fan2=1657
+on:              fan1=5263  fan2=5263
+off:     fan_mode restored to 1, fan_custom_speed to 0
+```
+
+**~5250 RPM**, which is this chassis's figure; the fork's CWH number was ~6500,
+so porting its `>= 6000` assertion would have produced a false failure. No fan
+stop at the `0xE5` duty ceiling, and the pre-turbo state came back on its own.
+A 15-second load afterwards confirmed the fans still track normally
+(44 °C → 88 °C, pwm 0 → 30, both fans to ~2300 RPM). The zero readings right
+after turbo were the usual idle semi-passive behaviour at 44 °C, not a fault.
+
+### `perf_mode`: our write lands, but nothing applies it
+
+`perf_mode` 0/1/2 leaves `enforced.power.limit` at **30 W** throughout, with
+the GPU at `P8`. That is *not* evidence the method does nothing. The chain is:
+
+```
+WMBD 0xED -> NPCF.ATPP etc. -> Notify (NPCF, 0xC0) -> nvidia-powerd applies TGP
+```
+
+and the last link is broken on this machine, independently of us:
+
+```
+14:44:41  nvidia-powerd: ERROR! DC power limits table is not supported
+          ... 22x "Failed to get SysPwrLimitGetInfo" this boot
+          ... "Client (presumably SBIOS) has requested to disable Dynamic Boost"
+```
+
+Those failures start **at boot**, long before any `perf_mode` write. Three
+things follow:
+
+- **Our side is fine.** The kernel log shows no ACPI error or exception for the
+  `0xED` call, so the AML executes and the `NPCF` objects resolve. `NPCF` itself
+  is only `External (_SB_.NPCF, UnknownObj)` in the DSDT — it is defined in an
+  SSDT.
+- **The notify is reaching `nvidia-powerd`**: its retry bursts timestamp
+  exactly with the writes. It is being poked and failing, not ignoring us.
+- **`SysPwrLimitGetInfo` is an SBIOS call**, so the TGP table the daemon needs
+  is not being handed over.
+
+**Prime suspect: `acpi_osi=Linux` on the kernel command line.** NVPCF and other
+vendor SBIOS interfaces are routinely gated behind `_OSI("Windows ...")`, and
+forcing the Linux branch is a plausible reason for the firmware not to populate
+the power-limit table. It is also pure leftover from the earlier fan-control
+attempts and serves nothing here. Removing it is both the cleanup and the test:
+
+```sh
+sudo grubby --update-kernel=ALL --remove-args="acpi_osi=Linux acpi_enforce_resources=lax"
+# reboot, then:
+journalctl -u nvidia-powerd -b | head
+nvidia-smi --query-gpu=enforced.power.limit --format=csv,noheader
+```
+
+`acpi_enforce_resources=lax` goes with it as equally dead weight; only
+`acpi_osi` plausibly affects this, so a change is still attributable.
+
+**Read the limit with `enforced.power.limit`.** `power.limit` returns `[N/A]`
+on this driver — it maps to "Requested Power Limit". The useful numbers are
+`enforced.power.limit` 30 W, `power.default_limit` 50 W,
+`power.max_limit` 85 W, which matches the 30/50/85 the three modes are expected
+to select.
+
+**D3 is therefore not resolved**, and the honest state is "blocked on the
+NVPCF/SBIOS path", not "`perf_mode` does not work".
+
+### `dynamic_boost` round-trips, direction still unknown
+
+`0 -> 1 -> 0` reads back correctly, so the node and the inversion are right.
+Which direction means "boost on" cannot be settled while the TGP is pinned, so
+**D4 is blocked on the same thing** as D3.
 
 ### Other
 
