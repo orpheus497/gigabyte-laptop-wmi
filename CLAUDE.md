@@ -421,8 +421,15 @@ that one. The canonical version is **0.2.0**, per both RPM specs and the
 PKGBUILD.
 
 ```sh
-sudo bash scripts/install-dkms.sh            # or --autoload for boot loading
+sudo bash scripts/install-dkms.sh            # or --no-autoload to skip boot loading
 ```
+
+**Autoload is on by default and should stay that way.** The module registers its
+platform device by hand in `gigabyte_laptop_init()` and exposes no modalias
+(`modinfo -F alias` is empty), so udev has nothing to match and
+`/etc/modules-load.d/aorus-laptop.conf` is the only thing that loads it at boot.
+DKMS `AUTOINSTALL="yes"` handles rebuilding across kernel updates, but it does
+not load anything.
 
 `dkms` 3.4.4 prints "Deprecated feature: CLEAN" for the `CLEAN=` line in
 `dkms.conf`. Harmless; left alone to avoid diverging from upstream.

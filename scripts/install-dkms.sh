@@ -9,7 +9,11 @@
 # Under Secure Boot, DKMS signs the module with /var/lib/dkms/mok.key, which
 # must already be enrolled. Nothing here enrolls a key.
 #
-# Usage: sudo bash scripts/install-dkms.sh [--autoload]
+# The module registers its platform device by hand and so has no modalias for
+# udev to match. /etc/modules-load.d is therefore the only thing that brings it
+# up at boot, and autoload is on by default.
+#
+# Usage: sudo bash scripts/install-dkms.sh [--no-autoload]
 set -euo pipefail
 
 NAME=aorus-laptop
@@ -20,10 +24,11 @@ VERSION="${VERSION:-$(sed -n 's/^Version:[[:space:]]*//p' \
 	"$(dirname "$0")/../pkg-files/rpm/aorus-laptop-dkms.spec" 2>/dev/null | head -1)}"
 VERSION="${VERSION:-0.2.0}"
 SRC=/usr/src/$NAME-$VERSION
-AUTOLOAD=0
+AUTOLOAD=1
 
 for arg in "$@"; do
 	case "$arg" in
+		--no-autoload) AUTOLOAD=0 ;;
 		--autoload) AUTOLOAD=1 ;;
 		*) echo "unknown option: $arg" >&2; exit 2 ;;
 	esac
@@ -60,7 +65,7 @@ if [ "$AUTOLOAD" -eq 1 ]; then
 	echo "== Enabling autoload at boot =="
 	install -m 644 aorus-laptop.conf /etc/modules-load.d/aorus-laptop.conf
 else
-	echo "== Autoload not enabled (pass --autoload to enable) =="
+	echo "== Autoload skipped (--no-autoload) =="
 fi
 
 echo "== Loading =="
