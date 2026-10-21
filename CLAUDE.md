@@ -1003,13 +1003,50 @@ policy, which works entirely inside the EC:
 
 | Profile | `fan_mode` |
 |---|---|
+| `low-power` | 1 silent |
 | `quiet` | 1 silent |
-| `balanced` | 0 normal |
-| `performance` | 2 gaming |
+| `balanced` | 1 silent |
+| `performance` | 0 normal |
+| *(unmapped)* | 2 gaming |
 
-`tuned` already asks for exactly those three names, so GNOME and KDE drive it
-with no further configuration. `perf_mode` and `dynamic_boost` stay as raw
-nodes, written by nothing, in case a BIOS update makes NVPCF work.
+**Shifted one notch quieter than the obvious mapping, on measured behaviour.**
+All three power modes were tested on hardware and the EC's normal *and* gaming
+curves both ramp the fans hard, so balanced joins power saver on silent and
+performance takes normal.
+
+**Gaming is deliberately unmapped.** It is the loudest preset and is reserved as
+its own axis: the Mode key is to cycle fan presets directly rather than going
+through a battery profile. Do not quietly re-attach it to a profile.
+
+**Why both `low-power` and `quiet`.** The two consumers prefer different names.
+`tuned`'s `powersave` profile asks for `low-power|quiet` and takes the first
+offered, while `tuned`'s power-profiles-daemon shim translates *back* for the
+desktop indicator using a map that contains only `low-power`, `balanced` and
+`performance`:
+
+```python
+PLATFORM_PROFILE_MAPPING = {
+    "low-power": PPD_POWER_SAVER, "balanced": PPD_BALANCED,
+    "performance": PPD_PERFORMANCE,
+}
+```
+
+Offering `quiet` alone left that reverse translation blind, so a profile change
+arriving by any route other than `tuned` itself would not update the indicator.
+Offering both fixes it.
+
+**The chain is live end to end**: `tuned-ppd` is active and enabled, serving
+`net.hadess.PowerProfiles` with `power-saver`/`balanced`/`performance`, all
+`Driver: tuned`. So the desktop selector reaches `fan_mode` through
+tuned-ppd → tuned profile → `[acpi]` plugin → `platform_profile` → this handler.
+
+`perf_mode` and `dynamic_boost` stay as raw nodes, written by nothing, in case a
+BIOS update makes NVPCF work.
+
+**Open, once the Mode key cycles fan presets:** profiles own `fan_mode` 0 and 1
+while gaming is reachable only by hand, so a profile switch currently reclaims
+the fans from gaming. If the Mode key starts selecting gaming deliberately, that
+needs a precedence decision of its own, the way `pwm_enable` already has one.
 
 **Precedence rule, so profiles and CoolerControl do not fight.** The hwmon ABI
 already carries the state: `pwm_enable` is `1` when userspace holds the fans and

@@ -1246,15 +1246,30 @@ static int check_sku(const char *dmi_sku, const char *end) {
  * tuned already asks for these three names, so the desktop drives them with no
  * further configuration.
  */
+/*
+ * Measured on a GAMING A16 5TH: the EC's normal and gaming curves both ramp the
+ * fans hard, so the mapping is shifted one notch quieter than the obvious one.
+ * Power saver and balanced both get silent, and performance gets normal.
+ *
+ * Gaming is deliberately left off this list. It is the loudest preset and is
+ * reserved as its own axis, for the Mode key to cycle fan presets directly
+ * rather than through a battery profile.
+ *
+ * low-power and quiet both appear because the two consumers prefer different
+ * names: tuned's powersave profile asks for "low-power|quiet" and takes the
+ * first available, while tuned's power-profiles-daemon shim only recognises
+ * low-power, balanced and performance when translating back for the desktop
+ * indicator. Offering both keeps that translation working in each direction.
+ */
 static int gigabyte_laptop_profile_to_fan_mode(enum platform_profile_option profile)
 {
 	switch (profile) {
+		case PLATFORM_PROFILE_LOW_POWER:
 		case PLATFORM_PROFILE_QUIET:
-			return 1; // silent
 		case PLATFORM_PROFILE_BALANCED:
-			return 0; // normal
+			return 1; // silent
 		case PLATFORM_PROFILE_PERFORMANCE:
-			return 2; // gaming
+			return 0; // normal
 		default:
 			return -EOPNOTSUPP;
 	}
@@ -1264,22 +1279,23 @@ static int gigabyte_laptop_profile_probe(void *drvdata, unsigned long *choices)
 {
 	struct gigabyte_laptop_wmi *gigabyte = drvdata;
 
+	set_bit(PLATFORM_PROFILE_LOW_POWER, choices);
 	set_bit(PLATFORM_PROFILE_QUIET, choices);
 	set_bit(PLATFORM_PROFILE_BALANCED, choices);
 	set_bit(PLATFORM_PROFILE_PERFORMANCE, choices);
 
-	// Start from the fan mode the firmware is already in, as dell-pc.c does
-	switch (gigabyte->fan_mode) {
-		case 1:
-			gigabyte->profile = PLATFORM_PROFILE_QUIET;
-			break;
-		case 2:
-			gigabyte->profile = PLATFORM_PROFILE_PERFORMANCE;
-			break;
-		default:
-			gigabyte->profile = PLATFORM_PROFILE_BALANCED;
-			break;
-	}
+	/*
+	 * Start from the fan mode the firmware is already in, as dell-pc.c does.
+	 * Three profiles share the silent preset, so balanced is the one reported
+	 * for it: it is the neutral choice and what tuned asks for by default.
+	 * Anything that is not a preset this handler drives also reports balanced,
+	 * since the profile is not what is holding the fans in that case.
+	 */
+	if (gigabyte->fan_mode == 0)
+		gigabyte->profile = PLATFORM_PROFILE_PERFORMANCE;
+	else
+		gigabyte->profile = PLATFORM_PROFILE_BALANCED;
+
 	return 0;
 }
 

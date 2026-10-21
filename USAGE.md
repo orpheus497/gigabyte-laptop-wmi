@@ -256,9 +256,25 @@ profile selector drives the fan policy:
 
 | Profile | Fan mode |
 |---|---|
+| `low-power` | silent |
 | `quiet` | silent |
-| `balanced` | normal |
-| `performance` | gaming |
+| `balanced` | silent |
+| `performance` | normal |
+
+The mapping is one notch quieter than the obvious one, because the embedded
+controller's normal and gaming curves both ramp the fans hard. Power saver and
+balanced therefore share the silent preset, and performance gets normal.
+
+**Gaming fan mode is deliberately not offered as a profile.** It is the loudest
+preset and is reserved as its own axis, to be cycled directly rather than
+through a battery profile. Select it with
+`echo 2 > /sys/devices/platform/gigabyte_laptop/fan_mode`.
+
+`low-power` and `quiet` both map to silent because the two consumers prefer
+different names: `tuned`'s `powersave` profile asks for `low-power|quiet` and
+takes whichever is offered first, while its power-profiles-daemon shim only
+recognises `low-power`, `balanced` and `performance` when translating back for
+the desktop indicator.
 
 **Nodes:**
 
