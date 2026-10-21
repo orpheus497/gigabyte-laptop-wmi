@@ -8,19 +8,25 @@ All `fanX_input` nodes are read-only, and all values returned are in revolutions
 
 ## PWM
 
-`pwmX` and `pwmX_enable` are read/write. Channel 1 is for CPU and channel 2 is for GPU. Fans 3 and 4 (if equipped) do not have a way of measuring their PWM whatsoever.
+**Disclaimers:**
 
-`pwmX_enable` follows the hwmon interface:
+- Models older than the [Aero 15 X9 Series](https://www.gigabyte.com/Laptop/AERO-15--RTX-20-Series) do not support this.
+- Models older than the [Aero 15 KB Series](https://www.gigabyte.com/Laptop/AERO-15--Intel-10th-Gen) use the same value for all fans.
 
-- `1` — manual. Userspace sets the duty through `pwmX`, and both fans are held at it.
-- `2` — automatic. The embedded controller drives the fans from temperature: the normal, silent, gaming and custom-curve fan modes.
-- `0` — full speed, with no speed control. This is the fan mode `fan_turbo` uses.
+`pwmX` and `pwmX_enable` are **read-only**. Channel 1 is for CPU and channel 2 is for GPU. Fans 3 and 4 (if equipped) do not have a way of measuring their PWM whatsoever.
 
-Writing `pwmX` implies `pwmX_enable = 1`, since a duty only applies once the controller has been told to hold it. Write `2` to hand the fans back.
+`pwmX` reports the controller's live duty, scaled. The embedded controller works in percent — `FDTY` and `GDTY` are eight-bit fields the firmware treats as 0–100 — while hwmon defines these attributes as 0–255, so the driver converts. An EC duty of 22% reads as `56`.
 
-**`pwmX` is scaled.** hwmon defines these attributes as 0–255, but this embedded controller works in percent, so the driver converts in both directions. A write of `128` becomes 50% and reads back as `128`. Passing 0–255 through unscaled would ask the controller for up to 255%, which it simply pins to full speed — every duty above about 100 would mean "maximum".
+`pwmX_enable` reports `2` (automatic) whenever the controller is driving the fans from temperature, `1` if a duty is being held, and `0` for the fan mode that runs them flat out.
 
-Fan speed control is only proportional through `pwmX_enable = 1`. The fan mode the driver calls *fixed* sets a single-bit flag in the controller rather than a duty, so it can only mean full speed, which is why it backs `pwmX_enable = 0`.
+### Why writing is not supported
+
+Two firmware methods were tried on a GAMING A16 5TH and neither gives proportional control:
+
+- **`FAN_FIXED_MODE` (`0x6A`)** writes `ADJF`, which is a **single bit**. It cannot express a duty, and latching it runs the fans at maximum regardless of what duty was programmed. This is the mechanism `fan_turbo` uses.
+- **`FAN_AUTO_MODE` (`0x70`)** writes `FAN1` and `FAN2`, the per-fan targets, and looked like the answer. In practice the controller ignored targets of 25%, 50% and 75%, continuing to run its own curve — and a target of 100% **stopped both fans**.
+
+Because a wrong duty can stop the fans rather than merely run them at the wrong speed, the attributes stay read-only until a mechanism is confirmed on hardware. Untried leads are recorded in `CLAUDE.md`.
 
 ## Temperature
 

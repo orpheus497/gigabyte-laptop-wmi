@@ -626,7 +626,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~1b~~ | ~~Extend `debug_method` to take an argument~~ **done** | low |
 | 2 | Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel | medium |
 | 3 | Register a `platform_profile` handler over `perf_mode` + `dynamic_boost` | low |
-| ~~4~~ | ~~Writable `pwm1`/`pwm2` for CoolerControl~~ **done, untested on hardware** | medium |
+| 4 | Writable `pwm1`/`pwm2` — **two mechanisms tried and rejected**, read scaling kept | medium |
 | ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** | low |
 | 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
 
@@ -914,7 +914,47 @@ supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
   `grubby --remove-args`.
 - **Keep `tuned`; do not install `power-profiles-daemon`.**
 
-### Step 3 redesigned: profiles over fan policy, with PWM taking precedence
+### Step 4: writable PWM is reverted, and here is what the firmware does
+
+**Writing a duty is read-only again.** Two mechanisms were tried on hardware
+and neither gives proportional control, and one of them stops the fans, so
+shipping a writable attribute that userspace or CoolerControl could trigger was
+not defensible.
+
+| Method | Writes | Result on hardware |
+|---|---|---|
+| `0x6A` `FAN_FIXED_MODE` | `ADJF`, **one bit** | Cannot carry a duty. Latching it runs the fans flat out whatever duty was set, which is why every value read back as maximum RPM. This is all `fan_turbo` ever did. |
+| `0x70` `FAN_AUTO_MODE` | `FAN1`, `FAN2`, `TFAN=0`, `GFAN=1` | Targets of 25/50/75% were **ignored** — the EC kept its own curve at 22% and the fans stayed at idle RPM. A target of **100% stopped both fans**. |
+
+Read the field widths before believing a method sets a duty:
+`ADJF`, `TFAN`, `GFAN` are 1 bit; `FAN1`, `FAN2`, `FDTY`, `GDTY` are 8.
+
+**What was kept.** `pwmX` read scaling is correct and stays: `0x50` returns
+`FDTY`, the live duty in percent, and hwmon wants 0–255, so an EC duty of 22
+now reads `56` instead of `22`. `pwm_enable` reporting was also wrong upstream
+and is fixed — see the enum note below.
+
+**Untried leads, in order of promise:**
+
+1. **`0x46` `CPU_FAN_DUTY` with `0x47` `GPU_FAN_DUTY`.** `0x46` writes `FDTY`
+   *and* `FAN1`; `0x47` writes `GDTY` *and* `FAN2`. Between them they set both
+   the live duty and the target for each fan, which is a different and more
+   direct combination than anything tried. The driver marks both `// Aero 15 VB`
+   under "Adding support (WIP)" and has never written `0x46` at all. This is the
+   most likely candidate.
+2. **The 15-point custom curve**, `fan_mode 3` plus `fan_curve_index` and
+   `fan_curve_data` (`0x68` → `XFNW`). This is the firmware's own proportional
+   mechanism, so it should work by construction; it is a curve rather than a
+   duty, so it suits a profile better than it suits CoolerControl. GigaMate
+   reports the indexed store is inert on an AERO X16's EC firmware, which is a
+   different model and worth testing here rather than assuming.
+
+**Test write methods through a debug node, not through hwmon.** `debug_method`
+only reads (WMBC). A matching write-side node would let `0x46`/`0x47` and the
+curve be tried deliberately, one value at a time, without exposing a path that
+a fan daemon can drive into a fan stop. Add that before the next attempt.
+
+### Step 3: profiles over fan policy, with PWM taking precedence
 
 The original design — `platform_profile` over `perf_mode` + `dynamic_boost` —
 became inert when GPU TGP turned out to be unreachable. Replaced with fan
