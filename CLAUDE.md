@@ -669,20 +669,35 @@ So the EC raises a query for both keys and nothing in Linux consumes it. That
 rules out the ENE pipe being the only route and makes Step 5 ordinary kernel
 work: add the handler and map the event.
 
-**To pinpoint which `_Qxx` fires**, and so choose between the `GBT0005` and WMI
-routes, turn on the EC driver's query logging. `CONFIG_DYNAMIC_DEBUG=y` and
-debugfs is mounted rw:
+**The ENE i2c-HID pipe does _not_ carry the hotkeys.** `cat /dev/hidraw2` over a
+20-second window with GiMate and Fn+F7 pressed produced no bytes. Combined with
+the GPE result, the event path is pure ACPI. That is a useful negative: it keeps
+Step 5 away from the undocumented ENE protocol entirely.
 
-```sh
-echo 'file drivers/acpi/ec.c +p' | sudo tee /sys/kernel/debug/dynamic_debug/control
-# press GiMate and Fn+F7
-sudo dmesg | grep -iE "query|EVT" | tail -20
-echo 'file drivers/acpi/ec.c -p' | sudo tee /sys/kernel/debug/dynamic_debug/control
-```
+**Lockdown blocks the obvious way to name the query.** Writing
+`/sys/kernel/debug/dynamic_debug/control` fails with `EPERM` even as root —
+`Lockdown: tee: debugfs access is restricted`. `CONFIG_DYNAMIC_DEBUG=y` and
+debugfs being mounted rw are *not* sufficient; check anything debugfs-based
+against lockdown first. `/sys/module/acpi/parameters/debug_{level,layer}` are
+writable and lockdown-exempt, but they are ACPICA-level and do not print the
+`Query(0x%02x) scheduled` line, which comes from Linux's `ec.c` via `pr_debug`.
 
-`ec.c` logs `Query(0x%02x) scheduled` for every query, so this names the handler
-to write. Expect `0x63` if it is the `GBT0005` path or `0x45` if it is the WMI
-path; anything else is a query not yet accounted for.
+Two routes that do work:
+
+1. **Make the driver the diagnostic** — preferred, and it is Step 5 work either
+   way. Install both a WMI notify handler on `ABBC0F72` and an ACPI notify
+   handler on `GBT0005`, each logging what it receives. Whichever fires names
+   the path, and the `_WED` payload gives the event byte. No reboot, no
+   lockdown fight, and the module is signed.
+2. **`dyndbg` on the kernel command line**, which is parsed at boot and so is
+   not subject to the debugfs restriction:
+   `sudo grubby --update-kernel=ALL --args='dyndbg="file drivers/acpi/ec.c +p"'`
+   then reboot and `dmesg | grep Query`. Zero code, one reboot. Remove the
+   argument afterwards — EC query logging is chatty in normal use.
+
+Expect `0x63` for the `GBT0005` path or `0x45` for the WMI path; anything else
+is a query not yet accounted for, and this machine's DSDT is committed to look
+it up.
 
 On USB Gigabyte models the vendor-HID path carries report ID `0x04` with
 payload `00 00 84` = Mode key and `00 00 91` = GigaMate key (GigaMate's
