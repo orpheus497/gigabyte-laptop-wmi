@@ -1,4 +1,4 @@
-Source: aorus-laptop-dkms
+Source: gigabyte-laptop-dkms
 Maintainer: Albert Tang <tangalbert919@yahoo.com>
 Build-Depends:
  dh-sequence-dkms, debhelper (>=11~)
@@ -6,7 +6,7 @@ Rules-Requires-Root: no
 Homepage: https://github.com/tangalbert919/gigabyte-laptop-wmi
 Vcs-Git: https://github.com/tangalbert919/gigabyte-laptop-wmi
 
-Package: aorus-laptop-dkms
+Package: gigabyte-laptop-dkms
 Architecture: amd64
 Version: 0.2.0
 Depends: dkms

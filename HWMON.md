@@ -1,6 +1,6 @@
 # HWMON.md
 
-This document outlines the HWMON nodes exposed by this driver. The nodes can be found in `/sys/devices/platform/aorus_laptop/hwmon/hwmonX`.
+This document outlines the HWMON nodes exposed by this driver. The nodes can be found in `/sys/devices/platform/gigabyte_laptop/hwmon/hwmonX`.
 
 ## Fans
 

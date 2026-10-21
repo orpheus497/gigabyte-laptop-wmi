@@ -1,4 +1,4 @@
-%define module aorus-laptop
+%define module gigabyte-laptop
 
 Name:           %{module}-dkms
 
@@ -15,7 +15,7 @@ BuildArch:      noarch
 Requires:       dkms, gcc, make
 
 %description
-This package contains the DKMS aorus-laptop kernel module.
+This package contains the DKMS gigabyte-laptop kernel module.
 
 %prep
 %setup -q -c -T -a 0
@@ -37,10 +37,10 @@ rm -rf $RPM_BUILD_ROOT
 /usr/src/%{module}-%{version}
 
 %post
-dkms add -m aorus-laptop -v %{version}
-dkms install --force -m aorus-laptop -v %{version}
+dkms add -m gigabyte-laptop -v %{version}
+dkms install --force -m gigabyte-laptop -v %{version}
 
 %preun
-dkms remove -m aorus-laptop -v %{version} --all
+dkms remove -m gigabyte-laptop -v %{version} --all
 
 %changelog

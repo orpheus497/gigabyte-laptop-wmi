@@ -1,6 +1,6 @@
 #!/bin/sh -x
 
-NAME=aorus-laptop
+NAME=gigabyte-laptop
 PKGNAME=$NAME-dkms
 VERSION=$(dpkg-query -W -f='${Version}' $PKGNAME | awk -F "-" '{print $1}' | cut -d\: -f2)
 ARCH=$(dpkg --print-architecture)

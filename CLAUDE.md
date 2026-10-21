@@ -1,13 +1,13 @@
 # CLAUDE.md
 
-Context for working on this repo. Read before touching `aorus-laptop.c`.
+Context for working on this repo. Read before touching `gigabyte-laptop.c`.
 
 ## What this is
 
 A fork of [tangalbert919/gigabyte-laptop-wmi](https://github.com/tangalbert919/gigabyte-laptop-wmi),
 an out-of-tree kernel driver that talks to the embedded controller on Gigabyte
 Aero/AORUS/Gaming laptops through the `WMBC` and `WMBD` WMI methods. Controls are
-exposed as sysfs nodes under `/sys/devices/platform/aorus_laptop`, sensors through
+exposed as sysfs nodes under `/sys/devices/platform/gigabyte_laptop`, sensors through
 HWMON.
 
 This checkout is being adapted for one specific machine (see below), with the
@@ -385,6 +385,45 @@ fifteen APMF functions is unlikely to advertise none of them.
 
 ## Repo layout and conventions
 
+### The driver is `gigabyte-laptop`, renamed from `aorus-laptop`
+
+Upstream still calls the file `aorus-laptop.c` for historical reasons — it began
+as an Aero/AORUS driver and gained `GIGABYTE GAMING` and P-series support later
+without the name following. Every internal symbol was already
+`gigabyte_laptop_*`, and the constant feeding the user-visible names was already
+called `GIGABYTE_LAPTOP_FILE`, so the filename was the only thing out of step.
+
+Because that constant is `KBUILD_MODNAME`, which comes from the filename, the
+rename moved everything at once:
+
+| | Before | After |
+|---|---|---|
+| Source | `aorus-laptop.c` | `gigabyte-laptop.c` |
+| Module | `aorus_laptop` | `gigabyte_laptop` |
+| sysfs | `/sys/devices/platform/aorus_laptop` | `/sys/devices/platform/gigabyte_laptop` |
+| hwmon | `aorus_laptop-isa-0000` | `gigabyte_laptop-isa-0000` |
+| DKMS | `aorus-laptop/0.2.0` | `gigabyte-laptop/0.2.0` |
+| Autoload | `/etc/modules-load.d/aorus-laptop.conf` | `…/gigabyte-laptop.conf` |
+
+**The `AORUS` strings that remain are correct and must stay** — the DMI tables
+match real hardware (`DMI_MATCH("AORUS 17X")`, `DMI_MATCH("AORUS Master 18")`,
+`DMI_EXACT_MATCH(DMI_PRODUCT_FAMILY, "AORUS")`) and the comments describe actual
+AORUS models. Only four things named the *driver* wrongly and were changed: the
+file header, the `AORUS_FAN_CTRL_*` enum (now `GIGABYTE_FAN_CTRL_*`), and the
+two `pr_info` lines on load and unload.
+
+Two consequences to keep in mind:
+
+- **Cherry-picking from upstream now needs rename detection.** `origin/master`
+  still has `aorus-laptop.c`. Git usually handles it, occasionally not.
+- **The hwmon name change resets CoolerControl's device identity**, so any saved
+  configuration for the old name is orphaned. Done deliberately *before* Step 4
+  produced fan profiles worth keeping, which was the cheapest possible moment.
+
+`scripts/install-dkms.sh` removes the pre-rename install — module, DKMS trees,
+`/usr/src` tree, autoload entry and stale `.ko` files — before installing, so a
+machine does not end up carrying both.
+
 ### Branches
 
 | Branch | Purpose |
@@ -398,7 +437,7 @@ Remotes: `origin` = upstream, `a16` = the A16 fork.
 
 The fork branched at upstream `0002d21` and has 6 commits; `master` has ~60 the
 fork lacks. `git diff --stat master a16/master` shows 771 changed lines in
-`aorus-laptop.c`, most of it the fork *missing* master's work. Merging would
+`gigabyte-laptop.c`, most of it the fork *missing* master's work. Merging would
 regress `fan_pwm`, hwmon PWM channels, `light_sensor`, `power_on_time`,
 `has_dgpu_ejector`, the fan 3/4 quirks, the 0–255 `fan_custom_speed` range, and
 the Debian/RPM packaging.
@@ -431,7 +470,7 @@ unsigned (`EKEYREJECTED`).
 placeholder the distro packaging substitutes (`sed -e "s/@PKGVER@/%{version}/"`
 in the RPM spec, the same in the PKGBUILD). Running `dkms ldtarball` on a
 tarball built straight from the repo registers a module literally versioned
-`@PKGVER@`, and the follow-up `dkms install aorus-laptop/0.2.0` then fails with
+`@PKGVER@`, and the follow-up `dkms install gigabyte-laptop/0.2.0` then fails with
 "Could not find module source directory". Use `scripts/install-dkms.sh`, which
 substitutes the version first and cleans up any earlier registration including
 that one. The canonical version is **0.2.0**, per both RPM specs and the
@@ -444,7 +483,7 @@ sudo bash scripts/install-dkms.sh            # or --no-autoload to skip boot loa
 **Autoload is on by default and should stay that way.** The module registers its
 platform device by hand in `gigabyte_laptop_init()` and exposes no modalias
 (`modinfo -F alias` is empty), so udev has nothing to match and
-`/etc/modules-load.d/aorus-laptop.conf` is the only thing that loads it at boot.
+`/etc/modules-load.d/gigabyte-laptop.conf` is the only thing that loads it at boot.
 DKMS `AUTOINSTALL="yes"` handles rebuilding across kernel updates, but it does
 not load anything.
 
@@ -589,7 +628,7 @@ Both commits build clean with `-Wall -Wextra`.
 | 5 | GiMate button — diagnose, then notify handler + keymap | low |
 | 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
 
-Steps 0 and 1 are complete and verified on hardware: `aorus-laptop/0.2.0`
+Steps 0 and 1 are complete and verified on hardware: `gigabyte-laptop/0.2.0`
 installed through DKMS, signed by the `DKMS module signing key`, loaded, with
 all 20 sysfs nodes present including the three Gaming-only ones. Step 1b *is* a
 blocker for Step 2.
@@ -597,7 +636,7 @@ blocker for Step 2.
 The load log is itself free reconnaissance, because Step 1 made every optional
 read report itself. On this machine it printed only `Skipping silent fan mode ID
 check`, `Dual fan speed control required`, `Using old light sensor method` and
-`AORUS WMI kernel driver started`. The absence of the other warnings means fan
+`Gigabyte laptop WMI driver started`. The absence of the other warnings means fan
 mode, custom speed, charging mode, charging limit, the fan curve **and
 `dynamic_boost` (`0xE7`)** all read successfully — the first on-hardware
 evidence that `0xE7` is implemented here, not merely on the CWH.
@@ -691,7 +730,7 @@ instrumented and log what they receive, so a keypress names its own path:
   is what `_Q63` sends.
 
 Both registrations are non-fatal; a diagnostic must not stop the driver loading.
-Watch with `journalctl -kf | grep aorus` while pressing the keys. The WMI path
+Watch with `journalctl -kf | grep gigabyte` while pressing the keys. The WMI path
 also self-tests without any keypress, since reading method `0x03` fires
 `Notify (AMW0, 0xD2)` on demand:
 `echo 0x03 > debug_method && cat debug_method`.
@@ -699,7 +738,7 @@ also self-tests without any keypress, since reading method `0x03` fires
 **`wmi_install_notify_handler()` does not exist on this kernel.** It was
 removed, and the only route is a `struct wmi_driver` with a `.notify` callback
 bound to the event GUID by its `id_table`. That is why the module now registers
-a second, event-only `wmi_driver` ("aorus-laptop-events") alongside the platform
+a second, event-only `wmi_driver` ("gigabyte-laptop-events") alongside the platform
 driver. `.notify` is itself deprecated in favour of `.notify_new` taking a
 `struct wmi_buffer`; `min_event_size` is set to 0 so events carrying no data are
 still delivered.

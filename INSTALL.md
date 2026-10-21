@@ -2,7 +2,7 @@
 
 ## How to install
 
-For all methods, you must copy `aorus-laptop.conf` to `/etc/modules-load.d/` so the kernel module is loaded on boot automatically.
+For all methods, you must copy `gigabyte-laptop.conf` to `/etc/modules-load.d/` so the kernel module is loaded on boot automatically.
 
 ### Method 1: Using DKMS
 
@@ -15,7 +15,7 @@ dkms ldtarball driver.tar.gz
 
 If you have this repository checked out locally, you can create a tarball and then load it into the DKMS tree:
 ```
-tar -czf driver.tar.gz Makefile aorus-laptop.c dkms.conf
+tar -czf driver.tar.gz Makefile gigabyte-laptop.c dkms.conf
 ```
 
 Be sure to edit the `PACKAGE_VERSION` flag in `dkms.conf` before creating the tarball.
@@ -27,7 +27,7 @@ Be sure to edit the `PACKAGE_VERSION` flag in `dkms.conf` before creating the ta
 Simply run the following commands:
 ```
 make
-sudo insmod aorus-laptop.ko
+sudo insmod gigabyte-laptop.ko
 ```
 
 The last command has to be run after every reboot. If you have updated the kernel, you must run `make` before loading the kernel module.
@@ -37,10 +37,10 @@ The last command has to be run after every reboot. If you have updated the kerne
 If you have installed the kernel driver with DKMS, you can run this command to remove it from the DKMS tree:
 ```
 # Replace <version> with the version of the driver in use. Use "dkms status" if you are not sure what version you have installed.
-sudo dkms remove aorus-laptop/<version> --all
+sudo dkms remove gigabyte-laptop/<version> --all
 ```
 
 If you have installed the kernel driver manually, you can simply run this command:
 ```
-sudo rmmod aorus_laptop
+sudo rmmod gigabyte_laptop
 ```

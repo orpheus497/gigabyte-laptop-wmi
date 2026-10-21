@@ -7,7 +7,7 @@
 All available nodes are found at the following path:
 
 ```text
-/sys/devices/platform/aorus_laptop
+/sys/devices/platform/gigabyte_laptop
 ```
 
 You can write to these nodes using `echo` and `tee`. Keep in mind that you must be logged in as `root` or using `sudo` for this.
@@ -25,12 +25,12 @@ Aero/AORUS laptops currently support six fan modes. They are implemented in the 
 
 The last two modes will enable custom mode automatically, as they are considered "custom modes". Custom mode will be automatically disabled if the first three modes are enabled.
 
-**Node:** `/sys/devices/platform/aorus_laptop/fan_mode`
+**Node:** `/sys/devices/platform/gigabyte_laptop/fan_mode`
 
 **Example:** To switch to gaming fan mode:
 
 ```sh
-echo '2' | sudo tee /sys/devices/platform/aorus_laptop/fan_mode
+echo '2' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_mode
 ```
 
 ## Custom fan speed
@@ -42,15 +42,15 @@ As of version 0.2.0, the accepted range is 0-255. Earlier versions require fulfi
 - The number between 25 and 100.
 - The number is divisible by 5.
 
-**Node:** `/sys/devices/platform/aorus_laptop/fan_custom_speed`
+**Node:** `/sys/devices/platform/gigabyte_laptop/fan_custom_speed`
 
 **Example:** To set the custom fan speed to 50 percent:
 
 ```sh
 # Version 0.2.0+
-echo '128' | sudo tee /sys/devices/platform/aorus_laptop/fan_custom_speed
+echo '128' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_custom_speed
 # Before version 0.2.0
-echo '50' | sudo tee /sys/devices/platform/aorus_laptop/fan_custom_speed
+echo '50' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_custom_speed
 ```
 
 ## Charging mode
@@ -63,18 +63,18 @@ echo '50' | sudo tee /sys/devices/platform/aorus_laptop/fan_custom_speed
 
 Aero/AORUS laptops support two charging modes: Normal (0) and custom (1). The custom charging mode simply stops the laptop from passing its charging limit.
 
-**Node:** `/sys/devices/platform/aorus_laptop/charge_mode`
+**Node:** `/sys/devices/platform/gigabyte_laptop/charge_mode`
 
 ## Charging limit
 
 Aero/AORUS laptops support a charging limit. Charging mode must be set to custom for it to take effect. It will only accept numbers between 60 and 100.
 
-**Node:** `/sys/devices/platform/aorus_laptop/charge_limit`
+**Node:** `/sys/devices/platform/gigabyte_laptop/charge_limit`
 
 **Example:** To set the charging limit to 80 percent:
 
 ```text
-echo '80' | sudo tee /sys/devices/platform/aorus_laptop/charge_limit
+echo '80' | sudo tee /sys/devices/platform/gigabyte_laptop/charge_limit
 ```
 
 ## Fan curve data (added in version 0.1.0)
@@ -84,8 +84,8 @@ Aero/AORUS laptops support setting a custom fan curve. Custom fan mode must be e
 **Nodes:**
 
 ```text
-/sys/devices/platform/aorus_laptop/fan_curve_index
-/sys/devices/platform/aorus_laptop/fan_curve_data
+/sys/devices/platform/gigabyte_laptop/fan_curve_index
+/sys/devices/platform/gigabyte_laptop/fan_curve_data
 ```
 
 The index node specifies which index in the fan curve can be modified, while the data node holds the temperature (in Celsius) and fan speed for that index, printed in that order (for readability). There are 255 indices available, but only 15 can be modified. This is to ensure compatibility with Gigabyte's Control Center software on dual-boot systems.
@@ -97,16 +97,16 @@ You must set the index node to the index you wish to modify first. The data node
 **Example:** To set index 2 to half fan speed at 55 degrees Celsius:
 
 ```sh
-echo '2' | sudo tee /sys/devices/platform/aorus_laptop/fan_curve_index
+echo '2' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_curve_index
 # 127*256+55 = 32512+55 = 32567
-echo '32567' | sudo tee /sys/devices/platform/aorus_laptop/fan_curve_data
+echo '32567' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_curve_data
 ```
 
 ## Battery cycle (added in version 0.1.0)
 
 Aero/AORUS laptops support battery cycles, but are only accessible through the embedded controller. Older models are likely to read 0 due to older Gigabyte firmware. Because there are two different battery cycle numbers, only the highest one is printed. This node is read-only.
 
-**Node:** `/sys/devices/platform/aorus_laptop/battery_cycle`
+**Node:** `/sys/devices/platform/gigabyte_laptop/battery_cycle`
 
 ## GPU boost (added in version 0.1.0)
 
@@ -116,12 +116,12 @@ Aero/AORUS laptops support boosting the discrete GPU's power limit. Even though 
 
 Laptops with RTX 3000 series GPUs or newer have three different modes, while older models have one.
 
-**Node:** `/sys/devices/platform/aorus_laptop/gpu_boost`
+**Node:** `/sys/devices/platform/gigabyte_laptop/gpu_boost`
 
 **Example:** To enable GPU boost:
 
 ```sh
-echo '1' | sudo tee /sys/devices/platform/aorus_laptop/gpu_boost
+echo '1' | sudo tee /sys/devices/platform/gigabyte_laptop/gpu_boost
 ```
 
 ## USB toggles (added in version 0.1.0)
@@ -131,15 +131,15 @@ Aero/AORUS laptops support USB power output when they are asleep (S3) or in hibe
 **Nodes:**
 
 ```text
-/sys/devices/platform/aorus_laptop/usb_charge_s3_toggle
-/sys/devices/platform/aorus_laptop/usb_charge_s4_toggle
+/sys/devices/platform/gigabyte_laptop/usb_charge_s3_toggle
+/sys/devices/platform/gigabyte_laptop/usb_charge_s4_toggle
 ```
 
 ## Power on time (added in version 0.2.0)
 
 Aero/AORUS laptops support "power on time", though its use is unknown. This node is read-only.
 
-**Node:** `/sys/devices/platform/aorus_laptop/power_on_time`
+**Node:** `/sys/devices/platform/gigabyte_laptop/power_on_time`
 
 ## Light sensor (added in version 0.2.0)
 
@@ -153,7 +153,7 @@ All VE and newer models (e.g. Aero 16 XE5) return four 8-bit values, while older
 # Actual value (arithmetic): [high]*65536 + [medium]*256 + [low]
 ```
 
-**Node:** `/sys/devices/platform/aorus_laptop/light_sensor`
+**Node:** `/sys/devices/platform/gigabyte_laptop/light_sensor`
 
 ## PWM (added in version 0.2.0)
 
@@ -166,7 +166,7 @@ Aero/AORUS laptops support reading the current PWM for each fan. This should not
 
 The sysfs and HWMON nodes are read-only, but support for writing to HWMON nodes will be added in the future. The sysfs node will only return the PWM for the CPU fan, while the HWMON nodes have separate channels for CPU and GPU fans.
 
-**Node:** `/sys/devices/platform/aorus_laptop/fan_pwm`
+**Node:** `/sys/devices/platform/gigabyte_laptop/fan_pwm`
 
 ## Performance mode (Gigabyte Gaming models)
 
@@ -187,12 +187,12 @@ it rather than the mode actually in effect. It starts at `0` when the driver
 loads, whatever the firmware is doing. The firmware also resets the mode on
 every boot.
 
-**Node:** `/sys/devices/platform/aorus_laptop/perf_mode`
+**Node:** `/sys/devices/platform/gigabyte_laptop/perf_mode`
 
 **Example:** To switch to boost mode:
 
 ```sh
-echo '2' | sudo tee /sys/devices/platform/aorus_laptop/perf_mode
+echo '2' | sudo tee /sys/devices/platform/gigabyte_laptop/perf_mode
 ```
 
 ## Dynamic boost (Gigabyte Gaming models)
@@ -202,7 +202,7 @@ CPU and the discrete GPU under load. The embedded controller takes this value
 inverted, but the node reads and writes the conventional way around: 0 to
 disable, 1 to enable.
 
-**Node:** `/sys/devices/platform/aorus_laptop/dynamic_boost`
+**Node:** `/sys/devices/platform/gigabyte_laptop/dynamic_boost`
 
 ## Turbo fan (Gigabyte Gaming models)
 
@@ -214,12 +214,12 @@ duty (229), then enables fixed fan mode.
 The fan mode and custom fan speed in use beforehand are restored when turbo is
 switched off, so this node can be toggled without losing a custom fan curve.
 
-**Node:** `/sys/devices/platform/aorus_laptop/fan_turbo`
+**Node:** `/sys/devices/platform/gigabyte_laptop/fan_turbo`
 
 **Example:** To run the fans at full speed:
 
 ```sh
-echo '1' | sudo tee /sys/devices/platform/aorus_laptop/fan_turbo
+echo '1' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_turbo
 ```
 
 ## Debug method
@@ -231,8 +231,8 @@ The node takes a method ID and an optional argument, then reads that method and
 prints the result:
 
 ```sh
-echo '0xE7' | sudo tee /sys/devices/platform/aorus_laptop/debug_method
-cat /sys/devices/platform/aorus_laptop/debug_method
+echo '0xE7' | sudo tee /sys/devices/platform/gigabyte_laptop/debug_method
+cat /sys/devices/platform/gigabyte_laptop/debug_method
 # method 0xe7 arg 0x0 -> 0x0 (0)
 ```
 
@@ -242,9 +242,9 @@ read with argument 0 returns 0 either way. Reading with a distinctive argument
 tells the two apart, and the node says so when the result matches:
 
 ```sh
-echo '0xED 0x5A' | sudo tee /sys/devices/platform/aorus_laptop/debug_method
-cat /sys/devices/platform/aorus_laptop/debug_method
+echo '0xED 0x5A' | sudo tee /sys/devices/platform/gigabyte_laptop/debug_method
+cat /sys/devices/platform/gigabyte_laptop/debug_method
 # method 0xed arg 0x5a -> 0x5a (90) [echoed argument: method not implemented]
 ```
 
-**Node:** `/sys/devices/platform/aorus_laptop/debug_method`
+**Node:** `/sys/devices/platform/gigabyte_laptop/debug_method`

@@ -1,4 +1,4 @@
-obj-m += aorus-laptop.o
+obj-m += gigabyte-laptop.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 

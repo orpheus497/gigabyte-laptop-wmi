@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- *  aorus-laptop.c - AORUS laptop WMI driver
+ *  gigabyte-laptop.c - Gigabyte laptop WMI driver
  *
  *  Copyright (C) 2023 Albert Tang
  */
@@ -118,9 +118,9 @@ struct gigabyte_laptop_wmi {
 };
 
 enum fan_ctrl {
-	AORUS_FAN_CTRL_DISABLED = 0,
-	AORUS_FAN_CTRL_AUTO = 1,
-	AORUS_FAN_CTRL_MANUAL = 2
+	GIGABYTE_FAN_CTRL_DISABLED = 0,
+	GIGABYTE_FAN_CTRL_AUTO = 1,
+	GIGABYTE_FAN_CTRL_MANUAL = 2
 };
 
 static struct platform_device *platform_device;
@@ -350,11 +350,11 @@ static int gigabyte_laptop_hwmon_read(struct device *dev, enum hwmon_sensor_type
 					break;
 				case hwmon_pwm_enable:
 					if (gigabyte->fan_mode < 3) // normal, gaming, silent
-						*val = AORUS_FAN_CTRL_DISABLED;
+						*val = GIGABYTE_FAN_CTRL_DISABLED;
 					else if (gigabyte->fan_mode > 3) // auto-max or fixed
-						*val = AORUS_FAN_CTRL_AUTO;
+						*val = GIGABYTE_FAN_CTRL_AUTO;
 					else // the fan curve
-						*val = AORUS_FAN_CTRL_MANUAL;
+						*val = GIGABYTE_FAN_CTRL_MANUAL;
 					break;
 				default:
 					break;
@@ -1273,7 +1273,7 @@ static const struct wmi_device_id gigabyte_laptop_event_ids[] = {
 
 static struct wmi_driver gigabyte_laptop_event_driver = {
 	.driver = {
-		.name = "aorus-laptop-events",
+		.name = "gigabyte-laptop-events",
 	},
 	.id_table = gigabyte_laptop_event_ids,
 	.notify = gigabyte_laptop_wmi_notify,
@@ -1507,7 +1507,7 @@ static void __exit gigabyte_laptop_exit(void)
 {
 	struct gigabyte_laptop_wmi *gigabyte;
 
-	pr_info("Stopping AORUS WMI kernel driver\n");
+	pr_info("Stopping Gigabyte laptop WMI driver\n");
 
 	gigabyte_laptop_remove_acpi_notify();
 	if (gigabyte_laptop_event_driver_live) {
@@ -1599,7 +1599,7 @@ static int __init gigabyte_laptop_init(void)
 
 	gigabyte_laptop_install_acpi_notify();
 
-	pr_info("AORUS WMI kernel driver started\n");
+	pr_info("Gigabyte laptop WMI driver started\n");
 	return 0;
 
 fail_probe:

@@ -10,7 +10,7 @@
 %global debug_package %{nil}
 
 # name should have a -kmod suffix
-Name:           aorus-laptop-kmod
+Name:           gigabyte-laptop-kmod
 
 Version:        0.2.0
 Release:        2%{?dist}
@@ -53,7 +53,7 @@ kmodtool  --target %{_target_cpu}  --repo rpmfusion --kmodname %{name} %{?buildf
 # #patch0 -p1 -b .suffix
 # popd
 mkdir %{name}-%{version}
-mv aorus-laptop.c %{name}-%{version}
+mv gigabyte-laptop.c %{name}-%{version}
 mv Makefile %{name}-%{version}
 
 for kernel_version in %{?kernel_versions} ; do
@@ -73,7 +73,7 @@ rm -rf ${RPM_BUILD_ROOT}
 for kernel_version in %{?kernel_versions}; do
     # make install DESTDIR=${RPM_BUILD_ROOT} KMODPATH=%{kmodinstdir_prefix}/${kernel_version%%___*}/%{kmodinstdir_postfix}
     mkdir -p  $RPM_BUILD_ROOT/%{kmodinstdir_prefix}/${kernel_version%%___*}/%{kmodinstdir_postfix}/
-    install -D -m 755 _kmod_build_${kernel_version%%___*}/aorus-laptop.ko  ${RPM_BUILD_ROOT}%{kmodinstdir_prefix}/${kernel_version%%___*}/%{kmodinstdir_postfix}/aorus-laptop.ko
+    install -D -m 755 _kmod_build_${kernel_version%%___*}/gigabyte-laptop.ko  ${RPM_BUILD_ROOT}%{kmodinstdir_prefix}/${kernel_version%%___*}/%{kmodinstdir_postfix}/gigabyte-laptop.ko
 done
 %{?akmod_install}
 

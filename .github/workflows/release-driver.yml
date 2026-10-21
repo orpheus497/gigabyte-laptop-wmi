@@ -15,7 +15,7 @@ jobs:
       - name: Generate archive
         run: |
           sed -e "s/@PKGVER@/$(git tag --points-at HEAD)/" -i dkms.conf
-          tar -czf driver.tar.gz Makefile aorus-laptop.c dkms.conf
+          tar -czf driver.tar.gz Makefile gigabyte-laptop.c dkms.conf
       - name: Get checksum
         run: sha256sum driver.tar.gz | tee sum.txt
       - name: Upload artifact
