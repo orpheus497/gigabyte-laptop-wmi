@@ -975,13 +975,31 @@ a fan daemon can drive into a fan stop. Add that before the next attempt.
 
 ### Step 3: profiles over fan policy — verified on hardware
 
+Every profile was written directly to the aggregate, after the quieter mapping
+landed:
+
 ```
-$ cat /sys/class/platform-profile/*/name       -> gigabyte_laptop
-$ cat /sys/class/platform-profile/*/choices    -> quiet balanced performance
-$ cat /sys/firmware/acpi/platform_profile      -> balanced   (synced from fan_mode)
-$ echo performance > ...  -> fan_mode 2   (gaming)
-$ echo quiet       > ...  -> fan_mode 1   (silent)
+$ cat /sys/class/platform-profile/*/name    -> gigabyte_laptop
+$ cat /sys/class/platform-profile/*/choices -> low-power quiet balanced performance
+
+low-power   -> fan_mode=1   (silent)
+quiet       -> fan_mode=1   (silent)
+balanced    -> fan_mode=1   (silent)
+performance -> fan_mode=0   (normal)
 ```
+
+And the whole `tuned` chain, one profile per invocation:
+
+```
+tuned=powersave              -> platform_profile=low-power   -> fan_mode=1
+tuned=balanced               -> platform_profile=balanced    -> fan_mode=1
+tuned=throughput-performance -> platform_profile=performance -> fan_mode=0
+```
+
+**The chain also verified itself with no test at all.** The machine went onto
+battery mid-session, `tuned` auto-switched to `powersave`, its `[acpi]` plugin
+asked for `low-power|quiet`, took `low-power`, and the handler set silent. That
+is the `low-power` choice being load-bearing rather than belt-and-braces.
 
 **The legacy aggregate really is created by the class API.** That was the one
 assumption in this design taken from kernel source rather than observation, and
