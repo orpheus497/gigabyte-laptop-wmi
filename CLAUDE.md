@@ -696,10 +696,14 @@ Remaining candidates, both needing kernel work:
    on this BIOS. An `acpi_driver` with a notify handler. Simplest of the two,
    and the Windows driver binds exactly here.
 2. **`_Q45` → `SMGR(WEVN, WEVS)` → `WMBC(0, 0x03, n)` → `Notify (AMW0, 0xD2)`**,
-   the generic WMI event path. `WMI_EVENT` is now bound, by the diagnostic
-   `gigabyte-laptop-events` `wmi_driver`, which logs whatever arrives. There is
-   still no input device and no `sparse_keymap`, so nothing is mapped to a key
-   yet.
+   the generic WMI event path. The driver now *registers* a diagnostic handler
+   for `WMI_EVENT`, as the `gigabyte-laptop-events` `wmi_driver`, but whether it
+   logs anything depends on winning the device: `eeepc_wmi` matches the same
+   GUID, and only one driver binds. Blacklisting it (below) is a prerequisite
+   for trusting silence as a negative result. Check ownership with
+   `ls -l /sys/bus/wmi/devices/ABBC0F72*/driver` before concluding the path is
+   dead. There is still no input device and no `sparse_keymap`, so nothing is
+   mapped to a key yet.
 3. The `\_SB_.I2CB.ECSH` i2c-HID pipe.
 
 **Confirmed on hardware: the keys do reach ACPI.** `gpe0A` is the EC's GPE and

@@ -59,6 +59,23 @@ module_unload() {
 	rmmod "$1"
 }
 
+# Delete a DKMS version's trees only once dkms itself has let go of it.
+# `dkms remove --all` is what deletes the built module from /lib/modules, so
+# removing the registration after it fails leaves a .ko that nothing manages
+# and that modprobe cannot resolve by name. That is how the pre-rename
+# aorus_laptop module came to be resident with no file behind it.
+remove_dkms_version() {
+	local name=$1 ver=$2 out
+	if ! out=$(dkms remove "$name/$ver" --all 2>&1); then
+		echo "$out" >&2
+		echo "dkms could not remove $name/$ver, so its registration is left" >&2
+		echo "in place rather than orphaning the module it installed." >&2
+		echo "Inspect with: dkms status $name" >&2
+		exit 1
+	fi
+	rm -rf "/var/lib/dkms/$name/$ver" "/usr/src/$name-$ver"
+}
+
 cd "$(dirname "$0")/.."
 
 # The driver was called aorus-laptop until the rename. Anything left from that
@@ -77,11 +94,7 @@ fi
 while read -r ver; do
 	[ -n "$ver" ] || continue
 	echo "   removing aorus-laptop/$ver"
-	# The rm is the fallback for a registration dkms itself cannot remove, so
-	# it runs either way; leaving an orphaned tree is what this block exists
-	# to prevent. dkms remove --all deletes the installed .ko.
-	dkms remove "aorus-laptop/$ver" --all >/dev/null 2>&1 || true
-	rm -rf "/var/lib/dkms/aorus-laptop/$ver" "/usr/src/aorus-laptop-$ver"
+	remove_dkms_version aorus-laptop "$ver"
 done < <(dkms status aorus-laptop 2>/dev/null | sed -n "s|^aorus-laptop/\([^,:]*\).*|\1|p" | sort -u)
 rm -rf /var/lib/dkms/aorus-laptop
 rm -f /etc/modules-load.d/aorus-laptop.conf
@@ -92,8 +105,7 @@ echo "== Removing any previous registration =="
 while read -r ver; do
 	[ -n "$ver" ] || continue
 	echo "   removing $NAME/$ver"
-	dkms remove "$NAME/$ver" --all >/dev/null 2>&1 || true
-	rm -rf "/var/lib/dkms/$NAME/$ver" "/usr/src/$NAME-$ver"
+	remove_dkms_version "$NAME" "$ver"
 done < <(dkms status "$NAME" 2>/dev/null | sed -n "s|^$NAME/\([^,:]*\).*|\1|p" | sort -u)
 rm -rf "/var/lib/dkms/$NAME"
 
