@@ -22,7 +22,9 @@ NAME=gigabyte-laptop
 # current value as a last resort if the spec is unreadable.
 # `|| true` keeps a missing or unreadable spec from aborting the script under
 # set -e and pipefail, which would make the fallback below unreachable.
-VERSION="${VERSION:-$(sed -n 's/^Version:[[:space:]]*//p' \
+# Capture only the version token, so trailing whitespace or a CRLF line ending
+# in the spec cannot end up in a path.
+VERSION="${VERSION:-$(sed -n 's/^Version:[[:space:]]*\([^[:space:]]*\).*/\1/p' \
 	"$(dirname "$0")/../pkg-files/rpm/gigabyte-laptop-dkms.spec" 2>/dev/null | head -1 || true)}"
 VERSION="${VERSION:-0.2.0}"
 SRC=/usr/src/$NAME-$VERSION
@@ -190,6 +192,11 @@ else
 	echo "WARNING: the running module is NOT the one just installed." >&2
 	echo "         Reload it with:" >&2
 	echo "           modprobe -r gigabyte_laptop && modprobe gigabyte-laptop" >&2
-	echo "         or reboot, since autoload is enabled." >&2
+	if [ "$AUTOLOAD" -eq 1 ]; then
+		echo "         or reboot, since autoload is enabled." >&2
+	else
+		echo "         Rebooting will NOT pick it up: autoload is disabled," >&2
+		echo "         so nothing loads the module at boot." >&2
+	fi
 	exit 1
 fi

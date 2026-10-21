@@ -1,7 +1,10 @@
 #!/usr/bin/make -f
 
 MODULE = gigabyte-laptop
-VERSION = $(shell dpkg-parsechangelog | sed -n 's/^Version: //p')
+# Strip the Debian revision: every other packaging path (RPM, PKGBUILD,
+# scripts/install-dkms.sh) registers the module as 0.2.0, and a DKMS tree
+# called gigabyte-laptop-0.2.0-1 would not match any of them.
+VERSION = $(shell dpkg-parsechangelog | sed -n 's/^Version: //p' | sed -e 's/-[^-]*$$//')
 %:
 	dh $@ --parallel --with dkms
 

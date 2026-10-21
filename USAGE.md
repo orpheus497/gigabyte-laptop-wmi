@@ -164,7 +164,7 @@ All VE and newer models (e.g. Aero 16 XE5) return four 8-bit values, while older
 
 Aero/AORUS laptops support reading the current PWM for each fan. This should not be confused with the custom fan speed, which returns the PWM for use in custom fan mode.
 
-The sysfs and HWMON nodes are read-only, but support for writing to HWMON nodes will be added in the future. The sysfs node will only return the PWM for the CPU fan, while the HWMON nodes have separate channels for CPU and GPU fans.
+The sysfs and HWMON nodes are read-only, and stay that way until a firmware mechanism is found that actually sets a proportional duty. Two were tried on a Gigabyte Gaming A16 and neither worked: method `0x6A` writes a single bit and runs the fans flat out, and method `0x70` ignored the target entirely and *stopped both fans* when asked for 100%. The sysfs node will only return the PWM for the CPU fan, while the HWMON nodes have separate channels for CPU and GPU fans.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/fan_pwm`
 
@@ -187,6 +187,15 @@ it rather than the mode actually in effect. It starts at `0` when the driver
 loads, whatever the firmware is doing. The firmware also resets the mode on
 every boot.
 
+**On a Gigabyte Gaming A16 (`GA65TH`, BIOS FB03) the write lands but nothing
+applies it.** The WMI call succeeds and the firmware sets its NPCF values, but
+the GPU's power limit does not move: `nvidia-powerd` cannot initialise, because
+the SBIOS does not hand over the power-limit table it needs
+(`Failed to get SysPwrLimitGetInfo`). The limit stays capped below the VBIOS
+default and `nvidia-smi -pl` is refused as well, since the platform owns TGP on
+laptop GPUs. Nothing in this driver can change that; check whether a BIOS or
+driver update has fixed it with `journalctl -u nvidia-powerd -b | head`.
+
 **Node:** `/sys/devices/platform/gigabyte_laptop/perf_mode`
 
 **Example:** To switch to boost mode:
@@ -199,8 +208,14 @@ echo '2' | sudo tee /sys/devices/platform/gigabyte_laptop/perf_mode
 
 Gigabyte Gaming laptops support dynamic boost, which shifts power between the
 CPU and the discrete GPU under load. The embedded controller takes this value
-inverted, but the node reads and writes the conventional way around: 0 to
-disable, 1 to enable.
+inverted, and the driver hides that, so the node reads back whatever was
+written to it: `0 -> 1 -> 0` round-trips correctly.
+
+**Which value means "enabled" is unverified.** It is `0` to disable and `1` to
+enable on the model this was ported from, but confirming it needs the GPU's
+power limit to respond, and on `GA65TH` that path is broken (see Performance
+mode above). The node is self-consistent either way; it may be semantically
+inverted.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/dynamic_boost`
 
@@ -279,12 +294,24 @@ the desktop indicator.
 **Nodes:**
 
 ```text
-/sys/class/platform-profile/platform-profile-0/profile
 /sys/firmware/acpi/platform_profile
+/sys/class/platform-profile/platform-profile-*/profile
 ```
 
-The second is the aggregate the ACPI core maintains, and is what `tuned` and
-power-profiles-daemon write.
+The first is the aggregate the ACPI core maintains, and is what `tuned` and
+power-profiles-daemon write. It is the stable path; prefer it.
+
+The class directory holds one entry per registered handler, numbered in
+registration order, so the index is not fixed — `amd_pmf` registers a second
+one named `amd-pmf` on machines where it binds. Find this driver's by name
+rather than assuming index 0:
+
+```sh
+grep -l '^gigabyte_laptop$' /sys/class/platform-profile/*/name
+```
+
+When more than one handler is registered, the aggregate is the intersection of
+their choices and reads `custom` when they disagree.
 
 **Example:** To switch to the performance fan policy:
 

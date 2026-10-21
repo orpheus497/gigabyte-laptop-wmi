@@ -8,6 +8,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/acpi.h>
+#include <linux/cleanup.h>
 #include <linux/dmi.h>
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
@@ -18,6 +19,7 @@
 #include <linux/platform_device.h>
 #include <linux/platform_profile.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/wmi.h>
 #include <linux/string.h>
 
@@ -95,6 +97,16 @@ struct gigabyte_laptop_wmi {
 	struct device *ppdev;
 	struct fan_curve_data fan_curve;
 
+	/*
+	 * Every fan transition is a read-modify-write: set_fan_mode() decides
+	 * what to clear from the mode currently cached here, and the caller
+	 * writes the new one back afterwards. Two writers interleaving there
+	 * leave the cached mode describing a state the EC is not in, and
+	 * sysfs attributes, hwmon and platform_profile are three independent
+	 * entry points into it.
+	 */
+	struct mutex fan_lock;
+
 	enum platform_profile_option profile;
 
 	int fan_mode;
@@ -149,11 +161,17 @@ static u8 fan_modes[] = {
  * Gigabyte Gaming (2025+) firmware exposes performance mode, dynamic boost and
  * turbo fan through method IDs that older Aero/AORUS firmware does not have.
  */
-static bool gigabyte_laptop_is_gaming_family(void)
+static bool gigabyte_laptop_family_is(const char *name)
 {
 	const char *family = dmi_get_system_info(DMI_PRODUCT_FAMILY);
 
-	return family && !strcmp(family, "GIGABYTE GAMING");
+	// Firmware is not obliged to publish a family, so never hand NULL to strcmp
+	return family && !strcmp(family, name);
+}
+
+static bool gigabyte_laptop_is_gaming_family(void)
+{
+	return gigabyte_laptop_family_is("GIGABYTE GAMING");
 }
 
 /* WMI methods ********************************************/
@@ -168,7 +186,7 @@ static int gigabyte_laptop_get_devstate_raw(u32 method_id, u32 arg2, void *resul
 
 	status = wmi_evaluate_method(WMI_METHOD_WMBC, 0, method_id, &input, &buffer);
 	if (ACPI_FAILURE(status))
-		return -1;
+		return -EIO;
 
 	obj = buffer.pointer;
 	if (obj && obj->type == ACPI_TYPE_INTEGER) {
@@ -228,7 +246,7 @@ static int gigabyte_laptop_set_devstate(u32 method_id, u32 arg2, int *result)
 
 	status = wmi_evaluate_method(WMI_METHOD_WMBD, 0, method_id, &input, &buffer);
 	if (ACPI_FAILURE(status))
-		return -1;
+		return -EIO;
 
 	obj = buffer.pointer;
 	if (obj && obj->type == ACPI_TYPE_INTEGER)
@@ -311,6 +329,7 @@ static umode_t gigabyte_laptop_hwmon_is_visible(const void *data, enum hwmon_sen
 				default:
 					break;
 			}
+			break;
 		default:
 			break;
 	}
@@ -320,7 +339,10 @@ static umode_t gigabyte_laptop_hwmon_is_visible(const void *data, enum hwmon_sen
 static int gigabyte_laptop_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 					u32 attr, int channel, long *val)
 {
-	int ret, output;
+	// Anything this switch does not reach is a channel hwmon should not have
+	// asked for, so the default is an error rather than a silent success.
+	int ret = -EOPNOTSUPP;
+	int output;
 	u8 result;
 	u8 fan_channels[] = { FAN_CPU_RPM, FAN_GPU_RPM, FAN_THREE_RPM, FAN_FOUR_RPM };
 	u8 fan_pwm_channels[] = { FAN_PWM, GPU_FAN_DUTY };
@@ -351,6 +373,7 @@ static int gigabyte_laptop_hwmon_read(struct device *dev, enum hwmon_sensor_type
 					break;
 				default:
 					*val = 0;
+					ret = 0;
 					break;
 			}
 			break;
@@ -359,8 +382,8 @@ static int gigabyte_laptop_hwmon_read(struct device *dev, enum hwmon_sensor_type
 			if (ret)
 				break;
 			// Gigabyte Gaming laptops store fan RPM in little-endian
-			if (!strcmp(dmi_get_system_info(DMI_PRODUCT_FAMILY),"GIGABYTE GAMING") ||
-				!strcmp(dmi_get_system_info(DMI_PRODUCT_FAMILY),"GIGABYTE AERO"))
+			if (gigabyte_laptop_family_is("GIGABYTE GAMING") ||
+				gigabyte_laptop_family_is("GIGABYTE AERO"))
 				*val = output;
 			else
 				*val = convert_fan_rpm(output);
@@ -387,14 +410,16 @@ static int gigabyte_laptop_hwmon_read(struct device *dev, enum hwmon_sensor_type
 						*val = GIGABYTE_FAN_CTRL_MANUAL;
 					else
 						*val = GIGABYTE_FAN_CTRL_AUTO;
+					ret = 0;
 					break;
 				default:
 					break;
 			}
+			break;
 		default:
 			break;
 	}
-	return 0;
+	return ret;
 }
 
 
@@ -498,8 +523,20 @@ static int set_fan_mode(struct gigabyte_laptop_wmi *gigabyte, u32 fan_mode)
 		}
 	} else if (fan_mode == FAN_CUSTOM_MODE) {
 		if (gigabyte->fan_mode > 3) {
-			pr_warn("Custom mode is already enabled\n");
-			return 0;
+			/*
+			 * Auto-maximum and fixed mode both sit on top of custom
+			 * mode, so dropping to plain custom means clearing the one
+			 * in effect. Reporting custom as already enabled and
+			 * returning left the fans held while the caller went on to
+			 * cache mode 3. Auto-maximum clears only through gaming or
+			 * silent mode, as disable_custom_fan_mode() also relies on.
+			 */
+			if (gigabyte->fan_mode == 4)
+				ret = gigabyte_laptop_set_devstate(FAN_GAMING_MODE, 0, &result);
+			else
+				ret = gigabyte_laptop_set_devstate(fan_modes[gigabyte->fan_mode], 0, &result);
+			if (ret)
+				return ret;
 		} else if (gigabyte->fan_mode > 0) {
 			ret = gigabyte_laptop_set_devstate(fan_modes[gigabyte->fan_mode], 0, &result);
 			if (ret)
@@ -545,10 +582,11 @@ static ssize_t fan_mode_store(struct device *dev, struct device_attribute *attr,
 	ret = kstrtouint(buf, 0, &fan_mode);
 	if (ret) {
 		pr_err("kstrtouint failed\n");
-		return count;
+		return ret;
 	}
 
 	gigabyte = dev_get_drvdata(dev);
+	guard(mutex)(&gigabyte->fan_lock);
 
 	if (gigabyte->fan_mode == fan_mode) {
 		pr_warn("Already set to that fan mode\n");
@@ -611,7 +649,14 @@ static ssize_t fan_custom_speed_store(struct device *dev, struct device_attribut
 	if (ret)
 		return ret;
 
+	// The node's range is 0-255, as upstream documents it
+	if (speed > 255) {
+		pr_err("Invalid fan speed\n");
+		return -EINVAL;
+	}
+
 	gigabyte = dev_get_drvdata(dev);
+	guard(mutex)(&gigabyte->fan_lock);
 
 	ret = set_fan_custom_speed(gigabyte, speed);
 	if (ret)
@@ -858,6 +903,7 @@ static ssize_t fan_turbo_store(struct device *dev, struct device_attribute *attr
 	}
 
 	gigabyte = dev_get_drvdata(dev);
+	guard(mutex)(&gigabyte->fan_lock);
 
 	if (gigabyte->fan_turbo == enable)
 		return count;
@@ -895,10 +941,10 @@ static ssize_t fan_turbo_store(struct device *dev, struct device_attribute *attr
 
 		/*
 		 * Drop back to normal mode before restoring. set_fan_mode()
-		 * transitions from whatever fan_mode currently says, and asking it
-		 * to go straight from fixed mode to custom mode only warns that
-		 * custom mode is already enabled and returns, which would leave the
-		 * fans latched at a fixed duty while this node claimed otherwise.
+		 * transitions out of whatever fan_mode currently says, so going
+		 * through normal mode gives the restore one well-defined starting
+		 * point whatever the saved mode turns out to be. This is the path
+		 * validated on hardware.
 		 */
 		ret = set_fan_mode(gigabyte, fan_modes[0]);
 		if (ret)
@@ -1318,6 +1364,8 @@ static int gigabyte_laptop_profile_set(struct device *dev,
 	if (mode < 0)
 		return mode;
 
+	guard(mutex)(&gigabyte->fan_lock);
+
 	gigabyte->profile = profile;
 
 	/*
@@ -1504,6 +1552,29 @@ static bool gigabyte_laptop_event_driver_live;
 
 /* Driver init ********************************************/
 
+/*
+ * Called before hwmon registration, not from probe. hwmon asks
+ * gigabyte_laptop_hwmon_is_visible() which channels to expose as it registers,
+ * so these two flags have to be set by then or fan3_input and fan4_input never
+ * appear on the three- and four-fan AORUS models.
+ */
+static void gigabyte_laptop_detect_fan_count(struct gigabyte_laptop_wmi *gigabyte)
+{
+	if (!dmi_check_system(gigabyte_laptop_quirks_needed))
+		return;
+
+	if ((find_str(dmi_get_system_info(DMI_PRODUCT_NAME), "AORUS 17X") == 0 &&
+		dmi_get_bios_year() >= 2023) ||
+		find_str(dmi_get_system_info(DMI_PRODUCT_NAME), "AORUS Master 18") == 0) {
+		gigabyte->has_four_fans = 1;
+	}
+	else if (find_str(dmi_get_system_info(DMI_PRODUCT_NAME), "AORUS 16X") == 0 ||
+		(find_str(dmi_get_system_info(DMI_PRODUCT_NAME), "AORUS 17") == 0 &&
+		dmi_get_bios_year() >= 2023)) {
+		gigabyte->has_three_fans = 1;
+	}
+}
+
 static int gigabyte_laptop_probe(struct device *dev)
 {
 	int ret, output;
@@ -1512,9 +1583,9 @@ static int gigabyte_laptop_probe(struct device *dev)
 
 	// Older devices are using a different method ID for silent fan mode.
 	// In that case, newer devices won't return anything when using that ID.
-	if (!strcmp(dmi_get_system_info(DMI_PRODUCT_FAMILY),"GIGABYTE GAMING") ||
-		!strcmp(dmi_get_system_info(DMI_PRODUCT_FAMILY),"GIGABYTE AERO") ||
-		!strcmp(dmi_get_system_info(DMI_PRODUCT_FAMILY),"AORUS")) {
+	if (gigabyte_laptop_family_is("GIGABYTE GAMING") ||
+		gigabyte_laptop_family_is("GIGABYTE AERO") ||
+		gigabyte_laptop_family_is("AORUS")) {
 		pr_info("Skipping silent fan mode ID check, this only applies to old models\n");
 		gigabyte->fan_silent_method = FAN_SILENT_MODE;
 		goto obtain_fan_mode;
@@ -1654,11 +1725,11 @@ obtain_custom_fan_speed:
 	}
 
 	// AORUS VG, Gaming (2025+) and all Aero X16 models can eject dGPU
-	if (!strcmp(dmi_get_system_info(DMI_PRODUCT_FAMILY), "GIGABYTE AERO") ||
-		!strcmp(dmi_get_system_info(DMI_PRODUCT_FAMILY), "GIGABYTE GAMING")) {
+	if (gigabyte_laptop_family_is("GIGABYTE AERO") ||
+		gigabyte_laptop_family_is("GIGABYTE GAMING")) {
 		gigabyte->has_dgpu_ejector = 1;
 	}
-	else if (!strcmp(dmi_get_system_info(DMI_PRODUCT_FAMILY), "AORUS") &&
+	else if (gigabyte_laptop_family_is("AORUS") &&
 		dmi_get_bios_year() >= 2024) {
 		// Specifically check if we are on any of the AORUS VG models.
 		// This filters out all VF models, as some have BIOS updates released
@@ -1699,20 +1770,6 @@ obtain_custom_fan_speed:
 			pr_info("Dynamic boost unsupported by this firmware\n");
 	}
 
-	// Finally, check for quirks in the system
-	if (dmi_check_system(gigabyte_laptop_quirks_needed)) {
-		if ((find_str(dmi_get_system_info(DMI_PRODUCT_NAME), "AORUS 17X") == 0 &&
-			dmi_get_bios_year() >= 2023) ||
-			find_str(dmi_get_system_info(DMI_PRODUCT_NAME), "AORUS Master 18") == 0) {
-			gigabyte->has_four_fans = 1;
-		}
-		else if (find_str(dmi_get_system_info(DMI_PRODUCT_NAME), "AORUS 16X") == 0 ||
-			(find_str(dmi_get_system_info(DMI_PRODUCT_NAME), "AORUS 17") == 0 &&
-			dmi_get_bios_year() >= 2023)) {
-			gigabyte->has_three_fans = 1;
-		}
-	}
-
 	return 0;
 }
 
@@ -1742,6 +1799,8 @@ static void __exit gigabyte_laptop_exit(void)
 	sysfs_remove_group(&gigabyte->pdev->dev.kobj, &gigabyte_laptop_attr_group);
 	platform_driver_unregister(&platform_driver);
 	platform_device_unregister(gigabyte->pdev);
+	platform_device = NULL;
+	mutex_destroy(&gigabyte->fan_lock);
 	kfree(gigabyte);
 }
 
@@ -1773,15 +1832,19 @@ static int __init gigabyte_laptop_init(void)
 		goto fail_platform_driver;
 	}
 
+	mutex_init(&gigabyte->fan_lock);
+
 	// Needed before the attribute group is created, as it gates what is shown
 	gigabyte->gaming_family = gigabyte_laptop_is_gaming_family();
+
+	// Needed before hwmon registration, as it gates which fans are exposed
+	gigabyte_laptop_detect_fan_count(gigabyte);
 
 	platform_device = platform_device_alloc(GIGABYTE_LAPTOP_FILE, -1);
 	if (!platform_device) {
 		pr_warn("Unable to allocate platform device\n");
-		kfree(gigabyte);
 		result = -ENOMEM;
-		goto fail_platform_driver;
+		goto fail_alloc;
 	}
 
 	gigabyte->pdev = platform_device;
@@ -1803,7 +1866,7 @@ static int __init gigabyte_laptop_init(void)
 	if (IS_ERR(gigabyte->hwmon_dev)) {
 		result = PTR_ERR(gigabyte->hwmon_dev);
 		pr_err("hwmon registration failed with %d\n", result);
-		goto fail_sysfs;
+		goto fail_hwmon;
 	}
 
 	result = gigabyte_laptop_probe(&gigabyte->pdev->dev);
@@ -1848,11 +1911,17 @@ static int __init gigabyte_laptop_init(void)
 
 fail_probe:
 	hwmon_device_unregister(gigabyte->hwmon_dev);
+fail_hwmon:
 	sysfs_remove_group(&gigabyte->pdev->dev.kobj, &gigabyte_laptop_attr_group);
 fail_sysfs:
 	platform_device_del(gigabyte->pdev);
 fail_platform_device:
 	platform_device_put(gigabyte->pdev);
+	// is_visible() reads this global, so leave nothing dangling behind it
+	platform_device = NULL;
+fail_alloc:
+	mutex_destroy(&gigabyte->fan_lock);
+	kfree(gigabyte);
 fail_platform_driver:
 	platform_driver_unregister(&platform_driver);
 	return result;

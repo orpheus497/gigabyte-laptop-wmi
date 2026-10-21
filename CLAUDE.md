@@ -63,12 +63,15 @@ Two consequences:
 - **DMI matching is safe across gens.** The driver's match table keys on
   `DMI_BOARD_VENDOR` + `DMI_PRODUCT_FAMILY` (`GIGABYTE GAMING`), never on the
   gen suffix, so the gate passes regardless.
-- **Method IDs are not safe across gens.** `0xED`, `0xE7` and `0x7D` were
-  validated on `CWH` — a different generation on Intel, where this is AMD
-  Rembrandt. **Treat every fork-derived method ID as unvalidated until checked
-  on this unit via `debug_method`.** Same for the fork's `~6500 RPM` turbo
-  figure and its 55 W → 70 W TGP numbers, which are RTX 5070 values; this unit
-  has an RTX 5050.
+- **Method IDs are not safe across gens.** `0xED`, `0xE7` and `0x7D` arrived
+  validated only on `CWH` — a different generation on Intel, where this is AMD
+  Rembrandt. **All three have since been checked on `GA65TH`** and are recorded
+  under "Step 2 validation": `0xE7` reads back, `0xED` is write-only exactly as
+  the ASL predicted, and `0x7D` drives the fans to ~5250 RPM. **Every *other*
+  fork-derived method ID is still unvalidated until checked on this unit via
+  `debug_method`.** The fork's `~6500 RPM` turbo figure and its 55 W → 70 W TGP
+  numbers remain wrong here: they are RTX 5070 values and this unit has an
+  RTX 5050. The measured turbo figure on this chassis is ~5250 RPM.
 
 ### WMI devices (all present, all unclaimed)
 
@@ -108,10 +111,13 @@ blocked in code), `has_three_fans = has_four_fans = 0` → **2 fans, 3 temps,
 - **No platform profile is registered.** `/sys/class/platform-profile/` exists
   but is **empty**, and `/sys/firmware/acpi/platform_profile` does not exist.
   The slot is free — see "Power profiles" below.
-- **`GBT0005:00` is a live notify target on this machine — a Step 5 candidate.**
-  Earlier notes said it was an inert side-effect stub; that was the 3VH, and it
-  is **wrong for the 5TH**. On BIOS FB03 it is simply present, with no dGPU
-  latch and no `RXCM` check:
+- **`GBT0005:00` is declared and present, but it is _not_ what the hotkeys
+  use.** *Historical hypothesis, since disproven — kept because the firmware
+  facts below are still accurate and the device is still a candidate for
+  whatever else the Windows driver does with it.* It was a leading Step 5
+  candidate until an instrumented build showed the keys arriving over WMI with
+  **no `GBT0005` notify at all**; see "Settled on hardware" under Phase 3. On
+  BIOS FB03 it is simply present, with no dGPU latch and no `RXCM` check:
 
   ```asl
   Device (GAPD) {
@@ -127,9 +133,11 @@ blocked in code), `has_three_fans = has_four_fans = 0` → **2 fans, 3 temps,
   ```
 
   That is the behaviour previously thought Intel-only, and it is what the
-  Windows UMDF driver on `ACPI\GBT0005` listens for. Since the GiMate key emits
-  **no i8042 scancode at all** (tested), this is now a leading candidate for it,
-  and an `acpi_driver` with a notify handler is simpler than the WMI route.
+  Windows UMDF driver on `ACPI\GBT0005` listens for. The GiMate key emits **no
+  i8042 scancode at all** (tested), which is what made this look promising —
+  but `_Q63` never fires for either key on Linux, so the `acpi_driver` route was
+  not the answer. The handler is still registered as a diagnostic, and it has
+  stayed silent.
 
 ## Firmware reference
 
@@ -156,7 +164,8 @@ firmware code, identical across every unit of a given model and BIOS, so a DSDT
 carries nothing specific to one machine. Two tables in a full dump do:
 
 - **`MSDM`** holds the OEM Windows licence key.
-- **`SLIC`/`SLIT`**, where present, hold OEM licensing data.
+- **`SLIC`**, where present, holds OEM licensing data. (`SLIT` is the System
+  Locality Information Table — NUMA distances, nothing to do with licensing.)
 
 Neither is committed here, and `*.dat` being gitignored means a stray
 `acpidump` cannot add them by accident. Per-machine identifiers such as the
@@ -527,8 +536,12 @@ Install via DKMS, which signs automatically with the already-enrolled key:
 
 - **`FAN_DUTY_MAX` is `0xE5` (229), and that is a real ceiling.** Upstream issue
   #46: duties above 229 *stop the fans entirely* on the AERO 17-XA. The driver
-  must never program a higher duty for itself. The `fan_custom_speed` node still
-  accepts 0–255 as upstream intends.
+  must never program a higher duty for itself, and the one place it picks a duty
+  — `fan_turbo` — uses exactly `FAN_DUTY_MAX`. The `fan_custom_speed` node still
+  accepts the full 0–255 as upstream intends, and now **rejects anything above
+  255** rather than passing an arbitrary `u32` to the EC. Deliberately *not*
+  clamped to 229: upstream documents the wider range, and a user asking for a
+  duty above the ceiling on an affected model is making an informed choice.
 - ~~Probe aborts the whole module on any optional-method failure.~~ **Fixed in
   Step 1.** `gigabyte_laptop_init()` still treats a probe error as fatal, but
   probe no longer returns one for a firmware read: fan-mode detection falls back
@@ -574,14 +587,17 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   and logs `ASUS Management GUID not found`. ASUS's Eee PC interface and
   Gigabyte's AMW0 share the same AMI-derived GUID block. This must be
   blacklisted before working on the GiMate button.
-- **Kernel cmdline leftovers, and `acpi_osi=Linux` is now implicated.**
-  `acpi_osi=Linux acpi_enforce_resources=lax` are both leftovers from the
+- ~~**Kernel cmdline leftovers, and `acpi_osi=Linux` is now implicated.**~~
+  **Removed, and the `acpi_osi` theory was disproven.**
+  `acpi_osi=Linux acpi_enforce_resources=lax` were both leftovers from the
   earlier fan-control attempts. `acpi_enforce_resources=lax` relaxes ACPI
   resource conflict checks, which `ec_sys`-style direct EC poking needed and
   this driver does not. `acpi_osi=Linux` forces the firmware's Linux `_OSI`
-  branch, and is the leading explanation for `nvidia-powerd` failing to read
-  the SBIOS power-limit table — see the `perf_mode` findings under Step 2.
-  Remove both.
+  branch, and *was* the leading explanation for `nvidia-powerd` failing to read
+  the SBIOS power-limit table. Both are now off the cmdline and
+  `nvidia-powerd` fails identically — see the `perf_mode` findings under
+  Step 2, and do not re-litigate it. Removing them was still worth doing;
+  neither was load-bearing.
 
 ## Phase status
 
@@ -643,10 +659,10 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~0~~ | ~~DKMS install, load, verify hwmon channels appear~~ **done** | low |
 | ~~1~~ | ~~Clamp the `memcpy`; make optional probe reads non-fatal~~ **done** | low |
 | ~~1b~~ | ~~Extend `debug_method` to take an argument~~ **done** | low |
-| 2 | Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel | medium |
+| ~~2~~ | ~~Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel~~ **done** — all three confirmed; GPU TGP closed as firmware-blocked | medium |
 | ~~3~~ | ~~`platform_profile` handler~~ **done** — over fan policy, not GPU power | low |
 | 4 | Writable `pwm1`/`pwm2` — **two mechanisms tried and rejected**, read scaling kept | medium |
-| ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **built**; keycodes not yet observed in userspace | low |
+| ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** — both keys scan in and are bound in KDE | low |
 | 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
 
 Steps 0, 1 and 1b are complete and verified on hardware: `gigabyte-laptop/0.2.0`
@@ -755,10 +771,20 @@ KDE can bind them:
 
 `asus-wmi` uses `KEY_PROG1`..`4` for vendor keys for the same reason. Events the
 keymap does not cover are still logged, so a number this firmware uses that we
-have not seen can be added. Mode may *additionally* drive
-`platform_profile_cycle()` once Step 3's handler exists; that is deliberately
-not wired yet, so the key has one meaning rather than changing behaviour
-underneath the user.
+have not seen can be added.
+
+**Confirmed in userspace.** Both keys reach the desktop and are bound in KDE:
+Mode to the power-profile switcher, GiMate to Steam Big Picture. That closes
+Step 5 — the keycodes were the last unverified link, since the kernel log had
+only ever shown the WMI events arriving.
+
+Mode may *additionally* drive `platform_profile_cycle()` in the kernel, and
+Step 3's handler now exists, so that is possible. It is still deliberately not
+wired: the key currently has exactly one meaning, chosen by the user in their
+desktop, and the standing intent is for Mode to cycle **fan presets** including
+gaming rather than the three battery profiles. Wiring `platform_profile_cycle()`
+would give it the battery profiles instead, so doing it would need the
+precedence decision recorded under Step 3 first.
 
 The module now depends on `sparse-keymap`, which is `CONFIG_INPUT_SPARSEKMAP=m`
 on this kernel and loaded automatically as a dependency.
@@ -907,11 +933,17 @@ supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 
 ## Settled decisions
 
-### Step 3 design
+### Step 3 design — superseded, kept for the record
 
-- **A profile switch sets `perf_mode` and `dynamic_boost` only.** Fan settings
-  are deliberately left alone, so a custom fan curve survives profile changes.
-  Target mapping:
+> **This is the original GPU-power design and is _not_ what shipped.** It
+> assumed `perf_mode` reached the GPU's TGP, which turned out to be false on
+> this firmware. The design that shipped is **"Step 3 design: profiles over fan
+> policy, with PWM taking precedence"** further down, and that is the only
+> current contract. Nothing here describes live behaviour.
+
+- ~~**A profile switch sets `perf_mode` and `dynamic_boost` only.**~~ Fan
+  settings were to be left alone, so a custom fan curve survived profile
+  changes. Target mapping, never implemented:
 
   | Profile | `perf_mode` | `dynamic_boost` |
   |---|---|---|
@@ -921,17 +953,17 @@ supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
   | `balanced-performance` | 1 | on |
   | `performance` | 2 boost | on |
 
-- **Keep the raw `perf_mode` node alongside `platform_profile`.**
-  `platform_profile` is the canonical writer; `perf_mode` reads through the
-  same stored value and stays available for scripting and for debugging a bad
-  mapping. One source of truth in the driver, two views onto it — they must not
-  be able to disagree.
-- **Test `amd_pmf.force_load=1` before writing Step 3**, so it is known whether
-  the handler will be sharing the aggregate with `amd-pmf`.
+- **Keep the raw `perf_mode` node alongside `platform_profile`.** Still true,
+  though for a different reason now: nothing writes it, and it stays available
+  for scripting and for the day a BIOS update makes NVPCF work.
+- ~~**Test `amd_pmf.force_load=1` before writing Step 3**~~, so it is known
+  whether the handler will be sharing the aggregate with `amd-pmf`. Not done,
+  and no longer blocking: the handler shipped and registered cleanly as the sole
+  handler. Still worth trying on its own merits —
   `sudo grubby --update-kernel=ALL --args="amd_pmf.force_load=1"`, reboot, then
   read `/sys/class/platform-profile/*/{name,profile,choices}`. Revert with
   `grubby --remove-args`.
-- **Keep `tuned`; do not install `power-profiles-daemon`.**
+- **Keep `tuned`; do not install `power-profiles-daemon`.** Still current.
 
 ### Step 4: writable PWM is reverted, and here is what the firmware does
 
@@ -1067,12 +1099,20 @@ the fans from gaming. If the Mode key starts selecting gaming deliberately, that
 needs a precedence decision of its own, the way `pwm_enable` already has one.
 
 **Precedence rule, so profiles and CoolerControl do not fight.** The hwmon ABI
-already carries the state: `pwm_enable` is `1` when userspace holds the fans and
-`2` when the EC does, and in this driver that is exactly `fan_mode == 5`. So
-**manual control wins while it is active** — a profile switch records the
-profile but leaves fan policy alone whenever `pwm_enable` reads `1`, and applies
-it on the next switch after `pwm_enable` returns to `2`. Nothing yanks the fans
-out from under a running fan curve.
+carries the state, and this driver maps it from `fan_mode`:
+
+| `fan_mode` | `pwm_enable` | Meaning |
+|---|---|---|
+| 5 fixed | `0` | full speed — ADJF is one bit, so it is not a duty |
+| 4 auto-max | `1` | userspace holds both fans at a duty |
+| 0–3 | `2` | an EC curve driven from temperature |
+
+So **anything the user set deliberately wins while it is active.** The test in
+`gigabyte_laptop_profile_set()` is `fan_mode > 2`, which covers the custom
+curve (3) as well as the two `pwm_enable != 2` states: a profile switch records
+the profile but leaves fan policy alone, and applies it on the next switch once
+the fans are back on an EC preset. Nothing yanks the fans out from under a
+running fan curve.
 
 ### Step 2 validation
 
@@ -1202,11 +1242,13 @@ broken on BIOS FB03 with the 615.78.08 open kernel module. Nothing in
 makes `nvidia-powerd` start cleanly — the one-line check is
 `journalctl -u nvidia-powerd -b | head`.
 
-**Consequence for Step 3.** The settled design was "a profile switch sets
-`perf_mode` and `dynamic_boost` only, fan settings deliberately left alone".
-That rationale assumed `perf_mode` did something. With TGP unreachable, a
-profile built on it would do nothing at all, so the design needs revisiting —
-see Open decisions.
+**Consequence for Step 3 — resolved.** The original design was "a profile
+switch sets `perf_mode` and `dynamic_boost` only, fan settings deliberately
+left alone". That rationale assumed `perf_mode` did something; with TGP
+unreachable a profile built on it would have done nothing at all. The design
+was therefore rewritten over **fan policy**, shipped, and verified on hardware
+— see "Step 3 design: profiles over fan policy, with PWM taking precedence".
+No longer an open question.
 
 ### `dynamic_boost` round-trips, direction still unknown
 
@@ -1226,17 +1268,19 @@ Which direction means "boost on" cannot be settled while the TGP is pinned, so
 
 ## Pending root-only diagnostics
 
-Neither can run from a non-interactive shell; they need a password.
+This needs a password, so it cannot run from a non-interactive shell.
 
 ```sh
 # Dump every table and decompile all of them, not just the DSDT. AMDI0100 and
 # the APMF methods are not in the DSDT, so they must be in an SSDT.
-sudo acpidump -b && iasl -d dsdt.dat ssdt*.dat
-
-# Live capture on the ECSH vendor pipe. Press GiMate / Fn+Space / Mode
-# while this runs. Read-only; it only listens.
-sudo timeout 20 cat /dev/hidraw2 | xxd
+# acpidump -b writes into the current directory and runs as root, so do it in a
+# scratch directory -- never in the checkout, or the repo fills with root-owned
+# .dat and .dsl files.
+d=$(mktemp -d) && cd "$d" && sudo acpidump -b && iasl -d dsdt.dat ssdt*.dat
 ```
 
-If bytes appear on `hidraw2` when GiMate is pressed, Steps 5 and 6 both open up
-considerably.
+~~Live capture on the ECSH vendor pipe~~ — **done, and the answer was no.**
+`sudo timeout 20 cat /dev/hidraw2 | xxd` over a window with GiMate and Fn+F7
+pressed produced **no bytes**, and the instrumented build then showed both keys
+arriving over WMI. Step 5 shipped on the WMI path and needs nothing from
+`hidraw2`; the pipe is only relevant to the RGB work in Step 6.

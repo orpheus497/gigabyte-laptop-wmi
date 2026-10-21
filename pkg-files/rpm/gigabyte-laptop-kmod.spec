@@ -33,7 +33,14 @@ BuildRequires:  %{_bindir}/kmodtool
 
 %{!?kernels:BuildRequires: buildsys-build-rpmfusion-kerneldevpkgs-%{?buildforkernels:%{buildforkernels}}%{!?buildforkernels:current}-%{_target_cpu} }
 
-# kmodtool does its magic here
+# kmodtool does its magic here.
+#
+# The driver was renamed from aorus-laptop, but kmodtool generates the kmod and
+# akmod subpackages itself and gives no hook for adding Obsoletes to them, so
+# akmod-gigabyte-laptop cannot declare that it replaces akmod-aorus-laptop.
+# Only gigabyte-laptop-kmod-common obsoletes its predecessor. Anyone upgrading
+# from the old name has to remove the old akmod by hand:
+#   sudo dnf remove akmod-aorus-laptop aorus-laptop-kmod-common
 %{expand:%(kmodtool --target %{_target_cpu} --repo rpmfusion --kmodname %{name} %{?buildforkernels:--%{buildforkernels}} %{?kernels:--for-kernels "%{?kernels}"} 2>/dev/null) }
 
 %description
@@ -83,5 +90,8 @@ rm -rf $RPM_BUILD_ROOT
 
 
 %changelog
+* Tue Oct 21 2025 Albert Tang <tangalbert919@yahoo.com> - 0.2.0-2
+- Rename the driver from aorus-laptop to gigabyte-laptop
+
 * Fri Nov 1 2024 Albert Tang <tangalbert919@yahoo.com> - 0.1.0
 - Initial release for RPM-based Linux distros

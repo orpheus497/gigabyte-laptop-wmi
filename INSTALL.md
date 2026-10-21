@@ -15,8 +15,12 @@ dkms ldtarball driver.tar.gz
 
 If you have this repository checked out locally, you can create a tarball and then load it into the DKMS tree:
 ```
-tar -czf driver.tar.gz Makefile gigabyte-laptop.c dkms.conf
+tar -czf driver.tar.gz Makefile gigabyte-laptop.c dkms.conf gigabyte-laptop.conf
 ```
+
+`gigabyte-laptop.conf` is the `/etc/modules-load.d` entry referred to above.
+DKMS does not install it for you, so include it in the archive and copy it into
+place by hand.
 
 Be sure to edit the `PACKAGE_VERSION` flag in `dkms.conf` before creating the tarball.
 
