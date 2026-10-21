@@ -1194,6 +1194,79 @@ own DSDT and this kernel's headers, not inferred from field names.
   its field width given a four-byte argument buffer and a four-bit destination.
   Load-bearing for a reason their author did not state.
 
+### Hardware measurements, 22 Oct 2026 — results and what they settle
+
+Run against the installed module with the debug nodes, no rebuild. Separated
+into what is established and what is not, because one of the two tests did not
+measure what it was meant to.
+
+#### `0xF6` / `KBLL`: the EC publishes its own level, and it looks binary
+
+**The zero-write test paid off.** Pressing Fn+Space produces WMI events:
+
+```
+gigabyte_laptop: Unrecognised WMI event 0xf6 (state 0x00)
+gigabyte_laptop: Unrecognised WMI event 0xf6 (state 0x01)
+gigabyte_laptop: Unrecognised WMI event 0xf6 (state 0x00)
+   ... alternating, with the backlight toggling on and off per press
+```
+
+Two findings, one solid and one strongly indicated:
+
+- **`KBLL` is live state the EC maintains and publishes**, not a write-only
+  command byte. That is the behaviour the Intel siblings implement explicitly
+  as `_Q94 { SMGR (0xF6, KBLL) }`; the 5TH has no `_Q94` and delivers it through
+  the generic `_Q45 { SMGR (WEVN, WEVS) }` path instead, which is why it arrives
+  as an ordinary event the driver already logs.
+- **The backlight appears to have exactly two levels.** The state byte alternates
+  `0x00`/`0x01` in step with the light going off and on. If that holds,
+  `max_brightness` is **1** — not 3, not 100, not 255 — and the whole "probe
+  upward for the ceiling" exercise is unnecessary, because the EC answered it.
+
+**Why `state` is probably the level and not a key make/break.** The obvious
+alternative reading is that `0x00`/`0x01` is press-and-release. It is not,
+because GiMate behaves differently on the same event path: five presses gave
+five events, all with `state` `0x00` (`ce 00 bb cc` ×5). A make/break
+interpretation would have to alternate there too. **Still worth one correlated
+press to confirm** — see below — because the whole `max_brightness` decision
+rests on it.
+
+**Consequence if confirmed: the design gets better, not just unblocked.** A
+two-level backlight is a plain on/off LED, and the `0xF6` event makes
+`LED_BRIGHT_HW_CHANGED` honestly wireable from
+`gigabyte_laptop_wmi_notify()` — Fn+Space would update the desktop's slider
+instead of leaving it stale. The earlier plan ruled that flag out precisely
+because no such event was known to exist.
+
+**Not yet established: whether writing works.** `0xF6 0` through `0xF6 4` were
+written and accepted, but the effect on the keyboard was not recorded, so the
+write direction is still unmeasured. Nothing should be built on the assumption
+that it works.
+
+#### Charging: factory defaults recorded, ceiling test inconclusive
+
+**The values worth keeping.** Both IDs are implemented — neither echoed the
+`0x5A` sentinel:
+
+```
+method 0x64 arg 0x5a -> 0x0  (0)     BCPS = 0    charge mode off
+method 0x65 arg 0x5a -> 0x64 (100)   BCPC = 100  no limit
+```
+
+Those are this unit's factory defaults and there is no AML path that restores
+them, so they are recorded here as the durable copy.
+
+**The ceiling test did not test the ceiling.** `charge_limit 80` and
+`charge_mode 1` were accepted, but the battery was at **89 %** — already above
+the ceiling — so "charging stops at 80 %" was not observable. `upower` showed
+`charging` at 89 %, which is consistent both with the EC ignoring `BCPC` *and*
+with a working implementation that only gates the transition upward. It
+distinguishes nothing. The restore ran, and the nodes read 0 and 100 again.
+
+**Re-run it from below the ceiling**, which is the condition the test needed in
+the first place: discharge to roughly 60 %, set the limit to 80, then watch for
+`state` leaving `charging` as it approaches 80 rather than continuing to 100.
+
 ### Step 6 leads, in order of cost
 
 1. **`0xF6` / `KBLL` over WMI** — brightness only, but it is read/write, in
