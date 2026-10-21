@@ -557,6 +557,48 @@ fork, not the project. Upstream updates come from
 
 `master` still sits at upstream's `4b817ea`, untouched.
 
+### PR #1 is a review surface. **Do not merge it.**
+
+[`orpheus497/gigabyte-laptop-wmi#1`](https://github.com/orpheus497/gigabyte-laptop-wmi/pull/1)
+— "[WIP] Functionality for Gigabyte Gaming A16 5th", `master <- a16-5th` — is
+open on purpose and stays open. Its job is to be a place CodeRabbit reviews and
+the diff can be read. **It is deliberately never merged**, and that is a settled
+decision, not an oversight.
+
+Merging it would put the whole integration branch onto `master`, which costs
+exactly what the table above protects: `git log upstream/master` stops being a
+clean comparison, the cherry-pick strategy loses its baseline, and the eventual
+upstream patch series gets harder to extract from a fork point that no longer
+exists. If it ever *does* need merging, preserve the baseline first —
+`git branch upstream-pristine 4b817ea` — and say so here.
+
+Two consequences of using a PR this way:
+
+- **The review scope is the entire diff from upstream**, `4b817ea` to head, 29
+  files including the deleted pre-rename ones (`aorus-laptop.c`, both
+  `aorus-laptop-*.spec`). So review findings arrive in large batches covering
+  ground already settled, and some describe a state a later commit superseded.
+  That is expected. **Verify every finding against the current code before
+  acting on it** — several have been stale, and two caught real bugs.
+- **CodeRabbit's "Autofix" checkbox pushes its own commits to `a16-5th`.** Leave
+  it unticked; it would interleave with work in progress.
+
+### CI is green, and it validates the packaging
+
+The push of `920ca3b` ran the `Release driver (debug)` workflow to success on all
+four jobs:
+
+```
+Generate driver tar file                      success
+Publish driver (fc42 / fc43 / fc44)           success x3
+```
+
+Those jobs build the RPMs in **mock** on three Fedora releases, which is the
+first end-to-end check of packaging work that cannot be tested locally. It
+covers the `Release: 2` bump, the `Obsoletes` bounds, `Source1:
+gigabyte-laptop.conf`, the `%{_builddir}` fix and the new `%post`/`%preun`
+scriptlets. Treat a red build here as a real regression, not CI noise.
+
 ### Why the fork is ported, not merged
 
 The fork branched at upstream `0002d21` and has 6 commits; `master` has ~60 the
