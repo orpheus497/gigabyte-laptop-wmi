@@ -625,7 +625,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~1~~ | ~~Clamp the `memcpy`; make optional probe reads non-fatal~~ **done** | low |
 | ~~1b~~ | ~~Extend `debug_method` to take an argument~~ **done** | low |
 | 2 | Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel | medium |
-| 3 | Register a `platform_profile` handler over `perf_mode` + `dynamic_boost` | low |
+| ~~3~~ | ~~`platform_profile` handler~~ **done** — over fan policy, not GPU power | low |
 | 4 | Writable `pwm1`/`pwm2` — **two mechanisms tried and rejected**, read scaling kept | medium |
 | ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** | low |
 | 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
