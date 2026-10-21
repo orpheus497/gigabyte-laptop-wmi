@@ -853,7 +853,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~1b~~ | ~~Extend `debug_method` to take an argument~~ **done** | low |
 | ~~2~~ | ~~Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel~~ **done** — all three confirmed; GPU TGP closed as firmware-blocked | medium |
 | ~~3~~ | ~~`platform_profile` handler~~ **done** — over fan policy, not GPU power | low |
-| 4 | Writable `pwm1`/`pwm2` — **two mechanisms tried and rejected**, read scaling kept. **The only functional gap left.** | medium |
+| 4 | Writable `pwm1`/`pwm2` — **three mechanisms tried and rejected**, read scaling kept. One lead left (the 15-point curve). **The only functional gap.** | medium |
 | ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** — both keys scan in and are bound in KDE | low |
 | 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
 
@@ -1128,8 +1128,9 @@ supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 
 ## Open decisions
 
-- **Which Step 4 lead to try next**, and whether a write-side debug node should
-  land before it. See the Step 4 section.
+- **Whether to try the 15-point curve**, which is the only Step 4 lead left.
+  The write-side debug node it needs already shipped as `debug_method_write`.
+  See the Step 4 section.
 
 ## Decided: upstreaming comes last
 
@@ -1501,7 +1502,7 @@ The run also produced `Could not clear the turbo fan bit`, which turned out to
 be the void-WMBD problem above rather than a real failure. The clear had
 worked.
 
-### `0x7D` is readable, and the fork's premise is still untested
+### `0x7D` is readable — and the sentinel read that proved it
 
 Sentinel read on the installed build:
 
