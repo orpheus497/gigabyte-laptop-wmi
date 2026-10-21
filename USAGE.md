@@ -316,6 +316,46 @@ sudo cat /sys/devices/platform/gigabyte_laptop/debug_method
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/debug_method`
 
+## Debug method (write)
+
+**Disclaimer:** This node performs an arbitrary WMI **write**. It is a
+development aid, not a supported interface, and it can leave the machine in a
+state the driver does not know about.
+
+Root only (mode `0600`). The write happens when you write the node, not when
+you read it; reading reports what the last one did.
+
+```sh
+echo '0x7D 1' | sudo tee /sys/devices/platform/gigabyte_laptop/debug_method_write
+sudo cat /sys/devices/platform/gigabyte_laptop/debug_method_write
+# method 0x7d arg 0x1 -> wrote, reply 0x0 (0)
+```
+
+A method the firmware does not implement is reported as such, using the same
+reasoning as the read node in reverse: `WMBD` ends in `Default { Return (Arg2) }`
+and the argument is passed as a buffer, so getting a buffer back means there is
+no case for that ID.
+
+```text
+method 0x99 arg 0x1 -> not implemented by this firmware
+```
+
+**Hazards, all real:**
+
+- **A wrong fan duty can stop the fans rather than slow them.** Method `0x70`
+  with a target of 100% stops both fans on a Gigabyte Gaming A16. Sweep upward
+  from a low value, watch `fan1_input` after each step, and stop at the first
+  reading that does not rise.
+- **Poking the fan methods desynchronises the driver.** `fan_mode` still reports
+  what the driver last set, not what you just wrote. Rewrite `fan_mode` or
+  `fan_preset` afterwards to put the two back in step.
+- **Method `0x63` is refused.** It wants a five-byte argument and this setter
+  passes four, so the firmware would fail on the fifth byte *after* writing four
+  bytes of CMOS NVRAM, leaving a half-written block that the firmware reads at
+  the next boot.
+
+**Node:** `/sys/devices/platform/gigabyte_laptop/debug_method_write`
+
 ## Power profiles
 
 The driver registers a `platform_profile` handler, so the desktop's power

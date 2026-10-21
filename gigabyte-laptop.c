@@ -40,6 +40,8 @@ MODULE_VERSION(GIGABYTE_LAPTOP_VERSION);
 // Not supported by Aero 14 W
 #define GPU_QBOOST       0x51
 #define FAN_SILENT_MODE  0x57
+// Mislabelled: on Gaming (2025+) firmware 0x63 is the five extended-CMOS bytes
+// RXCM(0xD2)..RXCM(0xD6), not a timestamp. Read-only here for that reason.
 #define POWER_ON_TIME    0x63
 #define CHARGING_MODE    0x64
 #define CHARGING_LIMIT   0x65
@@ -125,10 +127,14 @@ struct gigabyte_laptop_wmi {
 	int fan_turbo_saved_speed;
 
 	u32 debug_arg;
+	u32 debug_write_arg;
+	int debug_write_result;
+	int debug_write_ret;
 
 	u8 gaming_family;
 	u8 fan_silent_method;
 	u8 debug_method;
+	u8 debug_write_method;
 	u8 dual_fan_speed_enabled;
 	u8 light_sensor_method;
 	u8 has_dgpu_ejector;
@@ -1306,6 +1312,97 @@ static ssize_t debug_method_show(struct device *dev, struct device_attribute *at
 			echoed ? " [echoed argument: method not implemented]" : "");
 }
 
+/*
+ * The write half, for trying WMBD methods deliberately rather than through a
+ * node a fan daemon can drive:
+ *
+ *	echo '0x7D 1'  > debug_method_write   # set the EC's TFAN bit
+ *	echo '0x46 50' > debug_method_write   # CPU fan duty, untried lead
+ *
+ * The write happens on store, not on show -- a read of a node must not have
+ * side effects. Show reports what the last one did.
+ *
+ * This is a development aid and it is dangerous: a wrong duty can *stop* the
+ * fans rather than slow them (method 0x70 at 100% does exactly that), and
+ * poking the fan methods directly leaves the driver's cached fan_mode
+ * describing a state the EC is no longer in. Re-read or rewrite fan_mode
+ * afterwards. Root-only for that reason.
+ */
+static ssize_t debug_method_write_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	unsigned int method, arg = 0;
+	int parsed, ret, output = 0;
+	struct gigabyte_laptop_wmi *gigabyte;
+
+	parsed = sscanf(buf, "%i %i", &method, &arg);
+	if (parsed < 1) {
+		pr_err("Expected a method ID, optionally followed by an argument\n");
+		return -EINVAL;
+	}
+
+	if (method > 0xFF) {
+		pr_err("Invalid method ID\n");
+		return -EINVAL;
+	}
+
+	/*
+	 * 0x63 dereferences Arg2[0] through Arg2[0x04] and this setter passes
+	 * four bytes, so the fifth read fails *after* four CMOS bytes have
+	 * already been written — a half-written block in NVRAM that the
+	 * firmware reads at the next boot. Refused until there is a wider
+	 * setter. Snapshot the current five with power_on_time first.
+	 */
+	if (method == POWER_ON_TIME) {
+		pr_err("Method 0x%02x needs a five-byte argument; refusing to write a partial CMOS block\n",
+			POWER_ON_TIME);
+		return -EINVAL;
+	}
+
+	gigabyte = dev_get_drvdata(dev);
+
+	/*
+	 * Held so a write cannot land in the middle of set_fan_mode()'s
+	 * multi-step sequence. It does not keep the cached fan state honest —
+	 * nothing can, for an arbitrary write — it only stops the two
+	 * interleaving.
+	 */
+	scoped_guard(mutex, &gigabyte->fan_lock)
+		ret = gigabyte_laptop_set_devstate(method, arg, &output);
+
+	gigabyte->debug_write_method = method;
+	gigabyte->debug_write_arg = (parsed > 1) ? arg : 0;
+	gigabyte->debug_write_ret = ret;
+	gigabyte->debug_write_result = ret ? 0 : output;
+
+	pr_info("debug write: method 0x%02x arg 0x%x -> ret %d, reply 0x%x\n",
+		gigabyte->debug_write_method, gigabyte->debug_write_arg,
+		ret, gigabyte->debug_write_result);
+
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+static ssize_t debug_method_write_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+
+	if (gigabyte->debug_write_ret == -EOPNOTSUPP)
+		return sysfs_emit(buf,
+			"method 0x%02x arg 0x%x -> not implemented by this firmware\n",
+			gigabyte->debug_write_method, gigabyte->debug_write_arg);
+
+	if (gigabyte->debug_write_ret)
+		return sysfs_emit(buf, "method 0x%02x arg 0x%x -> failed (%d)\n",
+			gigabyte->debug_write_method, gigabyte->debug_write_arg,
+			gigabyte->debug_write_ret);
+
+	return sysfs_emit(buf, "method 0x%02x arg 0x%x -> wrote, reply 0x%x (%d)\n",
+			gigabyte->debug_write_method, gigabyte->debug_write_arg,
+			gigabyte->debug_write_result, gigabyte->debug_write_result);
+}
+
 #define TOGGLE_DEVICE(_device, _id) \
 static ssize_t _device##_toggle_show(struct device *dev, struct device_attribute *attr, char *buf) \
 { \
@@ -1336,6 +1433,7 @@ static DEVICE_ATTR_RO(light_sensor);
 static DEVICE_ATTR_RO(power_on_time);
 static DEVICE_ATTR_RO(has_dgpu_ejector);
 static DEVICE_ATTR_ADMIN_RW(debug_method);
+static DEVICE_ATTR_ADMIN_RW(debug_method_write);
 
 static struct attribute *gigabyte_laptop_attributes[] = {
 	&dev_attr_fan_mode.attr,
@@ -1357,6 +1455,7 @@ static struct attribute *gigabyte_laptop_attributes[] = {
 	&dev_attr_power_on_time.attr,
 	&dev_attr_has_dgpu_ejector.attr,
 	&dev_attr_debug_method.attr,
+	&dev_attr_debug_method_write.attr,
 	NULL
 };
 

@@ -1121,10 +1121,22 @@ and is fixed — see the enum note below.
    reports the indexed store is inert on an AERO X16's EC firmware, which is a
    different model and worth testing here rather than assuming.
 
-**Test write methods through a debug node, not through hwmon.** `debug_method`
-only reads (WMBC). A matching write-side node would let `0x46`/`0x47` and the
-curve be tried deliberately, one value at a time, without exposing a path that
-a fan daemon can drive into a fan stop. Add that before the next attempt.
+**Test write methods through a debug node, not through hwmon.** ✅ **Done** —
+`debug_method_write` takes `"method arg"`, performs the WMBD write on store and
+reports the result on show, root-only at `0600`. `0x46`/`0x47` and the curve can
+now be tried one value at a time without exposing a path a fan daemon could
+drive into a fan stop.
+
+Three things it does deliberately:
+
+- **Refuses `0x63`.** It wants five bytes and the setter passes four, so the
+  firmware would fail on the fifth *after* writing four bytes of CMOS — a
+  half-written block the firmware reads at the next boot.
+- **Takes `fan_lock`**, so a poke cannot land inside `set_fan_mode()`'s
+  multi-step sequence. It cannot keep the cached fan state honest — nothing can,
+  for an arbitrary write — so rewrite `fan_mode` or `fan_preset` afterwards.
+- **Reports "not implemented"** when the reply is a buffer, which is the
+  write-side form of the WMBC sentinel.
 
 ### Step 3: profiles over fan policy — verified on hardware
 
@@ -1338,6 +1350,40 @@ on silently inherited turbo's duty. Modes 0-2 ignore the duty and hid the bug.
 The run also produced `Could not clear the turbo fan bit`, which turned out to
 be the void-WMBD problem above rather than a real failure. The clear had
 worked.
+
+### `0x7D` is readable, and the fork's premise is still untested
+
+Sentinel read on the installed build:
+
+```
+method 0x7d arg 0x5a -> 0x0 (0)
+```
+
+No echo, so **`WMBC 0x7D` is implemented** and `EC0.TFAN` currently reads `0`.
+That independently confirms the void-WMBD diagnosis above: the clear that logged
+"Could not clear the turbo fan bit" had in fact landed.
+
+**What is still open** is whether setting `TFAN = 1` *alone* holds the fans at
+full speed. The driver has never written `0x7D` on enable — Phase 2 kept the
+fork's duty-plus-fixed-mode latch because the fork reported the bit alone did
+not work on a CWH, and that report is now suspect, since a write returning
+`-EINVAL` while actually landing looks exactly like a method that does nothing.
+
+Settle it with `debug_method_write`, which is what it was built for:
+
+```sh
+S=/sys/devices/platform/gigabyte_laptop
+echo '0x7D 1' | sudo tee $S/debug_method_write
+sleep 3; sensors | grep -i fan            # did they go to ~5250?
+echo '0x7D 0x5A' | sudo tee $S/debug_method && sudo cat $S/debug_method
+echo '0x7D 0' | sudo tee $S/debug_method_write    # put it back
+echo 1 | sudo tee $S/fan_mode                     # resync the cache
+```
+
+If the fans do move, `fan_turbo` collapses to a one-bit write and the duty
+save/restore, the two-step mode restore and `end_fan_turbo()` all become
+unnecessary. If they do not, the latch stays and the fork was right for the
+wrong reason.
 
 ### `fan_turbo` works — validated on hardware
 
