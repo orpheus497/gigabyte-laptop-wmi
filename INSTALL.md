@@ -2,7 +2,11 @@
 
 ## How to install
 
-For all methods, you must copy `gigabyte-laptop.conf` to `/etc/modules-load.d/` so the kernel module is loaded on boot automatically.
+The module registers its platform device by hand and exposes no modalias, so
+udev has nothing to match and **nothing loads it at boot on its own**. If you
+want it loaded automatically, copy `gigabyte-laptop.conf` to
+`/etc/modules-load.d/`. That is a choice, not a requirement — skip it and load
+the module by hand instead.
 
 ### Method 1: Using DKMS
 
@@ -11,6 +15,9 @@ For all methods, you must copy `gigabyte-laptop.conf` to `/etc/modules-load.d/` 
 This module can be installed using DKMS. You can download the driver tarball from the [releases page](https://github.com/tangalbert919/gigabyte-laptop-wmi/releases) and load it into the DKMS tree:
 ```
 dkms ldtarball driver.tar.gz
+dkms install gigabyte-laptop/<version>
+# For loading at boot:
+sudo install -m 644 gigabyte-laptop.conf /etc/modules-load.d/
 ```
 
 If you have this repository checked out locally, the simplest route is the
@@ -33,7 +40,8 @@ versioned `@PKGVER@`, and the `dkms install` that follows then fails with
 
 `gigabyte-laptop.conf` is the `/etc/modules-load.d` entry referred to above.
 DKMS does not install it for you, so include it in the archive and copy it into
-place by hand.
+place by hand if you want boot loading. `scripts/install-dkms.sh` does it for
+you unless you pass `--no-autoload`.
 
 ### Method 2: Manually
 
@@ -42,10 +50,17 @@ place by hand.
 Simply run the following commands:
 ```
 make
+sudo modprobe wmi sparse-keymap
 sudo insmod gigabyte-laptop.ko
 ```
 
-The last command has to be run after every reboot. If you have updated the kernel, you must run `make` before loading the kernel module.
+`insmod` resolves no dependencies. `modinfo -F depends gigabyte-laptop.ko`
+reports `wmi,sparse-keymap`, and without both the load fails with unknown
+symbols — `wmi` for the WMI bus, `sparse-keymap` for the hotkey input device.
+`modprobe` would handle that itself, but it only finds modules already installed
+under `/lib/modules`, which is what the DKMS method above does.
+
+The last two commands have to be run after every reboot. If you have updated the kernel, you must run `make` before loading the kernel module.
 
 ## How to remove
 

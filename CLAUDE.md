@@ -108,9 +108,11 @@ blocked in code), `has_three_fans = has_four_fans = 0` → **2 fans, 3 temps,
   is also the HID vendor ID `0x6243`. So this is an ENE EC exposed as i2c-HID.
   The report protocol is still undocumented — nobody has driven RGB on a
   non-USB Gigabyte keyboard.
-- **No platform profile is registered.** `/sys/class/platform-profile/` exists
-  but is **empty**, and `/sys/firmware/acpi/platform_profile` does not exist.
-  The slot is free — see "Power profiles" below.
+- ~~**No platform profile is registered.**~~ *Was true before Step 3, which is
+  why the slot was available.* **This driver now registers one**, named
+  `gigabyte_laptop`, which also creates the legacy aggregate
+  `/sys/firmware/acpi/platform_profile`. `amd_pmf` would add a second if it ever
+  binds. See "Step 3: profiles over fan policy".
 - **`GBT0005:00` is declared and present, but it is _not_ what the hotkeys
   use.** *Historical hypothesis, since disproven — kept because the firmware
   facts below are still accurate and the device is still a candidate for
@@ -273,14 +275,23 @@ eleven are written by this driver:
 | `0x51` | `gpu_boost` | Same |
 | `0x7D` | `fan_turbo` | Logged "Could not clear the turbo fan bit" on a clear that had in fact succeeded |
 
-**Fixed**, and the fix distinguishes three cases rather than blanket-tolerating:
+**Fixed: any successful ACPI evaluation is a successful write.** `*result` takes
+the integer when there is one and `0` otherwise, and nothing else is inferred
+from the reply.
 
-- **empty reply** → the write landed, success with nothing to report
-- **integer** → success, value returned as before
-- **buffer** → `WMBD` ends in `Default { Return (Arg2) }` and `Arg2` arrives as
-  a 4-byte buffer, so a buffer back means **the firmware has no case for this
-  ID**. Now `-EOPNOTSUPP`, which is the write-side equivalent of the WMBC
-  sentinel and strictly more information than the old `-EINVAL`.
+A first attempt tried to be cleverer and **was wrong on hardware.** It returned
+`-EOPNOTSUPP` for a buffer reply, reasoning that `WMBD` ends in
+`Default { Return (Arg2) }` with `Arg2` passed as a 4-byte buffer, so a buffer
+back meant no case for that ID — the write-side mirror of the WMBC sentinel.
+Then `echo '0x7D 1' > debug_method_write` reported "not implemented" and
+`WMBC 0x7D` read back **`1`**: the write had landed. So a void case *also*
+answers with a non-integer, and the two are not distinguishable from the reply.
+
+There is nothing after `WMBD`'s `Switch` — no trailing `Return` — which is why a
+case that falls through has no value of its own to give back. **For a setter the
+ACPI status is the only trustworthy signal**, and that is now all this relies on.
+`debug_method_write` shows the raw reply type so a human can judge, and says to
+check the EC field, which is the only thing that actually settles it.
 
 Two consequences worth carrying forward:
 
@@ -737,11 +748,19 @@ Kept: `codifryed/CoolerControl` COPR (the fan UI this driver feeds),
 it from `dev_get_drvdata()`. Any write to the node oopsed the kernel. Upstream
 issue #45.
 
-Not ported: `scripts/install-dkms.sh` (hardcodes version 0.1.0; installs a
-service pinning max TGP at every boot, including on battery),
+Not ported from the fork: **its** `scripts/install-dkms.sh` (hardcodes version
+0.1.0; installs a service pinning max TGP at every boot, including on battery),
 `scripts/test-a16-cwh.sh` (reusable harness, but its `≥6000 RPM` assertion
 needs re-baselining), the fork's `*.dsl` gitignore line (we want to commit this
 machine's DSDT).
+
+**Not to be confused with this repo's own `scripts/install-dkms.sh`**, which was
+written here and shares nothing with the fork's. It is the documented install
+route in both the build section above and `INSTALL.md`: it substitutes
+`@PKGVER@`, removes earlier registrations including the pre-rename ones,
+installs the `modules-load.d` entry unless `--no-autoload`, and reports whether
+the running module is the build just installed. It pins no TGP and installs no
+service.
 
 Both commits build clean with `-Wall -Wextra`.
 
@@ -854,16 +873,20 @@ Three things are confirmed by that output:
   `/sys/bus/wmi/devices/ABBC0F72-…-3/driver -> gigabyte-laptop-events`.
 
 **Step 5 is implemented on that basis.** The driver creates an input device,
-"Gigabyte laptop hotkeys", and reports both keys through `sparse_keymap` as
-programmable keycodes rather than acting on them in the kernel, so GNOME and
-KDE can bind them:
+"Gigabyte laptop hotkeys". The two keys are handled differently:
 
-| Key | `WEVN` | Keycode | Typical keysym |
+| Key | `WEVN` | Keycode | Who acts on it |
 |---|---|---|---|
-| GiMate | `0xCE` | `KEY_PROG1` (148) | `XF86Launch1`-class |
-| Mode (Fn+F7) | `0xCC` | ~~`KEY_PROG2`~~ **none** | acted on in the kernel |
+| GiMate | `0xCE` | `KEY_PROG1` (148), `XF86Launch1`-class | userspace — bindable in GNOME/KDE |
+| Mode (Fn+F7) | `0xCC` | **none** | the driver, which cycles `fan_preset` |
 
-**Mode has since been taken over by the driver** and reports no keycode — it
+GiMate goes through `sparse_keymap` as a programmable keycode, the way
+`asus-wmi` reports vendor keys, so the desktop can bind it to anything. Mode is
+intercepted in `gigabyte_laptop_wmi_notify()` before the keymap is consulted and
+reports nothing. Events the keymap does not cover are still logged, so an event
+number this firmware uses but we have not seen still shows up and can be added.
+
+**Mode reports no keycode** because the driver acts on it — it
 cycles the `fan_preset` ring instead. See "Settled: the Mode key owns fan
 policy" below. GiMate is unchanged.
 
@@ -1363,27 +1386,40 @@ No echo, so **`WMBC 0x7D` is implemented** and `EC0.TFAN` currently reads `0`.
 That independently confirms the void-WMBD diagnosis above: the clear that logged
 "Could not clear the turbo fan bit" had in fact landed.
 
-**What is still open** is whether setting `TFAN = 1` *alone* holds the fans at
-full speed. The driver has never written `0x7D` on enable — Phase 2 kept the
-fork's duty-plus-fixed-mode latch because the fork reported the bit alone did
-not work on a CWH, and that report is now suspect, since a write returning
-`-EINVAL` while actually landing looks exactly like a method that does nothing.
+### Settled: `TFAN` alone does **not** hold the fans — the latch stays
 
-Settle it with `debug_method_write`, which is what it was built for:
+Tested with `debug_method_write`, which is what it was built for. Starting from
+`fan_mode 1`, `fan_custom_speed 100`, fans idling:
+
+```
+echo '0x7D 1' > debug_method_write     -> reported "not implemented" (that bug, since fixed)
+sensors                                -> fan1 1666 RPM  fan2 1666 RPM   ** unchanged **
+echo '0x7D 0x5A' > debug_method        -> method 0x7d arg 0x5a -> 0x1 (1)
+```
+
+So the bit **was set** — `WMBC 0x7D` reads `EC0.TFAN` back as `1` — and the fans
+did not move. Two conclusions:
+
+- **`fan_turbo`'s duty-plus-fixed-mode latch is necessary and stays.** The fork
+  was right that writing the bit alone does not reach the fans, and right for
+  the right reason, not by accident. `end_fan_turbo()`, the duty save/restore
+  and the two-step mode restore all keep their justification.
+- **`TFAN` is a status bit, not a control.** It presumably tells the EC's own
+  firmware that turbo is wanted, and something else — the duty, the `ADJF`
+  latch — is what actually drives the fans. Writing it has no observable effect
+  on its own.
+
+The same run is what disproved the buffer-means-unimplemented theory above, so
+this one test settled two questions.
+
+**Put it back after testing**, since the driver does not know the bit moved:
 
 ```sh
 S=/sys/devices/platform/gigabyte_laptop
-echo '0x7D 1' | sudo tee $S/debug_method_write
-sleep 3; sensors | grep -i fan            # did they go to ~5250?
-echo '0x7D 0x5A' | sudo tee $S/debug_method && sudo cat $S/debug_method
-echo '0x7D 0' | sudo tee $S/debug_method_write    # put it back
-echo 1 | sudo tee $S/fan_mode                     # resync the cache
+echo '0x7D 0' | sudo tee $S/debug_method_write
+echo '0x7D 0x5A' | sudo tee $S/debug_method && sudo cat $S/debug_method   # expect 0x0
+echo 1 | sudo tee $S/fan_mode                                             # resync the cache
 ```
-
-If the fans do move, `fan_turbo` collapses to a one-bit write and the duty
-save/restore, the two-step mode restore and `end_fan_turbo()` all become
-unnecessary. If they do not, the latch stays and the fork was right for the
-wrong reason.
 
 ### `fan_turbo` works — validated on hardware
 

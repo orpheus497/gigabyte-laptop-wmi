@@ -331,14 +331,22 @@ sudo cat /sys/devices/platform/gigabyte_laptop/debug_method_write
 # method 0x7d arg 0x1 -> wrote, reply 0x0 (0)
 ```
 
-A method the firmware does not implement is reported as such, using the same
-reasoning as the read node in reverse: `WMBD` ends in `Default { Return (Arg2) }`
-and the argument is passed as a buffer, so getting a buffer back means there is
-no case for that ID.
+The node reports what the firmware replied, because on the write side that does
+not settle whether the method exists:
 
 ```text
-method 0x99 arg 0x1 -> not implemented by this firmware
+method 0x7d arg 0x1 -> wrote, replied 0x0 (0)
+method 0x7d arg 0x1 -> wrote, replied with a buffer (void case, or no case for this ID -- check the field)
+method 0x7d arg 0x1 -> wrote, no reply (void case)
 ```
+
+A third of this firmware's `WMBD` cases assign their embedded-controller field
+and fall through with no `Return`, and `WMBD` also ends in
+`Default { Return (Arg2) }` with the argument passed as a buffer — so a buffer
+back means *either* a method that worked and returned nothing useful, *or* one
+the firmware has no case for. **Check the field** with the read node to tell
+them apart. A failed write means the ACPI evaluation itself failed, which is the
+only reliable signal here.
 
 **Hazards, all real:**
 

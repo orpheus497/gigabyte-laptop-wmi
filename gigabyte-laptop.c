@@ -130,6 +130,7 @@ struct gigabyte_laptop_wmi {
 	u32 debug_write_arg;
 	int debug_write_result;
 	int debug_write_ret;
+	acpi_object_type debug_write_type;
 
 	u8 gaming_family;
 	u8 fan_silent_method;
@@ -279,8 +280,28 @@ static int gigabyte_laptop_get_devstate_buf(u32 method_id, void *result, size_t 
 	return gigabyte_laptop_get_devstate_raw(method_id, 0, result, size);
 }
 
-/* WMBD method (sets value in EC) */
-static int gigabyte_laptop_set_devstate(u32 method_id, u32 arg2, int *result)
+/*
+ * WMBD method (sets value in EC).
+ *
+ * A third of this firmware's WMBD cases assign their EC field and fall off the
+ * end of the Switch with no Return -- 0x51, 0x7D and 0xED among the ones
+ * written here. The assignment has already happened by then, so **any** reply
+ * that comes back from a successful evaluation means the write landed.
+ *
+ * Nothing in the reply can prove otherwise, which is why this does not try.
+ * WMBD ends in Default { Return (Arg2) } and Arg2 arrives as a 4-byte buffer,
+ * so an unimplemented ID answers with that buffer -- but a void case answers
+ * with something that is not an integer either, and the two are not reliably
+ * distinguishable here. Measured on a GAMING A16 5TH: writing 0x7D came back
+ * non-integer and the EC bit changed anyway, so treating a non-integer reply as
+ * failure rejected a write that had already happened. The ACPI status is the
+ * only trustworthy signal for a setter.
+ *
+ * reply_type, when non-NULL, hands the raw type to the caller. Only the debug
+ * node wants it, to show a human what came back.
+ */
+static int gigabyte_laptop_set_devstate_typed(u32 method_id, u32 arg2, int *result,
+					acpi_object_type *reply_type)
 {
 	union acpi_object *obj;
 	acpi_status status;
@@ -293,29 +314,18 @@ static int gigabyte_laptop_set_devstate(u32 method_id, u32 arg2, int *result)
 
 	obj = buffer.pointer;
 
-	/*
-	 * A third of this firmware's WMBD cases assign their EC field and fall
-	 * off the end of the Switch with no Return -- 0x51, 0x7D and 0xED among
-	 * the ones written here. The assignment has already happened by then, so
-	 * an empty reply is a completed write with nothing to report, not a
-	 * failure. Reporting it as one made perf_mode and gpu_boost return
-	 * -EINVAL on every write and never cache the value they had just set.
-	 *
-	 * A buffer reply is different: WMBD ends in Default { Return (Arg2) },
-	 * and Arg2 arrives as a 4-byte buffer, so getting one back means the
-	 * firmware has no case for this ID at all.
-	 */
-	if (!obj) {
-		*result = 0;
-	} else if (obj->type == ACPI_TYPE_INTEGER) {
-		*result = obj->integer.value;
-	} else {
-		kfree(obj);
-		return -EOPNOTSUPP;
-	}
+	if (reply_type)
+		*reply_type = obj ? obj->type : ACPI_TYPE_ANY;
+
+	*result = (obj && obj->type == ACPI_TYPE_INTEGER) ? obj->integer.value : 0;
 
 	kfree(obj);
 	return 0;
+}
+
+static int gigabyte_laptop_set_devstate(u32 method_id, u32 arg2, int *result)
+{
+	return gigabyte_laptop_set_devstate_typed(method_id, arg2, result, NULL);
 }
 
 /* hwmon **************************************************/
@@ -683,6 +693,7 @@ static ssize_t fan_mode_store(struct device *dev, struct device_attribute *attr,
 {
 	int ret;
 	unsigned int fan_mode = 0;
+	u8 old_preset;
 	struct gigabyte_laptop_wmi *gigabyte;
 
 	ret = kstrtouint(buf, 0, &fan_mode);
@@ -711,6 +722,7 @@ static ssize_t fan_mode_store(struct device *dev, struct device_attribute *attr,
 	 * the mode you are already in is still a request to hold it, and leaving
 	 * the preset on auto would let the next profile switch take it away.
 	 */
+	old_preset = gigabyte->fan_preset;
 	gigabyte->fan_preset = fan_mode < ARRAY_SIZE(fan_mode_presets) ?
 			fan_mode_presets[fan_mode] : FAN_PRESET_AUTO;
 
@@ -719,16 +731,22 @@ static ssize_t fan_mode_store(struct device *dev, struct device_attribute *attr,
 		return count;
 	}
 
+	// Put the preset back if the transition does not happen, so it cannot
+	// name a mode the fans are not in
 	ret = end_fan_turbo(gigabyte);
 	if (ret)
-		return ret;
+		goto restore_preset;
 
 	ret = set_fan_mode(gigabyte, fan_modes[fan_mode]);
 	if (ret)
-		return ret;
+		goto restore_preset;
 
 	gigabyte->fan_mode = fan_mode;
 	return count;
+
+restore_preset:
+	gigabyte->fan_preset = old_preset;
+	return ret;
 }
 
 /*
@@ -841,9 +859,19 @@ static ssize_t fan_custom_speed_store(struct device *dev, struct device_attribut
 	if (ret)
 		return ret;
 
-	// As in fan_mode_store: changing the duty retires any turbo that was on.
-	// The helper itself stays untouched, since fan_turbo_store() uses it.
-	gigabyte->fan_turbo = 0;
+	/*
+	 * A duty write does not retire turbo, unlike a mode change: turbo is a
+	 * duty *plus* latched fixed mode, and fixed mode is still latched, so
+	 * the fans stay at full speed. Clearing the flag here left them pinned
+	 * with nothing reporting it.
+	 *
+	 * Fixed mode also ignores the duty, so what the write really sets is
+	 * where the fans land once turbo ends. Record it as the restore value
+	 * so turbo-off honours the newest request rather than the pre-turbo one.
+	 */
+	if (gigabyte->fan_turbo)
+		gigabyte->fan_turbo_saved_speed = speed;
+
 	return count;
 }
 
@@ -1332,6 +1360,7 @@ static ssize_t debug_method_write_store(struct device *dev, struct device_attrib
 {
 	unsigned int method, arg = 0;
 	int parsed, ret, output = 0;
+	acpi_object_type type = ACPI_TYPE_ANY;
 	struct gigabyte_laptop_wmi *gigabyte;
 
 	parsed = sscanf(buf, "%i %i", &method, &arg);
@@ -1367,16 +1396,17 @@ static ssize_t debug_method_write_store(struct device *dev, struct device_attrib
 	 * interleaving.
 	 */
 	scoped_guard(mutex, &gigabyte->fan_lock)
-		ret = gigabyte_laptop_set_devstate(method, arg, &output);
+		ret = gigabyte_laptop_set_devstate_typed(method, arg, &output, &type);
 
 	gigabyte->debug_write_method = method;
 	gigabyte->debug_write_arg = (parsed > 1) ? arg : 0;
 	gigabyte->debug_write_ret = ret;
 	gigabyte->debug_write_result = ret ? 0 : output;
+	gigabyte->debug_write_type = ret ? ACPI_TYPE_ANY : type;
 
-	pr_info("debug write: method 0x%02x arg 0x%x -> ret %d, reply 0x%x\n",
+	pr_info("debug write: method 0x%02x arg 0x%x -> ret %d, reply type %u, value 0x%x\n",
 		gigabyte->debug_write_method, gigabyte->debug_write_arg,
-		ret, gigabyte->debug_write_result);
+		ret, gigabyte->debug_write_type, gigabyte->debug_write_result);
 
 	if (ret)
 		return ret;
@@ -1388,19 +1418,32 @@ static ssize_t debug_method_write_show(struct device *dev, struct device_attribu
 {
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
 
-	if (gigabyte->debug_write_ret == -EOPNOTSUPP)
-		return sysfs_emit(buf,
-			"method 0x%02x arg 0x%x -> not implemented by this firmware\n",
-			gigabyte->debug_write_method, gigabyte->debug_write_arg);
-
 	if (gigabyte->debug_write_ret)
 		return sysfs_emit(buf, "method 0x%02x arg 0x%x -> failed (%d)\n",
 			gigabyte->debug_write_method, gigabyte->debug_write_arg,
 			gigabyte->debug_write_ret);
 
-	return sysfs_emit(buf, "method 0x%02x arg 0x%x -> wrote, reply 0x%x (%d)\n",
+	switch (gigabyte->debug_write_type) {
+	case ACPI_TYPE_INTEGER:
+		return sysfs_emit(buf,
+			"method 0x%02x arg 0x%x -> wrote, replied 0x%x (%d)\n",
 			gigabyte->debug_write_method, gigabyte->debug_write_arg,
 			gigabyte->debug_write_result, gigabyte->debug_write_result);
+	case ACPI_TYPE_BUFFER:
+		/*
+		 * Either a case that assigns and falls through without a
+		 * Return, or Default { Return (Arg2) } echoing the argument
+		 * because there is no case for this ID. Both land here, so say
+		 * so rather than guess: check the EC field to tell them apart.
+		 */
+		return sysfs_emit(buf,
+			"method 0x%02x arg 0x%x -> wrote, replied with a buffer (void case, or no case for this ID -- check the field)\n",
+			gigabyte->debug_write_method, gigabyte->debug_write_arg);
+	default:
+		return sysfs_emit(buf,
+			"method 0x%02x arg 0x%x -> wrote, no reply (void case)\n",
+			gigabyte->debug_write_method, gigabyte->debug_write_arg);
+	}
 }
 
 #define TOGGLE_DEVICE(_device, _id) \
