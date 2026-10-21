@@ -660,6 +660,8 @@ static ssize_t gpu_boost_store(struct device *dev, struct device_attribute *attr
 	if (ret)
 		return ret;
 
+	gigabyte = dev_get_drvdata(dev);
+
 	// TODO: Check for AORUS laptops with 4 modes
 
 	// Disable dGPU ejector mode for now
@@ -679,7 +681,6 @@ static ssize_t gpu_boost_store(struct device *dev, struct device_attribute *attr
 	if (ret)
 		return ret;
 
-	gigabyte = dev_get_drvdata(dev);
 	gigabyte->gpu_boost = mode;
 	return count;
 }
