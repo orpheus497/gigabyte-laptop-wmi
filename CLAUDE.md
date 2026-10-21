@@ -19,9 +19,11 @@ Everything here is verified from the live machine, not assumed.
 
 | | |
 |---|---|
+| Model line | **A16 5-series (5VH / 5TH)** — *not* the 3VH/3WH line |
 | Board / product | `GIGABYTE GAMING A16 5TH` |
 | `DMI_PRODUCT_FAMILY` | `GIGABYTE GAMING` (exact match, gates driver support) |
 | `DMI_PRODUCT_SKU` | `GA65TH` |
+| `DMI_PRODUCT_VERSION` | `-CF` |
 | BIOS | AMI `FB03`, `12/23/2025` → `dmi_get_bios_year()` = 2025 |
 | EC firmware | 3.3 |
 | CPU | AMD Ryzen 7 170, 8C/16T, `amd-pstate-epp` |
@@ -30,10 +32,36 @@ Everything here is verified from the live machine, not assumed.
 | OS | Fedora 44, kernel 7.2.11-200.fc44.x86_64 |
 | Secure Boot | **enabled**, lockdown = `integrity` |
 
-The upstream README cites `A16 GA6H` for Gaming (2025+) support, and the A16 fork
-validated on `A16 CWH` / `GA6CWH`. This machine is the `5TH` gen, SKU `GA65TH` —
-same family, different gen code, and AMD rather than Intel. **Treat fork-derived
-method IDs as unvalidated here until checked via `debug_method`.**
+### Model line — read this before applying anything found online
+
+This is an **A16 5-series** machine. Do not apply findings from the A16
+3-series (`3VH`, `3WH`) — different generation.
+
+Gigabyte's A16 gen codes follow `GA6` + a two-or-three character suffix, and the
+suffix tracks the generation and GPU tier, so reports from other suffixes are
+not transferable without checking:
+
+| Source | Gen | Relationship to this machine |
+|---|---|---|
+| This machine | `5TH` / `GA65TH` | the target |
+| Same model line | `5VH` | sibling variant, treat as closest reference |
+| A16 fork (JoseLopez36) | `CWH` / `GA6CWH`, RTX 5070, Intel | **different gen, different vendor CPU** |
+| Upstream README | `GA6H` | generic Gaming (2025+) reference |
+| GigaMate experimental list | `CMH`, `CVH`, `CTH`, `CWH` | other gens, unverified here |
+| Luminous418 RGB repo | `CTH` | different gen, and USB keyboard this unit lacks |
+| **Not applicable** | `3VH`, `3WH` | different model line entirely |
+
+Two consequences:
+
+- **DMI matching is safe across gens.** The driver's match table keys on
+  `DMI_BOARD_VENDOR` + `DMI_PRODUCT_FAMILY` (`GIGABYTE GAMING`), never on the
+  gen suffix, so the gate passes regardless.
+- **Method IDs are not safe across gens.** `0xED`, `0xE7` and `0x7D` were
+  validated on `CWH` — a different generation on Intel, where this is AMD
+  Rembrandt. **Treat every fork-derived method ID as unvalidated until checked
+  on this unit via `debug_method`.** Same for the fork's `~6500 RPM` turbo
+  figure and its 55 W → 70 W TGP numbers, which are RTX 5070 values; this unit
+  has an RTX 5050.
 
 ### WMI devices (all present, all unclaimed)
 
