@@ -362,11 +362,23 @@ its own resync than the forced write this note anticipated.
 ### Method IDs we are not using yet
 
 Worth knowing these exist on AMD firmware, all verified in both directions
-unless noted:
+unless noted.
+
+**`EC0.<field>` in this table means the ACPI scope, not the bus.** Most of these
+fields live in `OperationRegion (PECM, SystemMemory, 0xFC7E0800, 0x1000)`, which
+is a memory-mapped window, *not* the `ERAM` `EmbeddedControl` region. Two
+consequences, both already bitten once:
+
+- **`ec_read()` cannot reach them.** That is the distinction that killed
+  `temp3_input`, and it applies here too: WMI is the only route.
+- **A WMBD case that writes a field and returns it reads back the byte it just
+  wrote.** It proves the ACPI store landed. It proves nothing about whether the
+  embedded controller read it, accepted it, or acted on it. Only observed
+  behaviour does that.
 
 | ID | EC field | What it is |
 |---|---|---|
-| `0xF6` | `EC0.KBLL` (8-bit) | **Keyboard backlight brightness**, read *and* write |
+| `0xF6` | `KBLL` (8-bit, **`PECM`**) | **Keyboard backlight brightness**, read *and* write. Verified: `Case (0xF6)` exists in both WMBD (9286) and WMBC (9691). |
 | `0xD9` | `EC0.KBAT` (1-bit) | Keyboard backlight auto/timeout |
 | `0xC9` | — | Fn-lock |
 | `0xC7` | `EC0.MUTE` | Mute status |
@@ -1052,13 +1064,30 @@ also self-tests without any keypress, since reading method `0x03` fires
 `echo 0x03 > debug_method && cat debug_method` (as root — the node is `0600`,
 since a read evaluates a firmware method).
 
-**`wmi_install_notify_handler()` does not exist on this kernel.** It was
-removed, and the only route is a `struct wmi_driver` with a `.notify` callback
-bound to the event GUID by its `id_table`. That is why the module now registers
-a second, event-only `wmi_driver` ("gigabyte-laptop-events") alongside the platform
-driver. `.notify` is itself deprecated in favour of `.notify_new` taking a
-`struct wmi_buffer`; `min_event_size` is set to 0 so events carrying no data are
-still delivered.
+~~**`wmi_install_notify_handler()` does not exist on this kernel.**~~
+**Wrong — it does exist**, and this was corrected after checking:
+
+```
+include/linux/acpi.h:429: extern acpi_status wmi_install_notify_handler(
+                              const char *guid, wmi_notify_handler handler, void *data);
+```
+
+plus an entry in `Module.symvers`, so it is exported and callable. The original
+note claimed it had been removed and that a `struct wmi_driver` was therefore
+the *only* route. The conclusion happened to be right and the reason was not —
+believing a constraint that is not there is how a design gets locked in for no
+reason, so check before recording one.
+
+**The `wmi_driver` route is still correct, on its own merits.** A driver bound
+to the GUID through `id_table` is the modern idiom, it is what makes
+`/sys/bus/wmi/devices/ABBC0F72-…/driver` point at us — which is the check that
+made the absence of `GBT0005` notifies a real negative rather than a lost race
+— and it does not fight `eeepc_wmi` for the same GUID by a different mechanism.
+So the module registers a second, event-only `wmi_driver`
+("gigabyte-laptop-events") alongside the platform driver, deliberately rather
+than by necessity. `.notify` is itself deprecated in favour of `.notify_new`
+taking a `struct wmi_buffer`; `min_event_size` is set to 0 so events carrying no
+data are still delivered.
 
 **This makes the `eeepc_wmi` blacklist matter more.** Two drivers matching one
 GUID means whichever binds first wins the device. `eeepc_wmi` currently probes
@@ -1085,6 +1114,85 @@ hard-wired to USB `0414:8105` interface 2, so **none of them work here** —
 GigaMate's README explicitly carves out "laptops without a Gigabyte USB
 keyboard (e.g. GIGABYTE GAMING A16)". No project anywhere handles this key on a
 PS/2 Gigabyte keyboard.
+
+### Branch `a16-5th-kbd-charge-uevent` — what is landed and what is blocked
+
+Three items, investigated before any code was written because two of them had a
+real unknown at the centre. Everything below was verified against this machine's
+own DSDT and this kernel's headers, not inferred from field names.
+
+**Landed, because it needs no hardware measurement:**
+
+- **A uevent on the Mode key.** `kobject_uevent_env(KOBJ_CHANGE)` carrying
+  `GIGABYTE_FAN_PRESET=<name>`, emitted from
+  `gigabyte_laptop_cycle_fan_preset()` *after* `fan_lock` is released — it
+  allocates `GFP_KERNEL` and can enter reclaim, so it must not extend the hold.
+  The value travels with the event rather than being re-read, because three
+  quick presses can otherwise leave a slow consumer seeing one event and the
+  final value with the intermediate presets never observed. `sysfs_notify()`
+  stays for `poll()` consumers; this is additional, not a replacement.
+
+  Emitted from that one site only. A sysfs write to `fan_preset` or `fan_mode`
+  is a change its writer already knows about, and both hold `fan_lock` across
+  their whole body. A key press is the change userspace has no other way to see.
+
+  Test it by **pressing the key**, not with `echo change > uevent`: a synthetic
+  uevent prefixes extra variables with `SYNTH_ARG_`, so a rule matching the bare
+  name will not fire. `udevadm monitor --property --kernel` works unprivileged.
+
+- **A typed WMBC read**, `gigabyte_laptop_get_devstate_typed()`, mirroring the
+  typed setter, and `debug_method` now prints whether the reply was an integer.
+  This retires the two-sentinel dance: a BUFFER reply *is* the
+  `Default { Return (Arg2) }` echo, so one read settles whether an ID is
+  implemented, where a sentinel can collide with a real value. Validate it
+  against `0xED` (expect not-implemented) and `0xE7` (expect implemented).
+
+**Blocked on hardware measurement, deliberately not written:**
+
+- **`0xF6` / `KBLL` as an LED class device.** The target is
+  `gigabyte_laptop::kbd_backlight`, which is the one missing link in a chain
+  that is otherwise already running here: the systemd rule
+  `SUBSYSTEM=="leds", KERNEL=="*kbd_backlight*"` exists at
+  `99-systemd.rules:74`, `CONFIG_LEDS_CLASS=y` so it adds no module dependency,
+  `devm_led_classdev_register()` exists at `leds.h:280`, nothing in
+  `/sys/class/leds/` collides, and upower already exports a `KbdBacklight`
+  interface with an empty `NativePath`. `brightness_set_blocking` is mandatory,
+  not a preference — `leds.h` says *"Must not sleep. Use
+  brightness_set_blocking for drivers that can sleep"*, and the write path
+  evaluates AML.
+
+  **What blocks it: `max_brightness`.** `KBLL` is 8 bits, and the firmware has
+  no clamp, mask, comparison or table anywhere near it — only four references in
+  the whole DSDT, none of them a read. So 0–3, 0–100 and 0–255 are all
+  consistent with the AML, and `max_brightness` is fixed at registration, read
+  by desktops and baked into saved slider state. Registering the LED is also
+  what invites *automatic* writes from Powerdevil's dim-on-idle, which is the
+  same exposure that kept `pwm1`/`pwm2` read-only. On a vendor whose EC treats
+  over-range input as a different command (`FAN_DUTY_MAX`: duties above 229
+  *stop* the fans), a guessed ceiling is not acceptable. **Measure first.**
+
+  `gigabyte_laptop_method_implemented()` is written and deliberately *not*
+  committed, because its only consumer is the capability gate this blocks and
+  the build must stay clean under `W=1`. It lands with the LED code.
+
+- **`charge_mode` / `charge_limit`.** No new feature code: the handlers exist
+  and are write/read symmetric (`mode << 2` out, `output >> 2` back), so the
+  work is a hardware test. Firmware verified: `0x64` → `BCPS`, **4 bits** at
+  `PECM` 0x10; `0x65` → `BCPC`, 8 bits at 0x05; both present in WMBD and WMBC,
+  no clamp in any of the four case bodies.
+
+  Four defects found, none urgent, all waiting on the test outcome because the
+  test needs no code change: both `show` handlers return the cached value
+  although WMBC implements both reads, so the nodes cannot confirm a write
+  landed; both store handlers discard the post-write readback; the comment
+  claiming "only bit 2" understates that `BCPS = Arg2` zeroes bits 0, 1 and 3 on
+  every write; and `probe`'s `else if (output)` cannot tell a genuine 0 from an
+  unread field.
+
+  **Keep the `mode > 1` and `60 <= limit <= 100` checks.** They have no firmware
+  basis — there is no clamp — but they are what keeps every written value inside
+  its field width given a four-byte argument buffer and a four-bit destination.
+  Load-bearing for a reason their author did not state.
 
 ### Step 6 leads, in order of cost
 

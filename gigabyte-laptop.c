@@ -16,6 +16,7 @@
 #include <linux/input.h>
 #include <linux/input/sparse-keymap.h>
 #include <linux/kernel.h>
+#include <linux/kobject.h>
 #include <linux/platform_device.h>
 #include <linux/platform_profile.h>
 #include <linux/module.h>
@@ -220,8 +221,19 @@ static bool gigabyte_laptop_is_gaming_family(void)
 
 /* WMI methods ********************************************/
 
-/* WMBC method (checks value in EC) */
-static int gigabyte_laptop_get_devstate_raw(u32 method_id, u32 arg2, void *result, size_t size)
+/*
+ * WMBC method (checks value in EC).
+ *
+ * reply_type, when non-NULL, hands the raw ACPI type back. That is how a caller
+ * tells an implemented method from one the firmware has no case for: WMBC ends
+ * in Default { Return (Arg2) } and Arg2 arrives as a four-byte buffer, so an
+ * unimplemented ID answers with a BUFFER while every implemented field read
+ * answers with an INTEGER. That is conclusive in one call where a sentinel
+ * value is not, because a sentinel can collide with a real value -- KBLL is
+ * eight bits, so 0x5A is a plausible brightness.
+ */
+static int gigabyte_laptop_get_devstate_typed(u32 method_id, u32 arg2, void *result,
+					size_t size, acpi_object_type *reply_type)
 {
 	union acpi_object *obj;
 	acpi_status status;
@@ -233,6 +245,10 @@ static int gigabyte_laptop_get_devstate_raw(u32 method_id, u32 arg2, void *resul
 		return -EIO;
 
 	obj = buffer.pointer;
+
+	if (reply_type)
+		*reply_type = obj ? obj->type : ACPI_TYPE_ANY;
+
 	if (obj && obj->type == ACPI_TYPE_INTEGER) {
 		// Refuse to truncate an integer into a smaller caller buffer
 		if (size < sizeof(int)) {
@@ -261,6 +277,11 @@ static int gigabyte_laptop_get_devstate_raw(u32 method_id, u32 arg2, void *resul
 	}
 	kfree(obj);
 	return 0;
+}
+
+static int gigabyte_laptop_get_devstate_raw(u32 method_id, u32 arg2, void *result, size_t size)
+{
+	return gigabyte_laptop_get_devstate_typed(method_id, arg2, result, size, NULL);
 }
 
 /* Read a single value. The common case. */
@@ -1325,19 +1346,29 @@ static ssize_t debug_method_show(struct device *dev, struct device_attribute *at
 {
 	int ret, output;
 	bool echoed;
+	acpi_object_type type = ACPI_TYPE_ANY;
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
 
-	ret = gigabyte_laptop_get_devstate2(gigabyte->debug_method,
-					gigabyte->debug_arg, &output);
+	ret = gigabyte_laptop_get_devstate_typed(gigabyte->debug_method,
+					gigabyte->debug_arg, &output,
+					sizeof(output), &type);
 	if (ret)
 		return ret;
 
-	// Only conclusive when the argument was something the firmware would not return
+	/*
+	 * Two independent signals, because neither is complete on its own. The
+	 * reply type is conclusive -- a BUFFER is the Default echo -- but says
+	 * nothing about the value. The sentinel comparison is only suggestive,
+	 * since a sentinel can collide with a real reading, but it is what
+	 * flags the case where the two disagree.
+	 */
 	echoed = gigabyte->debug_arg && output == (int)gigabyte->debug_arg;
 
-	return sysfs_emit(buf, "method 0x%02x arg 0x%x -> 0x%x (%d)%s\n",
+	return sysfs_emit(buf, "method 0x%02x arg 0x%x -> 0x%x (%d) [%s]%s\n",
 			gigabyte->debug_method, gigabyte->debug_arg, output, output,
-			echoed ? " [echoed argument: method not implemented]" : "");
+			type == ACPI_TYPE_INTEGER ? "implemented" :
+				"not implemented: reply was not an integer",
+			echoed ? " [argument echoed back]" : "");
 }
 
 /*
@@ -1753,6 +1784,7 @@ static const struct key_entry gigabyte_laptop_keymap[] = {
 static void gigabyte_laptop_cycle_fan_preset(void)
 {
 	struct gigabyte_laptop_wmi *gigabyte;
+	char env[48];
 	u8 preset, old;
 	int ret;
 
@@ -1784,6 +1816,31 @@ static void gigabyte_laptop_cycle_fan_preset(void)
 
 	// So a desktop can poll() the attribute and show what the key just did
 	sysfs_notify(&gigabyte->pdev->dev.kobj, NULL, "fan_preset");
+
+	/*
+	 * And a broadcast for consumers that never opened the file: udev rules,
+	 * RUN+=, systemd device units.
+	 *
+	 * The value travels with the event rather than being re-read, because
+	 * fan_preset can move again before a consumer gets round to reading it
+	 * -- three quick presses can leave a slow reader seeing one event and
+	 * the final value, with the intermediate presets never observed. preset
+	 * was captured inside the lock above, so the event *is* the value.
+	 * ACTION, DEVPATH, SUBSYSTEM and SEQNUM come from the core.
+	 *
+	 * Emitted here and nowhere else, deliberately. A sysfs write to
+	 * fan_preset or fan_mode is a change the writer already knows about,
+	 * and both hold fan_lock for their whole body, where this call must not
+	 * run: it allocates GFP_KERNEL and can enter reclaim. A key press is
+	 * the one change userspace has no other way to see, and by here the
+	 * lock is released and the failure path has already returned.
+	 *
+	 * The return value is dropped. Under memory pressure a lost cosmetic
+	 * notification is not worth a warning.
+	 */
+	snprintf(env, sizeof(env), "GIGABYTE_FAN_PRESET=%s", fan_preset_names[preset]);
+	kobject_uevent_env(&gigabyte->pdev->dev.kobj, KOBJ_CHANGE,
+			(char *[]){ env, NULL });
 }
 
 static struct input_dev *gigabyte_laptop_input;
