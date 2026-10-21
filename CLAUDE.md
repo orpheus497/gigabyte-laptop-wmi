@@ -659,11 +659,30 @@ Remaining candidates, both needing kernel work:
    — no `wmi_install_notify_handler`, no input device, no `sparse_keymap`.
 3. The `\_SB_.I2CB.ECSH` i2c-HID pipe.
 
-**Cheap discriminator before writing either handler:** `gpe0A` is the EC's GPE
-and its firing count is world-readable at
-`/sys/firmware/acpi/interrupts/gpe0A`. If pressing GiMate increments it, the EC
-*is* raising a query and only the handler is missing. If it does not move, the
-key never reaches ACPI and only the ENE pipe is left.
+**Confirmed on hardware: the keys do reach ACPI.** `gpe0A` is the EC's GPE and
+its firing count is world-readable at `/sys/firmware/acpi/interrupts/gpe0A`.
+Five GiMate presses plus five Fn+F7 presses took it from 137 to **157** — two
+GPEs per press, make and break. A 20-second control with no keys touched showed
+**zero** drift, so the count is not background EC polling.
+
+So the EC raises a query for both keys and nothing in Linux consumes it. That
+rules out the ENE pipe being the only route and makes Step 5 ordinary kernel
+work: add the handler and map the event.
+
+**To pinpoint which `_Qxx` fires**, and so choose between the `GBT0005` and WMI
+routes, turn on the EC driver's query logging. `CONFIG_DYNAMIC_DEBUG=y` and
+debugfs is mounted rw:
+
+```sh
+echo 'file drivers/acpi/ec.c +p' | sudo tee /sys/kernel/debug/dynamic_debug/control
+# press GiMate and Fn+F7
+sudo dmesg | grep -iE "query|EVT" | tail -20
+echo 'file drivers/acpi/ec.c -p' | sudo tee /sys/kernel/debug/dynamic_debug/control
+```
+
+`ec.c` logs `Query(0x%02x) scheduled` for every query, so this names the handler
+to write. Expect `0x63` if it is the `GBT0005` path or `0x45` if it is the WMI
+path; anything else is a query not yet accounted for.
 
 On USB Gigabyte models the vendor-HID path carries report ID `0x04` with
 payload `00 00 84` = Mode key and `00 00 91` = GigaMate key (GigaMate's
