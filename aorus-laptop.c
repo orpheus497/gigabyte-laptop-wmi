@@ -62,12 +62,24 @@ MODULE_VERSION(GIGABYTE_LAPTOP_VERSION);
 #define FAN_SILENT_OLD   0xFA // Older Aero and P-series models
 #define LIGHT_SENSOR_NEW 0xFC // Added in VE models, returns as buffer
 
+// Gigabyte Gaming (2025+) models only (e.g. A16 CWH, A16 5TH)
+#define FAN_TURBO        0x7D // EC TFAN bit, max fan speed
+#define DYN_BOOST        0xE7 // NPCF dynamic boost (write 0 to enable)
+#define PERF_MODE        0xED // NPCF perf mode, controls GPU TGP/CTGP boost
+
 // Adding support (WIP)
 #define CPU_FAN_DUTY     0x46 // Aero 15 VB
 #define GPU_FAN_DUTY     0x47 // Aero 15 VB
 
 // Fan curves
 #define FAN_CURVE_POINTS 15
+
+/*
+ * Highest custom fan duty that is safe to program. Duties above this have been
+ * reported to stop the fans entirely on some models, so never exceed it when
+ * the driver picks a duty by itself.
+ */
+#define FAN_DUTY_MAX     0xE5
 
 struct fan_curve_data {
 	u8 temperature[FAN_CURVE_POINTS];
@@ -85,7 +97,15 @@ struct gigabyte_laptop_wmi {
 	int charge_limit;
 	int gpu_boost;
 	int fan_curve_index;
+	int perf_mode;
+	int dynamic_boost;
+	int fan_turbo;
 
+	// Fan state to restore when turbo fan mode is switched off
+	int fan_turbo_saved_mode;
+	int fan_turbo_saved_speed;
+
+	u8 gaming_family;
 	u8 fan_silent_method;
 	u8 debug_method;
 	u8 dual_fan_speed_enabled;
@@ -111,6 +131,17 @@ static u8 fan_modes[] = {
 	FAN_AUTO_MODE,
 	FAN_FIXED_MODE
 };
+
+/*
+ * Gigabyte Gaming (2025+) firmware exposes performance mode, dynamic boost and
+ * turbo fan through method IDs that older Aero/AORUS firmware does not have.
+ */
+static bool gigabyte_laptop_is_gaming_family(void)
+{
+	const char *family = dmi_get_system_info(DMI_PRODUCT_FAMILY);
+
+	return family && !strcmp(family, "GIGABYTE GAMING");
+}
 
 /* WMI methods ********************************************/
 
@@ -491,9 +522,28 @@ static ssize_t fan_custom_speed_show(struct device *dev, struct device_attribute
 	return sysfs_emit(buf, "%d\n", gigabyte->fan_custom_speed);
 }
 
-static ssize_t fan_custom_speed_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+static int set_fan_custom_speed(struct gigabyte_laptop_wmi *gigabyte, u32 speed)
 {
 	int ret, output;
+
+	ret = gigabyte_laptop_set_devstate(FAN_CUSTOM_SPEED, speed, &output);
+	if (ret)
+		return ret;
+
+	// On some models, FAN_CUSTOM_SPEED will only set CPU fan speed.
+	if (gigabyte->dual_fan_speed_enabled) {
+		ret = gigabyte_laptop_set_devstate(GPU_FAN_DUTY, speed, &output);
+		if (ret)
+			return ret;
+	}
+
+	gigabyte->fan_custom_speed = speed;
+	return 0;
+}
+
+static ssize_t fan_custom_speed_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	int ret;
 	unsigned int speed;
 	struct gigabyte_laptop_wmi *gigabyte;
 
@@ -501,18 +551,12 @@ static ssize_t fan_custom_speed_store(struct device *dev, struct device_attribut
 	if (ret)
 		return ret;
 
-	ret = gigabyte_laptop_set_devstate(FAN_CUSTOM_SPEED, speed, &output);
+	gigabyte = dev_get_drvdata(dev);
+
+	ret = set_fan_custom_speed(gigabyte, speed);
 	if (ret)
 		return ret;
 
-	gigabyte = dev_get_drvdata(dev);
-	// On some models, FAN_CUSTOM_SPEED will only set CPU fan speed.
-	if (gigabyte->dual_fan_speed_enabled) {
-		ret = gigabyte_laptop_set_devstate(GPU_FAN_DUTY, speed, &output);
-		if (ret)
-			return ret;
-	}
-	gigabyte->fan_custom_speed = speed;
 	return count;
 }
 
@@ -637,6 +681,152 @@ static ssize_t gpu_boost_store(struct device *dev, struct device_attribute *attr
 
 	gigabyte = dev_get_drvdata(dev);
 	gigabyte->gpu_boost = mode;
+	return count;
+}
+
+/*
+ * Performance mode (Gigabyte Gaming models).
+ * Controls the discrete GPU's TGP/CTGP budget through the NPCF interface.
+ * 0 = eco, 1 = balanced, 2 = boost
+ *
+ * The firmware resets this to its default on every boot.
+ */
+static ssize_t perf_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", gigabyte->perf_mode);
+}
+
+static ssize_t perf_mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	int ret, output;
+	unsigned int mode;
+	struct gigabyte_laptop_wmi *gigabyte;
+
+	ret = kstrtouint(buf, 0, &mode);
+	if (ret)
+		return ret;
+
+	if (mode > 2) {
+		pr_err("Invalid performance mode\n");
+		return -EINVAL;
+	}
+
+	ret = gigabyte_laptop_set_devstate(PERF_MODE, mode, &output);
+	if (ret)
+		return ret;
+
+	gigabyte = dev_get_drvdata(dev);
+	gigabyte->perf_mode = mode;
+	return count;
+}
+
+/*
+ * Dynamic boost (Gigabyte Gaming models).
+ * Shifts power between the CPU and the discrete GPU under load.
+ *
+ * The EC takes this one inverted, so the value written is flipped. The node
+ * itself reads and writes the conventional way around: 0 = off, 1 = on.
+ */
+static ssize_t dynamic_boost_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", gigabyte->dynamic_boost);
+}
+
+static ssize_t dynamic_boost_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	int ret, output;
+	unsigned int enable;
+	struct gigabyte_laptop_wmi *gigabyte;
+
+	ret = kstrtouint(buf, 0, &enable);
+	if (ret)
+		return ret;
+
+	if (enable > 1) {
+		pr_err("Invalid dynamic boost mode\n");
+		return -EINVAL;
+	}
+
+	ret = gigabyte_laptop_set_devstate(DYN_BOOST, !enable, &output);
+	if (ret)
+		return ret;
+
+	gigabyte = dev_get_drvdata(dev);
+	gigabyte->dynamic_boost = enable;
+	return count;
+}
+
+/*
+ * Turbo fan (Gigabyte Gaming models).
+ *
+ * Writing the EC's TFAN bit on its own does not hold the fans at full speed,
+ * so turbo is engaged the way the firmware does it: program the highest safe
+ * custom duty, then latch fixed fan mode. The fan mode and duty in use before
+ * turbo was switched on are restored when it is switched off, and the TFAN bit
+ * is cleared then in case the firmware set it behind our back.
+ */
+static ssize_t fan_turbo_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", gigabyte->fan_turbo);
+}
+
+static ssize_t fan_turbo_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	int ret, output;
+	unsigned int enable;
+	struct gigabyte_laptop_wmi *gigabyte;
+
+	ret = kstrtouint(buf, 0, &enable);
+	if (ret)
+		return ret;
+
+	if (enable > 1) {
+		pr_err("Invalid turbo fan mode\n");
+		return -EINVAL;
+	}
+
+	gigabyte = dev_get_drvdata(dev);
+
+	if (gigabyte->fan_turbo == enable)
+		return count;
+
+	if (enable) {
+		gigabyte->fan_turbo_saved_mode = gigabyte->fan_mode;
+		gigabyte->fan_turbo_saved_speed = gigabyte->fan_custom_speed;
+
+		ret = set_fan_custom_speed(gigabyte, FAN_DUTY_MAX);
+		if (ret)
+			return ret;
+
+		ret = set_fan_mode(gigabyte, FAN_FIXED_MODE);
+		if (ret)
+			return ret;
+
+		gigabyte->fan_mode = 5;
+	} else {
+		ret = gigabyte_laptop_set_devstate(FAN_TURBO, 0, &output);
+		if (ret)
+			return ret;
+
+		// Restore the duty first, since auto mode programs the fans with it.
+		ret = set_fan_custom_speed(gigabyte, gigabyte->fan_turbo_saved_speed);
+		if (ret)
+			return ret;
+
+		ret = set_fan_mode(gigabyte, fan_modes[gigabyte->fan_turbo_saved_mode]);
+		if (ret)
+			return ret;
+
+		gigabyte->fan_mode = gigabyte->fan_turbo_saved_mode;
+	}
+
+	gigabyte->fan_turbo = enable;
 	return count;
 }
 
@@ -797,6 +987,9 @@ static DEVICE_ATTR_RO(fan_pwm);
 static DEVICE_ATTR_RW(charge_mode);
 static DEVICE_ATTR_RW(charge_limit);
 static DEVICE_ATTR_RW(gpu_boost);
+static DEVICE_ATTR_RW(perf_mode);
+static DEVICE_ATTR_RW(dynamic_boost);
+static DEVICE_ATTR_RW(fan_turbo);
 static DEVICE_ATTR_RW(fan_curve_index);
 static DEVICE_ATTR_RW(fan_curve_data);
 static DEVICE_ATTR_RO(battery_cycle);
@@ -814,6 +1007,9 @@ static struct attribute *gigabyte_laptop_attributes[] = {
 	&dev_attr_usb_charge_s3_toggle.attr,
 	&dev_attr_usb_charge_s4_toggle.attr,
 	&dev_attr_gpu_boost.attr,
+	&dev_attr_perf_mode.attr,
+	&dev_attr_dynamic_boost.attr,
+	&dev_attr_fan_turbo.attr,
 	&dev_attr_fan_curve_index.attr,
 	&dev_attr_fan_curve_data.attr,
 	&dev_attr_battery_cycle.attr,
@@ -824,8 +1020,22 @@ static struct attribute *gigabyte_laptop_attributes[] = {
 	NULL
 };
 
+static umode_t gigabyte_laptop_sysfs_is_visible(struct kobject *kobj, struct attribute *attr, int idx)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+
+	// These use method IDs only present on Gigabyte Gaming firmware
+	if (attr == &dev_attr_perf_mode.attr ||
+		attr == &dev_attr_dynamic_boost.attr ||
+		attr == &dev_attr_fan_turbo.attr)
+		return gigabyte->gaming_family ? attr->mode : 0;
+
+	return attr->mode;
+}
+
 static const struct attribute_group gigabyte_laptop_attr_group = {
-	//.is_visible = gigabyte_laptop_sysfs_is_visible,
+	.is_visible = gigabyte_laptop_sysfs_is_visible,
 	.attrs = gigabyte_laptop_attributes,
 };
 
@@ -1057,6 +1267,24 @@ obtain_custom_fan_speed:
 		}
 	}
 
+	/*
+	 * Read back the Gigabyte Gaming nodes. These are optional, so a firmware
+	 * that does not answer leaves them at their default rather than failing
+	 * the probe. Turbo fan has no state to read, as it is a combination of
+	 * fan mode and duty rather than a single value.
+	 */
+	if (gigabyte->gaming_family) {
+		if (!gigabyte_laptop_get_devstate(PERF_MODE, &output))
+			gigabyte->perf_mode = output;
+		else
+			pr_info("Performance mode unsupported by this firmware\n");
+
+		if (!gigabyte_laptop_get_devstate(DYN_BOOST, &output))
+			gigabyte->dynamic_boost = !output;
+		else
+			pr_info("Dynamic boost unsupported by this firmware\n");
+	}
+
 	// Finally, check for quirks in the system
 	if (dmi_check_system(gigabyte_laptop_quirks_needed)) {
 		if ((find_str(dmi_get_system_info(DMI_PRODUCT_NAME), "AORUS 17X") == 0 &&
@@ -1121,6 +1349,9 @@ static int __init gigabyte_laptop_init(void)
 		result = -ENOMEM;
 		goto fail_platform_driver;
 	}
+
+	// Needed before the attribute group is created, as it gates what is shown
+	gigabyte->gaming_family = gigabyte_laptop_is_gaming_family();
 
 	platform_device = platform_device_alloc(GIGABYTE_LAPTOP_FILE, -1);
 	if (!platform_device) {

@@ -167,3 +167,53 @@ Aero/AORUS laptops support reading the current PWM for each fan. This should not
 The sysfs and HWMON nodes are read-only, but support for writing to HWMON nodes will be added in the future. The sysfs node will only return the PWM for the CPU fan, while the HWMON nodes have separate channels for CPU and GPU fans.
 
 **Node:** `/sys/devices/platform/aorus_laptop/fan_pwm`
+
+## Performance mode (Gigabyte Gaming models)
+
+**Disclaimer:** The next three nodes only exist on Gigabyte Gaming (2025+)
+models, as they use method IDs that older Aero/AORUS firmware does not have.
+They are hidden on every other model.
+
+Gigabyte Gaming laptops can set the discrete GPU's TGP/CTGP budget through the
+NPCF interface. Three modes are available:
+
+- Eco (0)
+- Balanced (1)
+- Boost (2)
+
+The firmware resets this to its default on every boot.
+
+**Node:** `/sys/devices/platform/aorus_laptop/perf_mode`
+
+**Example:** To switch to boost mode:
+
+```sh
+echo '2' | sudo tee /sys/devices/platform/aorus_laptop/perf_mode
+```
+
+## Dynamic boost (Gigabyte Gaming models)
+
+Gigabyte Gaming laptops support dynamic boost, which shifts power between the
+CPU and the discrete GPU under load. The embedded controller takes this value
+inverted, but the node reads and writes the conventional way around: 0 to
+disable, 1 to enable.
+
+**Node:** `/sys/devices/platform/aorus_laptop/dynamic_boost`
+
+## Turbo fan (Gigabyte Gaming models)
+
+Gigabyte Gaming laptops can run their fans at full speed. Writing the embedded
+controller's turbo fan bit on its own does not hold the fans there, so this node
+engages turbo the way the firmware does: it programs the highest safe custom fan
+duty (229), then enables fixed fan mode.
+
+The fan mode and custom fan speed in use beforehand are restored when turbo is
+switched off, so this node can be toggled without losing a custom fan curve.
+
+**Node:** `/sys/devices/platform/aorus_laptop/fan_turbo`
+
+**Example:** To run the fans at full speed:
+
+```sh
+echo '1' | sudo tee /sys/devices/platform/aorus_laptop/fan_turbo
+```
