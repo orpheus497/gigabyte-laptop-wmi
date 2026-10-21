@@ -146,7 +146,7 @@ static bool gigabyte_laptop_is_gaming_family(void)
 /* WMI methods ********************************************/
 
 /* WMBC method (checks value in EC) */
-static int gigabyte_laptop_get_devstate2(u32 method_id, u32 arg2, void *result)
+static int gigabyte_laptop_get_devstate_raw(u32 method_id, u32 arg2, void *result, size_t size)
 {
 	union acpi_object *obj;
 	acpi_status status;
@@ -158,22 +158,27 @@ static int gigabyte_laptop_get_devstate2(u32 method_id, u32 arg2, void *result)
 		return -1;
 
 	obj = buffer.pointer;
-	if (obj && obj->type == ACPI_TYPE_INTEGER)
+	if (obj && obj->type == ACPI_TYPE_INTEGER) {
+		// Refuse to truncate an integer into a smaller caller buffer
+		if (size < sizeof(int)) {
+			kfree(obj);
+			return -EINVAL;
+		}
 		*(int *)result = obj->integer.value;
-	// TODO: Fix copying data to pointer
+	}
 	else if (obj && obj->type == ACPI_TYPE_BUFFER) {
 		if (obj->buffer.length == 0) {
 			kfree(obj);
 			return -ENODATA;
 		}
-		/*pr_info("This works\n");
-		pr_info("ACPI buffer length: %u\n", obj->buffer.length);
-		pr_info("ACPI buffer contents: \n");
-
-		for (int i = 0; i < obj->buffer.length; i++) {
-			pr_info("%02x \n", obj->buffer.pointer[i]);
-		}*/
-		memcpy(result, obj->buffer.pointer, obj->buffer.length);
+		/*
+		 * The firmware decides how much it hands back, so clamp the copy
+		 * to what the caller has room for. This matters because WMBC ends
+		 * in Default { Return (Arg2) }, so a method ID the firmware does
+		 * not implement returns the argument buffer rather than failing.
+		 */
+		memcpy(result, obj->buffer.pointer,
+			min_t(size_t, size, obj->buffer.length));
 	}
 	else {
 		kfree(obj);
@@ -183,8 +188,21 @@ static int gigabyte_laptop_get_devstate2(u32 method_id, u32 arg2, void *result)
 	return 0;
 }
 
-static int gigabyte_laptop_get_devstate(u32 method_id, void *result) {
+/* Read a single value. The common case. */
+static int gigabyte_laptop_get_devstate2(u32 method_id, u32 arg2, int *result)
+{
+	return gigabyte_laptop_get_devstate_raw(method_id, arg2, result, sizeof(*result));
+}
+
+static int gigabyte_laptop_get_devstate(u32 method_id, int *result)
+{
 	return gigabyte_laptop_get_devstate2(method_id, 0, result);
+}
+
+/* Read a method that answers with a buffer, such as the light sensor. */
+static int gigabyte_laptop_get_devstate_buf(u32 method_id, void *result, size_t size)
+{
+	return gigabyte_laptop_get_devstate_raw(method_id, 0, result, size);
 }
 
 /* WMBD method (sets value in EC) */
@@ -927,11 +945,12 @@ static ssize_t battery_cycle_show(struct device *dev, struct device_attribute *a
 static ssize_t light_sensor_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	int ret, output_old;
-	u8 output[4];
+	u8 output[4] = { };
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
 
 	if (gigabyte->light_sensor_method == LIGHT_SENSOR_NEW)
-		ret = gigabyte_laptop_get_devstate(gigabyte->light_sensor_method, &output);
+		ret = gigabyte_laptop_get_devstate_buf(gigabyte->light_sensor_method,
+						output, sizeof(output));
 	else
 		ret = gigabyte_laptop_get_devstate(gigabyte->light_sensor_method, &output_old);
 	if (ret)
@@ -945,9 +964,9 @@ static ssize_t light_sensor_show(struct device *dev, struct device_attribute *at
 static ssize_t power_on_time_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	int ret;
-	u8 output[5];
+	u8 output[5] = { };
 
-	ret = gigabyte_laptop_get_devstate(POWER_ON_TIME, &output);
+	ret = gigabyte_laptop_get_devstate_buf(POWER_ON_TIME, output, sizeof(output));
 	if (ret)
 		return ret;
 	// year, month, day, hour, minute
@@ -1161,29 +1180,37 @@ obtain_fan_mode:
 	// Set silent fan mode ID.
 	fan_modes[1] = gigabyte->fan_silent_method;
 
-	// Get current fan mode.
+	/*
+	 * Get current fan mode.
+	 *
+	 * None of these reads is worth refusing to load over. The sensors are
+	 * already registered by the time probe runs, so a firmware that answers
+	 * some methods and not others should still give the user working fans
+	 * and temperatures. Every failure below therefore warns and falls back
+	 * to normal mode rather than aborting.
+	 */
 	ret = gigabyte_laptop_get_devstate(gigabyte->fan_silent_method, &output);
 	if (ret)
-		return ret;
+		goto fan_mode_unknown;
 	else if (output) {
 		gigabyte->fan_mode = 1;
 		goto obtain_custom_fan_speed;
 	}
 	ret = gigabyte_laptop_get_devstate(FAN_GAMING_MODE, &output);
 	if (ret)
-		return ret;
+		goto fan_mode_unknown;
 	else if (output) {
 		gigabyte->fan_mode = 2;
 		goto obtain_custom_fan_speed;
 	}
 	ret = gigabyte_laptop_get_devstate(FAN_CUSTOM_MODE, &output);
 	if (ret)
-		return ret;
+		goto fan_mode_unknown;
 	else if (output) {
 		// Auto-maximum mode can't be read through WMI, so read EC register containing it
 		ret = ec_read(0xD, &result);
 		if (ret)
-			return AE_ERROR;
+			goto fan_mode_unknown;
 		output = (result >> 7) & 0x1;
 		if (output) {
 			gigabyte->fan_mode = 4;
@@ -1191,7 +1218,7 @@ obtain_fan_mode:
 		}
 		ret = gigabyte_laptop_get_devstate(FAN_FIXED_MODE, &output);
 		if (ret)
-			return ret;
+			goto fan_mode_unknown;
 		else if (output)
 			gigabyte->fan_mode = 5;
 		else
@@ -1200,11 +1227,16 @@ obtain_fan_mode:
 	}
 	// If all checks return 0, we are most likely in normal fan mode
 	gigabyte->fan_mode = 0;
+	goto obtain_custom_fan_speed;
+
+fan_mode_unknown:
+	pr_warn("Could not determine fan mode (%d), assuming normal\n", ret);
+	gigabyte->fan_mode = 0;
 
 obtain_custom_fan_speed:
 	ret = gigabyte_laptop_get_devstate(FAN_CUSTOM_SPEED, &output);
 	if (ret)
-		return ret;
+		pr_info("Custom fan speed unreadable on this firmware\n");
 	else if (output)
 		gigabyte->fan_custom_speed = output;
 
@@ -1228,21 +1260,23 @@ obtain_custom_fan_speed:
 
 	ret = gigabyte_laptop_get_devstate(CHARGING_MODE, &output);
 	if (ret)
-		return ret;
+		pr_info("Charging mode unsupported by this firmware\n");
 	else if (output)
 		gigabyte->charge_mode = output >> 2;
 
 	ret = gigabyte_laptop_get_devstate(CHARGING_LIMIT, &output);
 	if (ret)
-		return ret;
+		pr_info("Charging limit unsupported by this firmware\n");
 	else if (output)
 		gigabyte->charge_limit = output;
 
 	// Get the fan curve. Used by custom mode.
 	for (u8 i = 0; i < FAN_CURVE_POINTS; i++) {
 		ret = gigabyte_laptop_get_devstate2(FAN_INDEX_VALUE, i, &output);
-		if (ret)
-			return ret;
+		if (ret) {
+			pr_info("Fan curve unreadable on this firmware\n");
+			break;
+		}
 		else if (output) {
 			gigabyte->fan_curve.temperature[i] = output;
 			gigabyte->fan_curve.speed[i] = output >> 8;
@@ -1250,10 +1284,11 @@ obtain_custom_fan_speed:
 	}
 
 	// Test for new light sensor method. Older models don't support it.
-	u8 light_sensor_result[4];
-	ret = gigabyte_laptop_get_devstate(LIGHT_SENSOR_NEW, &light_sensor_result);
+	u8 light_sensor_result[4] = { };
+	ret = gigabyte_laptop_get_devstate_buf(LIGHT_SENSOR_NEW, light_sensor_result,
+					sizeof(light_sensor_result));
 	if (ret)
-		return ret;
+		pr_info("Light sensor unsupported by this firmware\n");
 	if (light_sensor_result[0] == 0xF7) {
 		gigabyte->light_sensor_method = LIGHT_SENSOR_NEW;
 		pr_info("Using new light sensor method\n");

@@ -390,6 +390,23 @@ make                                  # builds against /lib/modules/$(uname -r)/
 signatures even with `CONFIG_MODULE_SIG_FORCE=n`, and a freshly built `.ko` is
 unsigned (`EKEYREJECTED`).
 
+**`dkms.conf` ships `PACKAGE_VERSION="@PKGVER@"` as a template.** It is a
+placeholder the distro packaging substitutes (`sed -e "s/@PKGVER@/%{version}/"`
+in the RPM spec, the same in the PKGBUILD). Running `dkms ldtarball` on a
+tarball built straight from the repo registers a module literally versioned
+`@PKGVER@`, and the follow-up `dkms install aorus-laptop/0.2.0` then fails with
+"Could not find module source directory". Use `scripts/install-dkms.sh`, which
+substitutes the version first and cleans up any earlier registration including
+that one. The canonical version is **0.2.0**, per both RPM specs and the
+PKGBUILD.
+
+```sh
+sudo bash scripts/install-dkms.sh            # or --autoload for boot loading
+```
+
+`dkms` 3.4.4 prints "Deprecated feature: CLEAN" for the `CLEAN=` line in
+`dkms.conf`. Harmless; left alone to avoid diverging from upstream.
+
 Install via DKMS, which signs automatically with the already-enrolled key:
 
 ```
@@ -410,15 +427,20 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   #46: duties above 229 *stop the fans entirely* on the AERO 17-XA. The driver
   must never program a higher duty for itself. The `fan_custom_speed` node still
   accepts 0–255 as upstream intends.
-- **Probe aborts the whole module on any optional-method failure.**
-  `gigabyte_laptop_init()` treats a `gigabyte_laptop_probe()` error as fatal
-  (`goto fail_probe`), and probe does `if (ret) return ret` after optional
-  feature reads. One unsupported method ID kills the driver. Not yet fixed.
-- **Unbounded `memcpy` in `gigabyte_laptop_get_devstate2()`.** The
-  `ACPI_TYPE_BUFFER` branch copies `obj->buffer.length` bytes into a
-  caller-supplied pointer with no clamp. Probe passes a 4-byte `u8[4]` for
-  `LIGHT_SENSOR_NEW` (`0xFC`). This machine has no light sensor, so what that
-  method returns here is unknown. Potential stack overflow. Not yet fixed.
+- ~~Probe aborts the whole module on any optional-method failure.~~ **Fixed in
+  Step 1.** `gigabyte_laptop_init()` still treats a probe error as fatal, but
+  probe no longer returns one for a firmware read: fan-mode detection falls back
+  to normal mode with a warning, and the charging, fan-curve, custom-speed and
+  light-sensor reads log and continue. Sensors are registered before probe runs,
+  so partial firmware support now still yields working fans and temperatures.
+- ~~Unbounded `memcpy` in the getter.~~ **Fixed in Step 1.** The core is now
+  `gigabyte_laptop_get_devstate_raw(method, arg, result, size)` and clamps with
+  `min_t(size_t, size, obj->buffer.length)`. Integer reads go through
+  `gigabyte_laptop_get_devstate{,2}()`, typed `int *`; buffer reads go through
+  `gigabyte_laptop_get_devstate_buf()` with an explicit size. Typing the integer
+  wrapper flushed out a third buffer caller — `power_on_time_show()` reads
+  **five** bytes — which the old `void *` signature had hidden. Buffer
+  destinations are zero-initialised so a short reply cannot expose stack bytes.
 - **`ec_read()` offsets are unverified on this EC.** `0xD` (auto-max fan mode
   detect) and `0x62` (board temp, `temp3_input`) were derived from Intel
   Aero/AORUS units. Cross-check `temp3_input` against `k10temp`.
