@@ -625,7 +625,7 @@ Both commits build clean with `-Wall -Wextra`.
 | 2 | Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel | medium |
 | 3 | Register a `platform_profile` handler over `perf_mode` + `dynamic_boost` | low |
 | 4 | Writable `pwm1`/`pwm2` for CoolerControl | medium |
-| 5 | GiMate button — diagnose, then notify handler + keymap | low |
+| 5 | GiMate button — path identified; input device + `sparse_keymap` left | low |
 | 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
 
 Steps 0, 1 and 1b are complete and verified on hardware: `gigabyte-laptop/0.2.0`
@@ -690,7 +690,42 @@ hwdb entry — is off the table for GiMate and Mode. Fn+Space is handled inside
 the EC and needs nothing from us. Fn+F12 shows the EC synthesising ordinary key
 combos for some Fn keys, which is why those work without a driver.
 
-Remaining candidates, both needing kernel work:
+### Settled on hardware: the keys use the WMI path, and their event numbers
+
+The instrumented build answered it. Pressing GiMate five times then Fn+F7 twice
+produced, with **no** `GBT0005` notify at all:
+
+```
+gigabyte_laptop: WMI event: ce 00 bb cc     x5
+gigabyte_laptop: WMI event: cc 00 bb cc     x2
+```
+
+So:
+
+| Event number (`WEVN`) | Key |
+|---|---|
+| `0xCE` | GiMate |
+| `0xCC` | Mode (Fn+F7) |
+
+*The assignment follows the press order and is worth one confirming press each
+before it is baked into a keymap.*
+
+Three things are confirmed by that output:
+
+- **The route is `_Q45` → `SMGR` → `WMBC(0, 0x03, n)` → `Notify (AMW0, 0xD2)`.**
+  The `_Q63` → `Notify (GAPD, 0xCF)` candidate never fired, so `GBT0005` is
+  eliminated for these keys despite `_STA` reporting it present.
+- **The decoded event chain was right.** The payload is literally
+  `{WEVN, WEVS, 0xBB, 0xCC}` — byte 0 the event number, byte 1 the state, then
+  the two constant bytes. `state` is `0x00` for both keys.
+- **Our driver owns the GUID**, so the absence of `GBT0005` notifies is a real
+  negative rather than a lost race:
+  `/sys/bus/wmi/devices/ABBC0F72-…-3/driver -> gigabyte-laptop-events`.
+
+What remains for Step 5 is therefore an input device with a `sparse_keymap`
+over those two event numbers. No further diagnosis is needed.
+
+### The candidates, for the record
 
 1. **`_Q63` → `Notify (GAPD, 0xCF)`** on `GBT0005`, which `_STA` reports present
    on this BIOS. An `acpi_driver` with a notify handler. Simplest of the two,
@@ -853,11 +888,27 @@ supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 
 ### Step 2 validation
 
-Read `0xED`, `0xE7` and `0x7D` through `debug_method` and confirm sane values
-**before any write**. Then enable `fan_turbo` for roughly 3 seconds on AC while
-idle, watching `fan1_input`/`fan2_input`, and confirm the fans resume on
-disable. The short burst is deliberate: this is the path that touches the duty
-ceiling which stopped fans on the AERO 17-XA (upstream #46).
+The read-only half is **done, and both DSDT predictions held**. Sentinel reads
+with argument `0x5A`:
+
+```
+method 0xed arg 0x5a -> 0x5a (90) [echoed argument: method not implemented]
+method 0xe7 arg 0x5a -> 0x0 (0)
+```
+
+`0xED` echoes the sentinel, confirming on this machine's firmware that
+performance mode is write-only exactly as the ASL said. `0xE7` does not echo,
+so dynamic boost really is implemented here, and it currently reads `0` — off.
+That also validates the sentinel technique itself: the two cases are now
+distinguishable, which they were not before Step 1b.
+
+Still outstanding: the write side. `perf_mode` 0/1/2 against
+`nvidia-smi -q -d POWER` (settles **D3**), `dynamic_boost` direction against the
+same (settles **D4** — the ASL proves the node round-trips but not which way
+means "on"), and `fan_turbo` for roughly 3 seconds on AC while idle, watching
+`fan1_input`/`fan2_input` and confirming the fans resume on disable. The short
+burst is deliberate: that path touches the duty ceiling which stopped fans on
+the AERO 17-XA (upstream #46).
 
 ### Other
 
