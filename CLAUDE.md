@@ -1149,7 +1149,14 @@ own DSDT and this kernel's headers, not inferred from field names.
 
 **Blocked on hardware measurement, deliberately not written:**
 
-- **`0xF6` / `KBLL` as an LED class device.** The target is
+- ~~**`0xF6` / `KBLL` as an LED class device.**~~ **Landed**, once the EC
+  answered the range question itself — see the measurements below.
+  `max_brightness` is **1**, `LED_BRIGHT_HW_CHANGED` is set and wired from the
+  real `0xF6` event, and `gigabyte_laptop_method_implemented()` landed with it
+  as the runtime capability gate. Original reasoning kept below, since the
+  evidence for the LED route rather than a sysfs node is unchanged.
+
+  The target is
   `gigabyte_laptop::kbd_backlight`, which is the one missing link in a chain
   that is otherwise already running here: the systemd rule
   `SUBSYSTEM=="leds", KERNEL=="*kbd_backlight*"` exists at

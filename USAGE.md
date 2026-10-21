@@ -189,6 +189,47 @@ Aero/AORUS laptops support USB power output when they are asleep (S3) or in hibe
 /sys/devices/platform/gigabyte_laptop/usb_charge_s4_toggle
 ```
 
+## Keyboard backlight
+
+Exposed as an **LED class device**, not as a node under the platform directory:
+
+```text
+/sys/class/leds/gigabyte_laptop::kbd_backlight/brightness
+/sys/class/leds/gigabyte_laptop::kbd_backlight/max_brightness
+```
+
+That name is what the desktop already watches. `upower` matches on subsystem
+`leds` with a name containing `kbd_backlight`, exports it on
+`org.freedesktop.UPower.KbdBacklight`, and KDE's keyboard-brightness slider
+reads it from there — so the slider works with nothing else installed. systemd's
+`99-systemd.rules` matches the same name and gives save/restore across reboots
+for free.
+
+**`max_brightness` is 1 — the backlight has two levels, off and on.** That was
+measured, not assumed: the firmware's `KBLL` field is eight bits wide with no
+clamp anywhere, but the embedded controller publishes its own level as a WMI
+event, and across repeated Fn+Space presses it only ever reports 0 or 1.
+
+```sh
+# Off, then on
+echo 0 | sudo tee /sys/class/leds/gigabyte_laptop::kbd_backlight/brightness
+echo 1 | sudo tee /sys/class/leds/gigabyte_laptop::kbd_backlight/brightness
+```
+
+**Fn+Space keeps working, and the driver follows it.** The key is handled inside
+the embedded controller, so the level can change without the driver writing it.
+Two things keep the two in step: reads go to the hardware rather than to a cached
+value, and the `0xF6` event the controller sends is forwarded to the LED core, so
+`brightness_hw_changed` fires and the desktop's slider tracks the key.
+
+The node appears only if the firmware implements method `0xF6`; on models that do
+not, the driver logs `Keyboard backlight unsupported by this firmware` and the
+LED is absent rather than present and inert.
+
+If the slider does not appear after loading the module mid-session, restart
+`upower` — it coldplugs LEDs at startup. From the next boot the ordering is
+right by construction.
+
 ## Power on time (added in version 0.2.0)
 
 Aero/AORUS laptops support "power on time", though its use is unknown. This node is read-only.

@@ -17,6 +17,7 @@
 #include <linux/input/sparse-keymap.h>
 #include <linux/kernel.h>
 #include <linux/kobject.h>
+#include <linux/leds.h>
 #include <linux/platform_device.h>
 #include <linux/platform_profile.h>
 #include <linux/module.h>
@@ -66,6 +67,7 @@ MODULE_VERSION(GIGABYTE_LAPTOP_VERSION);
 #define FAN_GPU_RPM      0xE5
 #define FAN_THREE_RPM    0xE8 // 2023 AORUS 17
 #define FAN_FOUR_RPM     0xE9 // 2023 AORUS 17X
+#define KBD_BRIGHTNESS   0xF6 // KBLL in PECM. Not Gaming-only: gated at runtime
 #define LIGHT_SENSOR     0xF7 // WARNING: Behavior changes in VE models
 #define FAN_SILENT_OLD   0xFA // Older Aero and P-series models
 #define LIGHT_SENSOR_NEW 0xFC // Added in VE models, returns as buffer
@@ -89,6 +91,21 @@ MODULE_VERSION(GIGABYTE_LAPTOP_VERSION);
  */
 #define FAN_DUTY_MAX     0xE5
 
+/*
+ * Two levels, off and on, measured rather than assumed. The firmware is no help
+ * -- KBLL is an 8-bit field with no clamp, mask or comparison anywhere in the
+ * DSDT -- but the embedded controller answers the question itself: it publishes
+ * its own level as a 0xF6 WMI event, and across repeated Fn+Space presses the
+ * state byte only ever alternates 0x00 and 0x01 in step with the backlight
+ * going off and on. Writing 0 and 1 reproduces that; Fn+Space still works
+ * afterwards.
+ *
+ * Do not raise this on the grounds that the field could hold more. The EC never
+ * reports a level above 1, so a larger max_brightness would offer the desktop
+ * positions that mean nothing and cannot be read back.
+ */
+#define KBD_BRIGHTNESS_MAX 1
+
 struct fan_curve_data {
 	u8 temperature[FAN_CURVE_POINTS];
 	u8 speed[FAN_CURVE_POINTS];
@@ -98,6 +115,7 @@ struct gigabyte_laptop_wmi {
 	struct platform_device *pdev;
 	struct device *hwmon_dev;
 	struct device *ppdev;
+	struct led_classdev kbd_led;
 	struct fan_curve_data fan_curve;
 
 	/*
@@ -140,6 +158,7 @@ struct gigabyte_laptop_wmi {
 	u8 dual_fan_speed_enabled;
 	u8 light_sensor_method;
 	u8 has_dgpu_ejector;
+	u8 has_kbd_backlight;
 	u8 has_three_fans;
 	u8 has_four_fans;
 };
@@ -282,6 +301,25 @@ static int gigabyte_laptop_get_devstate_typed(u32 method_id, u32 arg2, void *res
 static int gigabyte_laptop_get_devstate_raw(u32 method_id, u32 arg2, void *result, size_t size)
 {
 	return gigabyte_laptop_get_devstate_typed(method_id, arg2, result, size, NULL);
+}
+
+/*
+ * Is this method ID implemented at all? An INTEGER reply means the firmware has
+ * a case for it; a BUFFER reply is Default { Return (Arg2) } handing the
+ * argument straight back. The argument is irrelevant here because only the
+ * reply's type is read, which is why this works where a sentinel value does
+ * not: KBLL is eight bits, so any sentinel could collide with a real level.
+ */
+static bool gigabyte_laptop_method_implemented(u32 method_id)
+{
+	acpi_object_type type = ACPI_TYPE_ANY;
+	int output;
+
+	if (gigabyte_laptop_get_devstate_typed(method_id, 0, &output,
+					sizeof(output), &type))
+		return false;
+
+	return type == ACPI_TYPE_INTEGER;
 }
 
 /* Read a single value. The common case. */
@@ -1746,6 +1784,78 @@ static const struct platform_profile_ops gigabyte_laptop_profile_ops = {
 	.profile_set = gigabyte_laptop_profile_set,
 };
 
+/* Keyboard backlight *************************************/
+
+/*
+ * The backlight is a two-level LED exposed through the LED class rather than a
+ * sysfs attribute of our own, because that is the only route the desktop
+ * already watches: upower matches on subsystem "leds" with a name globbing
+ * *kbd_backlight*, exports it on org.freedesktop.UPower.KbdBacklight, and
+ * Powerdevil drives KDE's slider from there. A platform attribute reaches none
+ * of that. systemd's 99-systemd.rules gives save and restore across reboots for
+ * free from the same match.
+ *
+ * There is deliberately no second writable node over KBLL. The class device's
+ * own brightness file is already a plain numeric node for scripting.
+ */
+static int gigabyte_laptop_kbd_brightness_set(struct led_classdev *led_cdev,
+					enum led_brightness value)
+{
+	int output;
+
+	/*
+	 * brightness_set_blocking, not brightness_set: this sleeps. The write
+	 * evaluates AML through wmi_evaluate_method(), and KBLL lives in a
+	 * Field(..., Lock, ...) region so each access takes the ACPI global
+	 * lock as well.
+	 *
+	 * No range check: the LED core clamps to max_brightness before calling,
+	 * which is the only clamp there is -- the firmware has none.
+	 */
+	return gigabyte_laptop_set_devstate(KBD_BRIGHTNESS, value, &output);
+}
+
+/*
+ * Mandatory in practice, not an optimisation. Fn+Space is handled inside the
+ * embedded controller, so the level moves without us writing it, and a cached
+ * value would be stale the first time the user looked. On a failed read, keep
+ * reporting the last known value rather than claiming zero.
+ */
+static enum led_brightness gigabyte_laptop_kbd_brightness_get(struct led_classdev *led_cdev)
+{
+	int ret, output;
+
+	ret = gigabyte_laptop_get_devstate(KBD_BRIGHTNESS, &output);
+	if (ret)
+		return led_cdev->brightness;
+
+	return clamp_val(output, 0, KBD_BRIGHTNESS_MAX);
+}
+
+/*
+ * The EC publishes its own level as a 0xF6 event when Fn+Space is pressed, with
+ * the new level in the state byte. Telling the LED core means KDE's slider
+ * follows the key instead of going stale, which is the whole reason
+ * LED_BRIGHT_HW_CHANGED is set. Without a real event to call this from the flag
+ * would create a permanently stale attribute, so the two belong together.
+ */
+static void gigabyte_laptop_kbd_brightness_changed(u8 level)
+{
+	struct gigabyte_laptop_wmi *gigabyte;
+
+	if (!platform_device)
+		return;
+
+	gigabyte = platform_get_drvdata(platform_device);
+	if (!gigabyte || !gigabyte->has_kbd_backlight)
+		return;
+
+	level = clamp_val(level, 0, KBD_BRIGHTNESS_MAX);
+
+	gigabyte->kbd_led.brightness = level;
+	led_classdev_notify_brightness_hw_changed(&gigabyte->kbd_led, level);
+}
+
 /* Hotkey events ******************************************/
 
 /*
@@ -1939,6 +2049,12 @@ static void gigabyte_laptop_wmi_notify(struct wmi_device *wdev, union acpi_objec
 
 	if (code == GIGABYTE_EVENT_MODE) {
 		gigabyte_laptop_cycle_fan_preset();
+		return;
+	}
+
+	if (code == KBD_BRIGHTNESS) {
+		gigabyte_laptop_kbd_brightness_changed(
+			obj->buffer.length >= 2 ? obj->buffer.pointer[1] : 0);
 		return;
 	}
 
@@ -2193,6 +2309,22 @@ obtain_custom_fan_speed:
 			pr_info("Dynamic boost unsupported by this firmware\n");
 	}
 
+	/*
+	 * Keyboard backlight. Not inside the gaming_family guard: 0xF6 is not
+	 * Gaming-only, so the gate is a runtime capability read rather than DMI.
+	 *
+	 * Seed the cached brightness from hardware before registration, so
+	 * whichever way the LED core resolves an unset value at registration it
+	 * cannot darken a lit keyboard at every module load.
+	 */
+	if (gigabyte_laptop_method_implemented(KBD_BRIGHTNESS) &&
+		!gigabyte_laptop_get_devstate(KBD_BRIGHTNESS, &output)) {
+		gigabyte->has_kbd_backlight = 1;
+		gigabyte->kbd_led.brightness = clamp_val(output, 0, KBD_BRIGHTNESS_MAX);
+	}
+	else
+		pr_info("Keyboard backlight unsupported by this firmware\n");
+
 	return 0;
 }
 
@@ -2316,6 +2448,35 @@ static int __init gigabyte_laptop_init(void)
 		pr_warn("Could not register platform profile (%ld)\n",
 			PTR_ERR(gigabyte->ppdev));
 		gigabyte->ppdev = NULL;
+	}
+
+	/*
+	 * Keyboard backlight, after probe so has_kbd_backlight is set and the
+	 * cached brightness has been seeded from hardware. devm for the same
+	 * reason as the platform profile above: the class device hangs off the
+	 * platform device that exit unregisters, which releases devres -- and
+	 * does so before kfree(gigabyte), so the core's flush of any pending
+	 * deferred write still finds live driver state.
+	 *
+	 * LED_BRIGHT_HW_CHANGED is honest here only because the EC really does
+	 * publish Fn+Space as a 0xF6 event; see the notifier. Deliberately no
+	 * LED_CORE_SUSPENDRESUME, which would write 0 at suspend -- with
+	 * brightness_get implemented a post-resume read is truthful anyway.
+	 */
+	if (gigabyte->has_kbd_backlight) {
+		gigabyte->kbd_led.name = GIGABYTE_LAPTOP_FILE "::kbd_backlight";
+		gigabyte->kbd_led.max_brightness = KBD_BRIGHTNESS_MAX;
+		gigabyte->kbd_led.brightness_set_blocking =
+			gigabyte_laptop_kbd_brightness_set;
+		gigabyte->kbd_led.brightness_get =
+			gigabyte_laptop_kbd_brightness_get;
+		gigabyte->kbd_led.flags = LED_BRIGHT_HW_CHANGED;
+
+		result = devm_led_classdev_register(&gigabyte->pdev->dev,
+						&gigabyte->kbd_led);
+		if (result)
+			pr_warn("Could not register the keyboard backlight (%d)\n",
+				result);
 	}
 
 	/*
