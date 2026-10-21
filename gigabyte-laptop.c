@@ -23,7 +23,7 @@
 #include <linux/wmi.h>
 #include <linux/string.h>
 
-#define GIGABYTE_LAPTOP_VERSION "0.01"
+#define GIGABYTE_LAPTOP_VERSION "0.2.0"
 #define GIGABYTE_LAPTOP_FILE  KBUILD_MODNAME
 
 MODULE_AUTHOR("Albert Tang");
@@ -111,6 +111,7 @@ struct gigabyte_laptop_wmi {
 
 	int fan_mode;
 	int fan_custom_speed;
+	u8 fan_preset;
 	int charge_mode;
 	int charge_limit;
 	int gpu_boost;
@@ -155,6 +156,42 @@ static u8 fan_modes[] = {
 	FAN_CUSTOM_MODE,
 	FAN_AUTO_MODE,
 	FAN_FIXED_MODE
+};
+
+/*
+ * Fan preset: what gets to decide fan policy.
+ *
+ * AUTO hands the decision back to the platform profile, which is the tethered
+ * arrangement the desktop's power profile selector drives. The other three pin
+ * one of the EC's own presets, gaming included -- and gaming is reachable only
+ * this way, because no power profile maps to it on purpose: it is the loudest
+ * and does not belong on a battery profile.
+ *
+ * The Mode key cycles this ring, so the key owns fan policy and the profile
+ * owns it only while the ring sits on AUTO. Starts on AUTO, which is zero and
+ * so comes free from the kzalloc.
+ */
+enum fan_preset {
+	FAN_PRESET_AUTO = 0,
+	FAN_PRESET_SILENT,
+	FAN_PRESET_NORMAL,
+	FAN_PRESET_GAMING,
+	FAN_PRESET_COUNT
+};
+
+static const char * const fan_preset_names[] = {
+	"auto", "silent", "normal", "gaming"
+};
+
+static_assert(ARRAY_SIZE(fan_preset_names) == FAN_PRESET_COUNT);
+
+// Indexed by enum fan_preset. AUTO has no fan mode of its own.
+static const int fan_preset_modes[] = { -1, 1, 0, 2 };
+
+// The reverse, for fan modes 0-2. Above that are the custom modes, which no
+// preset names.
+static const u8 fan_mode_presets[] = {
+	FAN_PRESET_NORMAL, FAN_PRESET_SILENT, FAN_PRESET_GAMING
 };
 
 /*
@@ -605,11 +642,98 @@ static ssize_t fan_mode_store(struct device *dev, struct device_attribute *attr,
 	gigabyte->fan_mode = fan_mode;
 
 	/*
+	 * A direct write is as deliberate as a Mode key press, so the preset
+	 * moves with it and a profile switch will not reclaim the fans. The
+	 * custom modes have no preset of their own, so they fall back to auto,
+	 * where the fan_mode > 2 rule protects them instead.
+	 */
+	gigabyte->fan_preset = fan_mode < ARRAY_SIZE(fan_mode_presets) ?
+			fan_mode_presets[fan_mode] : FAN_PRESET_AUTO;
+
+	/*
 	 * Turbo is a fan mode plus a duty rather than a bit of its own, so a mode
 	 * change out from under it means it is no longer in effect. Say so instead
 	 * of leaving fan_turbo reading 1 over a state that has been replaced.
 	 */
 	gigabyte->fan_turbo = 0;
+	return count;
+}
+
+/*
+ * Fan preset.
+ *
+ * Takes a name: auto, silent, normal or gaming. The Mode key cycles the same
+ * ring in that order, wrapping from gaming back to auto.
+ */
+static int gigabyte_laptop_profile_to_fan_mode(enum platform_profile_option profile);
+
+// Call with fan_lock held.
+static int apply_fan_preset(struct gigabyte_laptop_wmi *gigabyte)
+{
+	int ret, mode;
+
+	if (gigabyte->fan_preset == FAN_PRESET_AUTO) {
+		/*
+		 * A custom curve, a held duty and full speed are deliberate
+		 * choices that outrank a policy selection, exactly as they do in
+		 * gigabyte_laptop_profile_set(). Re-tethering then happens on the
+		 * next profile switch, once the fans are back on an EC preset.
+		 */
+		if (gigabyte->fan_mode > 2)
+			return 0;
+
+		mode = gigabyte_laptop_profile_to_fan_mode(gigabyte->profile);
+		if (mode < 0)
+			return mode;
+	} else {
+		mode = fan_preset_modes[gigabyte->fan_preset];
+	}
+
+	if (gigabyte->fan_mode == mode)
+		return 0;
+
+	ret = set_fan_mode(gigabyte, fan_modes[mode]);
+	if (ret)
+		return ret;
+
+	gigabyte->fan_mode = mode;
+	// As in fan_mode_store: a mode change retires any turbo that was on
+	gigabyte->fan_turbo = 0;
+	return 0;
+}
+
+static ssize_t fan_preset_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%s\n", fan_preset_names[gigabyte->fan_preset]);
+}
+
+static ssize_t fan_preset_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+	int ret, preset;
+	u8 old;
+
+	preset = sysfs_match_string(fan_preset_names, buf);
+	if (preset < 0) {
+		pr_err("Invalid fan preset\n");
+		return preset;
+	}
+
+	guard(mutex)(&gigabyte->fan_lock);
+
+	// apply_fan_preset() reads the field, so set it first and put it back
+	// if the transition fails, rather than reporting a preset that is not on
+	old = gigabyte->fan_preset;
+	gigabyte->fan_preset = preset;
+
+	ret = apply_fan_preset(gigabyte);
+	if (ret) {
+		gigabyte->fan_preset = old;
+		return ret;
+	}
+
 	return count;
 }
 
@@ -1147,6 +1271,7 @@ TOGGLE_DEVICE(usb_charge_s3, USB_SLEEP);
 TOGGLE_DEVICE(usb_charge_s4, USB_HIBERNATE);
 
 static DEVICE_ATTR_RW(fan_mode);
+static DEVICE_ATTR_RW(fan_preset);
 static DEVICE_ATTR_RW(fan_custom_speed);
 static DEVICE_ATTR_RO(fan_pwm);
 static DEVICE_ATTR_RW(charge_mode);
@@ -1165,6 +1290,7 @@ static DEVICE_ATTR_RW(debug_method);
 
 static struct attribute *gigabyte_laptop_attributes[] = {
 	&dev_attr_fan_mode.attr,
+	&dev_attr_fan_preset.attr,
 	&dev_attr_fan_custom_speed.attr,
 	&dev_attr_fan_pwm.attr,
 	&dev_attr_charge_mode.attr,
@@ -1366,26 +1492,29 @@ static int gigabyte_laptop_profile_set(struct device *dev,
 
 	guard(mutex)(&gigabyte->fan_lock);
 
-	gigabyte->profile = profile;
-
 	/*
 	 * Remember the choice but leave the fans alone when the user holds
-	 * them. A custom curve, a held duty and full speed are all deliberate,
-	 * and a profile switch arriving from the desktop should not pull them
-	 * out from under whatever set them. The profile applies on the next
-	 * switch after the fans are back under EC control.
+	 * them. The Mode key's fan preset is one such hold; a custom curve, a
+	 * held duty and full speed are the others. All are deliberate, and a
+	 * profile switch arriving from the desktop should not pull them out
+	 * from under whatever set them. The profile applies on the next switch
+	 * once the fans are back on an EC preset and the ring is back on auto.
 	 */
-	if (gigabyte->fan_mode > 2)
+	if (gigabyte->fan_preset != FAN_PRESET_AUTO || gigabyte->fan_mode > 2) {
+		gigabyte->profile = profile;
 		return 0;
+	}
 
-	if (gigabyte->fan_mode == mode)
-		return 0;
+	if (gigabyte->fan_mode != mode) {
+		ret = set_fan_mode(gigabyte, fan_modes[mode]);
+		if (ret)
+			return ret;
 
-	ret = set_fan_mode(gigabyte, fan_modes[mode]);
-	if (ret)
-		return ret;
+		gigabyte->fan_mode = mode;
+	}
 
-	gigabyte->fan_mode = mode;
+	// Cached only once the hardware agrees, so profile_get cannot lie
+	gigabyte->profile = profile;
 	return 0;
 }
 
@@ -1415,15 +1544,56 @@ static const struct platform_profile_ops gigabyte_laptop_profile_ops = {
 #define GBT_ACPI_DEVICE "GBT0005"
 
 /*
- * Reported as programmable keys rather than being acted on in the kernel, so
- * GNOME and KDE can bind them to whatever the user wants. Mode may later also
- * drive platform_profile_cycle() once that handler exists.
+ * GiMate is reported as a programmable key, so GNOME and KDE can bind it to
+ * whatever the user wants.
+ *
+ * Mode (Fn+F7) is deliberately absent: it cycles the fan preset in the kernel
+ * instead, which is what it does on Windows and the only way to reach gaming
+ * mode without a terminal. gigabyte_laptop_wmi_notify() intercepts it before
+ * the keymap is consulted, so it reports no keycode at all.
  */
+#define GIGABYTE_EVENT_MODE 0xCC
+
 static const struct key_entry gigabyte_laptop_keymap[] = {
 	{ KE_KEY, 0xCE, { KEY_PROG1 } },	// GiMate
-	{ KE_KEY, 0xCC, { KEY_PROG2 } },	// Mode, Fn+F7
 	{ KE_END, 0 }
 };
+
+static void gigabyte_laptop_cycle_fan_preset(void)
+{
+	struct gigabyte_laptop_wmi *gigabyte;
+	u8 preset, old;
+	int ret;
+
+	// The event driver outlives neither, but it is registered separately
+	if (!platform_device)
+		return;
+
+	gigabyte = platform_get_drvdata(platform_device);
+	if (!gigabyte)
+		return;
+
+	scoped_guard(mutex, &gigabyte->fan_lock) {
+		old = gigabyte->fan_preset;
+		preset = (old + 1) % FAN_PRESET_COUNT;
+
+		gigabyte->fan_preset = preset;
+		ret = apply_fan_preset(gigabyte);
+		if (ret)
+			gigabyte->fan_preset = old;
+	}
+
+	if (ret) {
+		pr_warn("Mode key: could not select the %s fan preset (%d)\n",
+			fan_preset_names[preset], ret);
+		return;
+	}
+
+	pr_info("Mode key: fan preset %s\n", fan_preset_names[preset]);
+
+	// So a desktop can poll() the attribute and show what the key just did
+	sysfs_notify(&gigabyte->pdev->dev.kobj, NULL, "fan_preset");
+}
 
 static struct input_dev *gigabyte_laptop_input;
 
@@ -1518,6 +1688,11 @@ static void gigabyte_laptop_wmi_notify(struct wmi_device *wdev, union acpi_objec
 	}
 
 	code = obj->buffer.pointer[0];
+
+	if (code == GIGABYTE_EVENT_MODE) {
+		gigabyte_laptop_cycle_fan_preset();
+		return;
+	}
 
 	if (!gigabyte_laptop_input) {
 		pr_info("WMI event 0x%02x arrived with no input device\n", code);

@@ -667,8 +667,9 @@ Both commits build clean with `-Wall -Wextra`.
 
 Steps 0, 1 and 1b are complete and verified on hardware: `gigabyte-laptop/0.2.0`
 installed through DKMS, signed by the `DKMS module signing key`, loaded, with
-all **18** driver attributes present including the three Gaming-only ones. The
-platform device directory lists 25 entries, the other seven being device-core
+all driver attributes present including the three Gaming-only ones — **18** at
+the time, **19** since `fan_preset` was added. The platform device directory
+listed 25 entries, the other seven being device-core
 (`driver`, `driver_override`, `hwmon`, `modalias`, `power`, `subsystem`,
 `uevent`). With 1b done, nothing blocks Step 2.
 
@@ -767,7 +768,11 @@ KDE can bind them:
 | Key | `WEVN` | Keycode | Typical keysym |
 |---|---|---|---|
 | GiMate | `0xCE` | `KEY_PROG1` (148) | `XF86Launch1`-class |
-| Mode (Fn+F7) | `0xCC` | `KEY_PROG2` (149) | `XF86Launch2`-class |
+| Mode (Fn+F7) | `0xCC` | ~~`KEY_PROG2`~~ **none** | acted on in the kernel |
+
+**Mode has since been taken over by the driver** and reports no keycode — it
+cycles the `fan_preset` ring instead. See "Settled: the Mode key owns fan
+policy" below. GiMate is unchanged.
 
 `asus-wmi` uses `KEY_PROG1`..`4` for vendor keys for the same reason. Events the
 keymap does not cover are still logged, so a number this firmware uses that we
@@ -778,13 +783,12 @@ Mode to the power-profile switcher, GiMate to Steam Big Picture. That closes
 Step 5 — the keycodes were the last unverified link, since the kernel log had
 only ever shown the WMI events arriving.
 
-Mode may *additionally* drive `platform_profile_cycle()` in the kernel, and
-Step 3's handler now exists, so that is possible. It is still deliberately not
-wired: the key currently has exactly one meaning, chosen by the user in their
-desktop, and the standing intent is for Mode to cycle **fan presets** including
-gaming rather than the three battery profiles. Wiring `platform_profile_cycle()`
-would give it the battery profiles instead, so doing it would need the
-precedence decision recorded under Step 3 first.
+**Mode has since been taken over by the kernel** and now cycles the
+`fan_preset` ring — `auto`, `silent`, `normal`, `gaming` — which is what it was
+always intended for. `platform_profile_cycle()` is deliberately *not* used: it
+would hand the key the three battery profiles instead. The precedence question
+that was blocking this is settled under Step 3; the trade is that the key no
+longer reports `KEY_PROG2`, so the KDE binding on it has to be removed.
 
 The module now depends on `sparse-keymap`, which is `CONFIG_INPUT_SPARSEKMAP=m`
 on this kernel and loaded automatically as a dependency.
@@ -1065,8 +1069,10 @@ curves both ramp the fans hard, so balanced joins power saver on silent and
 performance takes normal.
 
 **Gaming is deliberately unmapped.** It is the loudest preset and is reserved as
-its own axis: the Mode key is to cycle fan presets directly rather than going
-through a battery profile. Do not quietly re-attach it to a profile.
+its own axis: the Mode key cycles fan presets directly rather than going through
+a battery profile. Do not quietly re-attach it to a profile. That axis is the
+`fan_preset` node, and it is now implemented — see "Settled: the Mode key owns
+fan policy" below.
 
 **Why both `low-power` and `quiet`.** The two consumers prefer different names.
 `tuned`'s `powersave` profile asks for `low-power|quiet` and takes the first
@@ -1093,10 +1099,55 @@ tuned-ppd → tuned profile → `[acpi]` plugin → `platform_profile` → this 
 `perf_mode` and `dynamic_boost` stay as raw nodes, written by nothing, in case a
 BIOS update makes NVPCF work.
 
-**Open, once the Mode key cycles fan presets:** profiles own `fan_mode` 0 and 1
-while gaming is reachable only by hand, so a profile switch currently reclaims
-the fans from gaming. If the Mode key starts selecting gaming deliberately, that
-needs a precedence decision of its own, the way `pwm_enable` already has one.
+### Settled: the Mode key owns fan policy, profiles own it only on `auto`
+
+That precedence question is answered, because the Mode key now cycles fan
+presets. The mechanism is a `fan_preset` ring, exposed as its own node and
+cycled by the key:
+
+```
+auto -> silent -> normal -> gaming -> auto
+```
+
+| `fan_preset` | `fan_mode` | Who decides |
+|---|---|---|
+| `auto` | whatever the profile maps to | the power profile |
+| `silent` | 1 | pinned |
+| `normal` | 0 | pinned |
+| `gaming` | 2 | pinned |
+
+Three rules make it unambiguous:
+
+- **Anything but `auto` outranks a profile.** `gigabyte_laptop_profile_set()`
+  records the profile and leaves the fans alone, so a profile switch can no
+  longer reclaim the fans from gaming. That is the decision this section was
+  waiting for, taken in the user's favour: a deliberate gaming selection
+  survives `tuned` switching profiles on an AC transition.
+- **`auto` re-tethers immediately**, applying the current profile's mode, but
+  still defers while `fan_mode > 2` — a custom curve outranks both.
+- **A direct `fan_mode` write moves the preset with it**, since it is just as
+  deliberate: 0/1/2 set the matching preset, and the custom modes set `auto`,
+  where the `fan_mode > 2` rule protects them instead. So the node cannot
+  report a preset that is not actually in effect.
+
+The preset ring is driver state, not firmware state, so it starts at `auto` on
+every load — `FAN_PRESET_AUTO` is zero and comes free from the `kzalloc`.
+
+**The Mode key no longer reports a keycode.** It was `KEY_PROG2`; it is now
+intercepted in `gigabyte_laptop_wmi_notify()` before the keymap is consulted,
+because the kernel acts on it. Two consequences:
+
+- **A desktop binding on `KEY_PROG2` for this key stops firing.** Anyone who
+  bound it as a stopgap should unbind it.
+- `sysfs_notify()` fires on `fan_preset` as it changes, so a desktop can
+  `poll()` the attribute for an OSD instead. The kernel log also names the new
+  preset.
+
+GiMate keeps `KEY_PROG1`, so it stays bindable.
+
+`platform_profile_cycle()` is therefore **not** used, and should not be: it
+would give the key the three battery profiles, which is the opposite of what
+this is for.
 
 **Precedence rule, so profiles and CoolerControl do not fight.** The hwmon ABI
 carries the state, and this driver maps it from `fan_mode`:

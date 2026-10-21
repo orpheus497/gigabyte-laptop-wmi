@@ -17,9 +17,11 @@ Requires:       dkms, gcc, make
 
 # The driver was called aorus-laptop until the rename. Both modules claim the
 # same WMI devices and poke the same EC, so they must never be installed at
-# once.
+# once. Obsoletes removes the old package in the same transaction; the Conflicts
+# covers only what Obsoletes does not, since an unbounded one would conflict
+# with the very package being obsoleted and fail the upgrade.
 Obsoletes:      aorus-laptop-dkms < %{version}-%{release}
-Conflicts:      aorus-laptop-dkms
+Conflicts:      aorus-laptop-dkms >= %{version}-%{release}
 
 %description
 This package contains the DKMS gigabyte-laptop kernel module.

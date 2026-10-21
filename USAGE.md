@@ -33,6 +33,54 @@ The last two modes will enable custom mode automatically, as they are considered
 echo '2' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_mode
 ```
 
+## Fan preset
+
+The fan preset decides *what* chooses the fan mode. It takes a name:
+
+| Value | Effect |
+|---|---|
+| `auto` | the power profile chooses, which is the default |
+| `silent` | pin silent (`fan_mode` 1) |
+| `normal` | pin normal (`fan_mode` 0) |
+| `gaming` | pin gaming (`fan_mode` 2) |
+
+While the preset is anything other than `auto`, a power profile change is
+remembered but does not touch the fans. Selecting `auto` again hands the
+decision back to the profile and applies it immediately.
+
+Gaming mode is reachable *only* through this node and the Mode key, because no
+power profile maps to it: it is the loudest preset and does not belong on a
+battery profile.
+
+**Node:** `/sys/devices/platform/gigabyte_laptop/fan_preset`
+
+**Example:** To pin gaming fan mode:
+
+```sh
+echo 'gaming' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_preset
+```
+
+Writing `fan_mode` directly moves the preset with it, since a direct write is
+just as deliberate: `fan_mode` 0, 1 and 2 set the matching preset, and the
+custom modes set `auto`, where they are protected by the rule below instead.
+
+### The Mode key
+
+On models whose Mode key arrives as a WMI event (Fn+F7 on the Gigabyte Gaming
+A16), the driver cycles this node when the key is pressed:
+
+```
+auto -> silent -> normal -> gaming -> auto
+```
+
+The key reports no keycode, because the kernel acts on it. The driver raises a
+sysfs notification on `fan_preset` as it changes, so a desktop can `poll()` the
+attribute and show the new preset. The kernel log also names it:
+
+```
+gigabyte_laptop: Mode key: fan preset gaming
+```
+
 ## Custom fan speed
 
 Aero/AORUS laptops support setting a custom fan speed. However, this only takes effect if either auto or fixed mode is enabled.
@@ -319,12 +367,17 @@ their choices and reads `custom` when they disagree.
 echo 'performance' | sudo tee /sys/firmware/acpi/platform_profile
 ```
 
-A profile switch deliberately does **nothing to the fans** while they are not
-under embedded-controller control — that is, while the fan mode is the custom
-curve, a held duty, or full speed. Those are all deliberate choices, and a
-profile arriving from the desktop should not override them. The profile is still
-remembered and takes effect the next time it is set once the fans are back under
-controller control.
+A profile switch deliberately does **nothing to the fans** in two cases:
+
+- the fan preset is not `auto`, so the Mode key or a direct write has pinned a
+  preset, and
+- the fans are not under embedded-controller control — the fan mode is the
+  custom curve, a held duty, or full speed.
+
+Both are deliberate choices, and a profile arriving from the desktop should not
+override them. The profile is still remembered and takes effect the next time it
+is set, once the preset is back on `auto` and the fans are back under controller
+control.
 
 On Gigabyte Gaming models this selects fan policy only. It does not change the
 discrete GPU's power budget: that is governed by the NVIDIA platform controller

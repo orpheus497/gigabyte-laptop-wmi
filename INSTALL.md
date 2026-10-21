@@ -13,16 +13,27 @@ This module can be installed using DKMS. You can download the driver tarball fro
 dkms ldtarball driver.tar.gz
 ```
 
-If you have this repository checked out locally, you can create a tarball and then load it into the DKMS tree:
+If you have this repository checked out locally, the simplest route is the
+install script, which handles the version substitution, removes any earlier
+registration and installs the `/etc/modules-load.d` entry:
+```
+sudo bash scripts/install-dkms.sh          # or --no-autoload to skip boot loading
+```
+
+To build a tarball by hand instead:
 ```
 tar -czf driver.tar.gz Makefile gigabyte-laptop.c dkms.conf gigabyte-laptop.conf
 ```
 
+`dkms.conf` ships `PACKAGE_VERSION="@PKGVER@"` as a placeholder for the
+packaging to substitute, so **replace it with the real version before creating
+the tarball**. Loading the tarball as it stands registers a module literally
+versioned `@PKGVER@`, and the `dkms install` that follows then fails with
+"Could not find module source directory".
+
 `gigabyte-laptop.conf` is the `/etc/modules-load.d` entry referred to above.
 DKMS does not install it for you, so include it in the archive and copy it into
 place by hand.
-
-Be sure to edit the `PACKAGE_VERSION` flag in `dkms.conf` before creating the tarball.
 
 ### Method 2: Manually
 
