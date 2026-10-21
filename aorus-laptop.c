@@ -690,7 +690,9 @@ static ssize_t gpu_boost_store(struct device *dev, struct device_attribute *attr
  * Controls the discrete GPU's TGP/CTGP budget through the NPCF interface.
  * 0 = eco, 1 = balanced, 2 = boost
  *
- * The firmware resets this to its default on every boot.
+ * Write-only in firmware: method 0xED exists under WMBD but has no WMBC
+ * case, so this node reports the last value written rather than the mode
+ * actually in effect. The firmware also resets the mode on every boot.
  */
 static ssize_t perf_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -1269,19 +1271,24 @@ obtain_custom_fan_speed:
 	}
 
 	/*
-	 * Read back the Gigabyte Gaming nodes. These are optional, so a firmware
-	 * that does not answer leaves them at their default rather than failing
-	 * the probe. Turbo fan has no state to read, as it is a combination of
-	 * fan mode and duty rather than a single value.
+	 * Read back the Gigabyte Gaming nodes.
+	 *
+	 * Performance mode is deliberately not read. The firmware implements
+	 * 0xED under WMBD but has no WMBC case for it, so it is write-only and
+	 * the mode in effect cannot be recovered. perf_mode therefore reports
+	 * what was last written to it, starting at eco after a cold boot
+	 * regardless of what the firmware is actually doing.
+	 *
+	 * Dynamic boost reads back NPCF.DBAC, which is already in the node's
+	 * own sense: writing 0 sets DBAC to 1. The inversion belongs on the
+	 * write path only.
+	 *
+	 * Turbo fan has no state of its own to read, being a combination of fan
+	 * mode and duty rather than a single value.
 	 */
 	if (gigabyte->gaming_family) {
-		if (!gigabyte_laptop_get_devstate(PERF_MODE, &output))
-			gigabyte->perf_mode = output;
-		else
-			pr_info("Performance mode unsupported by this firmware\n");
-
 		if (!gigabyte_laptop_get_devstate(DYN_BOOST, &output))
-			gigabyte->dynamic_boost = !output;
+			gigabyte->dynamic_boost = output;
 		else
 			pr_info("Dynamic boost unsupported by this firmware\n");
 	}
