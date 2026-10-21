@@ -822,11 +822,27 @@ static ssize_t fan_turbo_store(struct device *dev, struct device_attribute *attr
 		if (ret)
 			return ret;
 
-		ret = set_fan_mode(gigabyte, fan_modes[gigabyte->fan_turbo_saved_mode]);
+		/*
+		 * Drop back to normal mode before restoring. set_fan_mode()
+		 * transitions from whatever fan_mode currently says, and asking it
+		 * to go straight from fixed mode to custom mode only warns that
+		 * custom mode is already enabled and returns, which would leave the
+		 * fans latched at a fixed duty while this node claimed otherwise.
+		 */
+		ret = set_fan_mode(gigabyte, fan_modes[0]);
 		if (ret)
 			return ret;
 
-		gigabyte->fan_mode = gigabyte->fan_turbo_saved_mode;
+		gigabyte->fan_mode = 0;
+
+		if (gigabyte->fan_turbo_saved_mode) {
+			ret = set_fan_mode(gigabyte,
+					fan_modes[gigabyte->fan_turbo_saved_mode]);
+			if (ret)
+				return ret;
+
+			gigabyte->fan_mode = gigabyte->fan_turbo_saved_mode;
+		}
 	}
 
 	gigabyte->fan_turbo = enable;
