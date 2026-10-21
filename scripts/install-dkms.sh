@@ -49,7 +49,7 @@ cd "$(dirname "$0")/.."
 echo "== Removing the pre-rename aorus-laptop install, if present =="
 # Both modules claim the same WMI devices and poke the same EC, so refuse to
 # continue while the old one is still resident rather than install alongside it.
-if lsmod | grep -q '^aorus_laptop '; then
+if [ -d /sys/module/aorus_laptop ]; then
 	if ! modprobe -r aorus_laptop; then
 		echo "Could not unload the old aorus_laptop module." >&2
 		echo "It claims the same WMI devices as gigabyte-laptop, so installing" >&2
@@ -110,7 +110,7 @@ echo "== Loading =="
 # If the old module is in use the removal fails, and modprobe below would then
 # be a no-op on the already-loaded copy. Say so rather than imply the new build
 # is live.
-if lsmod | grep -q '^gigabyte_laptop '; then
+if [ -d /sys/module/gigabyte_laptop ]; then
 	if ! modprobe -r gigabyte_laptop; then
 		echo "WARNING: could not unload the running gigabyte_laptop." >&2
 		echo "         The previously loaded module stays active until you" >&2
@@ -135,7 +135,7 @@ echo
 
 # Say plainly whether the code just built is the code now running. Getting this
 # wrong silently costs a debugging session chasing symptoms of an old build.
-if ! lsmod | grep -q '^gigabyte_laptop '; then
+if [ ! -d /sys/module/gigabyte_laptop ]; then
 	echo "WARNING: the module is installed but not loaded." >&2
 	echo "         Load it with: modprobe gigabyte-laptop" >&2
 	exit 1
