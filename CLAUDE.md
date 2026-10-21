@@ -974,21 +974,35 @@ things follow:
 - **`SysPwrLimitGetInfo` is an SBIOS call**, so the TGP table the daemon needs
   is not being handed over.
 
-**Prime suspect: `acpi_osi=Linux` on the kernel command line.** NVPCF and other
-vendor SBIOS interfaces are routinely gated behind `_OSI("Windows ...")`, and
-forcing the Linux branch is a plausible reason for the firmware not to populate
-the power-limit table. It is also pure leftover from the earlier fan-control
-attempts and serves nothing here. Removing it is both the cleanup and the test:
+**`acpi_osi=Linux` is ruled out.** It was the leading suspect, on the reasoning
+that NVPCF interfaces are usually gated behind `_OSI("Windows ...")`. Both
+leftover arguments were removed with
+`grubby --update-kernel=ALL --remove-args="acpi_osi=Linux acpi_enforce_resources=lax"`
+and the machine rebooted. `/proc/cmdline` confirms they are gone, and
+`nvidia-powerd` fails **identically** on the clean boot:
 
-```sh
-sudo grubby --update-kernel=ALL --remove-args="acpi_osi=Linux acpi_enforce_resources=lax"
-# reboot, then:
-journalctl -u nvidia-powerd -b | head
-nvidia-smi --query-gpu=enforced.power.limit --format=csv,noheader
+```
+16:54:10  ERROR! DC power limits table is not supported
+16:54:11  ERROR! Failed to get SysPwrLimitGetInfo!!
+16:54:11  CRITICAL! Failed to get SysPwrLimitGetInfo
 ```
 
-`acpi_enforce_resources=lax` goes with it as equally dead weight; only
-`acpi_osi` plausibly affects this, so a change is still attributable.
+`enforced.power.limit` still reads 30 W against a 50 W default. The cleanup was
+worth doing regardless — both arguments were dead weight — but it was not the
+cause. Do not re-litigate this one.
+
+**A gap in the test itself, before blaming firmware.** Every reading so far was
+taken with the dGPU at `P8` and drawing 3–5 W. On NVIDIA laptops
+`enforced.power.limit` reflects the *currently arbitrated* limit, which at idle
+can sit at a floor that no mode selection will move. The sweep has never been
+run with the GPU actually busy, so "`perf_mode` changes nothing" is not yet
+supported. `glxgears` and `vkcube` are both installed; drive the dGPU with
+`__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia`, confirm the
+P-state leaves `P8`, and only then compare across modes.
+
+**`gpu_boost` (`0x51`) has never been written.** It is the other GPU lever this
+firmware offers, `WMBD`-only, and the fork reports it takes 0 or 1 on Gaming
+models. It should be swept alongside `perf_mode` before concluding anything.
 
 **Read the limit with `enforced.power.limit`.** `power.limit` returns `[N/A]`
 on this driver — it maps to "Requested Power Limit". The useful numbers are
