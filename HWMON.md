@@ -12,13 +12,15 @@ All `fanX_input` nodes are read-only, and all values returned are in revolutions
 
 `pwmX_enable` follows the hwmon interface:
 
-- `1` — manual. Userspace sets the duty through `pwmX`. The driver latches fixed fan mode to make the duty take effect.
-- `2` — automatic. The embedded controller drives the fans from temperature, which is the normal, silent, gaming, custom-curve and auto-maximum fan modes.
-- `0` — full speed. Programs the highest safe duty and latches fixed mode, the same mechanism `fan_turbo` uses.
+- `1` — manual. Userspace sets the duty through `pwmX`, and both fans are held at it.
+- `2` — automatic. The embedded controller drives the fans from temperature: the normal, silent, gaming and custom-curve fan modes.
+- `0` — full speed, with no speed control. This is the fan mode `fan_turbo` uses.
 
-Writing `pwmX` implies `pwmX_enable = 1`, since a duty has no effect until fixed mode is latched. Write `2` to hand the fans back to the controller.
+Writing `pwmX` implies `pwmX_enable = 1`, since a duty only applies once the controller has been told to hold it. Write `2` to hand the fans back.
 
-Duties above 229 have been reported to stop the fans entirely on some models, so a write above that is **clamped** rather than rejected: running slightly slower than asked is a better failure than a stopped fan under load.
+**`pwmX` is scaled.** hwmon defines these attributes as 0–255, but this embedded controller works in percent, so the driver converts in both directions. A write of `128` becomes 50% and reads back as `128`. Passing 0–255 through unscaled would ask the controller for up to 255%, which it simply pins to full speed — every duty above about 100 would mean "maximum".
+
+Fan speed control is only proportional through `pwmX_enable = 1`. The fan mode the driver calls *fixed* sets a single-bit flag in the controller rather than a duty, so it can only mean full speed, which is why it backs `pwmX_enable = 0`.
 
 ## Temperature
 

@@ -250,6 +250,25 @@ static u16 convert_fan_rpm(int val)
 	return rol16(fan_rpm, 8);
 }
 
+/*
+ * The embedded controller works in percent. FAN1, FAN2, FDTY and GDTY are
+ * eight-bit fields the firmware treats as 0-100, and a read of FDTY saturates
+ * there. hwmon's pwm attributes are 0-255, so scale in both directions rather
+ * than passing values straight through: writing 128 unscaled asks the EC for
+ * 128 percent, which it simply pins to full speed.
+ */
+#define EC_DUTY_MAX 100
+
+static u32 pwm_to_ec_duty(long pwm)
+{
+	return DIV_ROUND_CLOSEST(clamp_val(pwm, 0, 255) * EC_DUTY_MAX, 255);
+}
+
+static long ec_duty_to_pwm(int duty)
+{
+	return DIV_ROUND_CLOSEST(clamp_val(duty, 0, EC_DUTY_MAX) * 255, EC_DUTY_MAX);
+}
+
 static umode_t gigabyte_laptop_hwmon_is_visible(const void *data, enum hwmon_sensor_types type,
 					u32 attr, int channel)
 {
@@ -349,18 +368,22 @@ static int gigabyte_laptop_hwmon_read(struct device *dev, enum hwmon_sensor_type
 		case hwmon_pwm:
 			switch (attr) {
 				case hwmon_pwm_input:
+					// FDTY and GDTY are the EC's live duty, in percent
 					ret = gigabyte_laptop_get_devstate(fan_pwm_channels[channel], &output);
 					if (ret)
 						break;
-					*val = output;
+					*val = ec_duty_to_pwm(output);
 					break;
 				case hwmon_pwm_enable:
 					/*
-					 * Only fixed mode is manual control. Normal, silent and
-					 * gaming are EC curves, and so are the custom curve and
-					 * auto-maximum, which the EC still drives from temperature.
+					 * Fixed mode latches ADJF, a single bit, so it is full
+					 * speed rather than a duty. Mode 4 is the one that holds
+					 * both fans at a given duty. Everything else is an EC
+					 * curve driven from temperature.
 					 */
 					if (gigabyte->fan_mode == 5)
+						*val = GIGABYTE_FAN_CTRL_FULL_SPEED;
+					else if (gigabyte->fan_mode == 4)
 						*val = GIGABYTE_FAN_CTRL_MANUAL;
 					else
 						*val = GIGABYTE_FAN_CTRL_AUTO;
@@ -378,14 +401,21 @@ static int gigabyte_laptop_hwmon_read(struct device *dev, enum hwmon_sensor_type
 static int set_fan_mode(struct gigabyte_laptop_wmi *gigabyte, u32 fan_mode);
 static int set_fan_custom_speed(struct gigabyte_laptop_wmi *gigabyte, u32 speed);
 
+
 /*
- * Writing a duty is what makes this driver useful to a fan-curve daemon, and it
- * only takes effect in fixed fan mode, so a pwm write latches that mode. Going
- * back to pwm_enable 2 hands the fans to the EC again.
+ * Writing a duty is what makes this driver useful to a fan-curve daemon.
  *
- * fan_mode 5 therefore doubles as "userspace holds the fans", which is the
- * precedence rule the platform_profile handler uses: it leaves fan policy alone
- * while PWM is under manual control.
+ * It has to go through FAN_AUTO_MODE (0x70), which is the only method that sets
+ * both fan targets: it writes FAN1 and FAN2 from its argument and clears TFAN.
+ * FAN_FIXED_MODE (0x6A) cannot do this — ADJF is a single bit, so latching it
+ * just runs the fans flat out, which is why every duty written through it came
+ * back as maximum RPM. That also makes fixed mode the natural home for hwmon's
+ * pwm_enable 0, "no speed control, full speed".
+ *
+ * So fan_mode 4 is manual control at a duty, and fan_mode 5 is full speed.
+ * Either means "userspace holds the fans", which is the precedence rule the
+ * platform_profile handler uses: it leaves fan policy alone while PWM is not
+ * in automatic mode.
  */
 static int gigabyte_laptop_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 					u32 attr, int channel, long val)
@@ -402,21 +432,19 @@ static int gigabyte_laptop_hwmon_write(struct device *dev, enum hwmon_sensor_typ
 				return -EINVAL;
 
 			/*
-			 * Clamp instead of rejecting. Duties above FAN_DUTY_MAX have
-			 * been reported to stop the fans outright, and running a little
-			 * slower than asked is a far better failure than a stopped fan
-			 * under load. The node still accepts the full 0-255 a caller
-			 * may reasonably write.
+			 * set_fan_mode(FAN_AUTO_MODE) passes fan_custom_speed as the
+			 * argument, so the duty has to be in place before the mode
+			 * switch for the EC to pick it up.
 			 */
-			ret = set_fan_custom_speed(gigabyte, min_t(long, val, FAN_DUTY_MAX));
+			ret = set_fan_custom_speed(gigabyte, pwm_to_ec_duty(val));
 			if (ret)
 				return ret;
 
-			if (gigabyte->fan_mode != 5) {
-				ret = set_fan_mode(gigabyte, FAN_FIXED_MODE);
+			if (gigabyte->fan_mode != 4) {
+				ret = set_fan_mode(gigabyte, FAN_AUTO_MODE);
 				if (ret)
 					return ret;
-				gigabyte->fan_mode = 5;
+				gigabyte->fan_mode = 4;
 			}
 
 			// The duty is ours now, so any turbo that was on is retired
@@ -426,19 +454,26 @@ static int gigabyte_laptop_hwmon_write(struct device *dev, enum hwmon_sensor_typ
 		case hwmon_pwm_enable:
 			switch (val) {
 				case GIGABYTE_FAN_CTRL_FULL_SPEED:
-				case GIGABYTE_FAN_CTRL_MANUAL:
-					if (val == GIGABYTE_FAN_CTRL_FULL_SPEED) {
-						ret = set_fan_custom_speed(gigabyte, FAN_DUTY_MAX);
-						if (ret)
-							return ret;
-					}
+					// ADJF is one bit, and setting it means flat out
+					if (gigabyte->fan_mode == 5)
+						return 0;
 
-					if (gigabyte->fan_mode != 5) {
-						ret = set_fan_mode(gigabyte, FAN_FIXED_MODE);
-						if (ret)
-							return ret;
-						gigabyte->fan_mode = 5;
-					}
+					ret = set_fan_mode(gigabyte, FAN_FIXED_MODE);
+					if (ret)
+						return ret;
+
+					gigabyte->fan_mode = 5;
+					return 0;
+
+				case GIGABYTE_FAN_CTRL_MANUAL:
+					if (gigabyte->fan_mode == 4)
+						return 0;
+
+					ret = set_fan_mode(gigabyte, FAN_AUTO_MODE);
+					if (ret)
+						return ret;
+
+					gigabyte->fan_mode = 4;
 					return 0;
 
 				case GIGABYTE_FAN_CTRL_AUTO:
