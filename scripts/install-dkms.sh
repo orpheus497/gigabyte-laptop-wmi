@@ -65,15 +65,29 @@ module_unload() {
 # and that modprobe cannot resolve by name. That is how the pre-rename
 # aorus_laptop module came to be resident with no file behind it.
 remove_dkms_version() {
-	local name=$1 ver=$2 out
-	if ! out=$(dkms remove "$name/$ver" --all 2>&1); then
-		echo "$out" >&2
-		echo "dkms could not remove $name/$ver, so its registration is left" >&2
-		echo "in place rather than orphaning the module it installed." >&2
-		echo "Inspect with: dkms status $name" >&2
-		exit 1
+	local name=$1 ver=$2 out still
+
+	if out=$(dkms remove "$name/$ver" --all 2>&1); then
+		rm -rf "/var/lib/dkms/$name/$ver" "/usr/src/$name-$ver"
+		return 0
 	fi
-	rm -rf "/var/lib/dkms/$name/$ver" "/usr/src/$name-$ver"
+
+	# A version that was added but never built has nothing installed to
+	# orphan, and dkms still reports failure removing it. Ask dkms what it
+	# thinks rather than trusting the exit code: if the version is gone from
+	# its view, cleanup is safe and aborting the installer would only wedge
+	# it. No pipeline here, for the pipefail reason noted above.
+	still=$(dkms status "$name/$ver" 2>/dev/null || true)
+	if [ -z "$still" ]; then
+		rm -rf "/var/lib/dkms/$name/$ver" "/usr/src/$name-$ver"
+		return 0
+	fi
+
+	echo "$out" >&2
+	echo "dkms could not remove $name/$ver and still lists it, so its" >&2
+	echo "registration is left in place rather than orphaning the module it" >&2
+	echo "installed. Inspect with: dkms status $name" >&2
+	exit 1
 }
 
 cd "$(dirname "$0")/.."

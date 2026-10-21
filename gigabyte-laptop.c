@@ -12,6 +12,8 @@
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
 #include <linux/init.h>
+#include <linux/input.h>
+#include <linux/input/sparse-keymap.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
 #include <linux/module.h>
@@ -1206,19 +1208,72 @@ static int check_sku(const char *dmi_sku, const char *end) {
 
 /*
  * The GiMate and Mode keys emit no i8042 scancode and nothing on the ENE
- * i2c-HID pipe, but pressing either does raise an EC query: the EC GPE count
- * advances by two per press against zero idle drift. The firmware offers two
- * paths for that query to surface on, and which one carries these keys is not
- * yet known:
+ * i2c-HID pipe. They arrive as WMI events instead:
  *
  *	_Q45 -> SMGR(WEVN, WEVS) -> WMBC(0, 0x03, n) -> Notify (AMW0, 0xD2)
- *	_Q63 -> Notify (GAPD, 0xCF)                     [GAPD is _HID GBT0005]
  *
- * Both are instrumented here so a keypress names its own path, rather than
- * guessing and writing the wrong handler. Neither does anything yet beyond
- * logging; the keymap follows once the path is known.
+ * _WED then hands back {WEVN, WEVS, 0xBB, 0xCC}, so byte 0 is the event number
+ * used as the scancode below. Measured on a GAMING A16 5TH: GiMate is 0xCE and
+ * Mode (Fn+F7) is 0xCC, both with state 0x00.
+ *
+ * The alternative path the firmware offers, _Q63 -> Notify (GAPD, 0xCF) on
+ * GBT0005, never fires for these keys on this machine. Its handler is kept as
+ * a watcher, both because GBT0005 does report itself present and because it is
+ * how other models in this family may deliver the same keys.
  */
 #define GBT_ACPI_DEVICE "GBT0005"
+
+/*
+ * Reported as programmable keys rather than being acted on in the kernel, so
+ * GNOME and KDE can bind them to whatever the user wants. Mode may later also
+ * drive platform_profile_cycle() once that handler exists.
+ */
+static const struct key_entry gigabyte_laptop_keymap[] = {
+	{ KE_KEY, 0xCE, { KEY_PROG1 } },	// GiMate
+	{ KE_KEY, 0xCC, { KEY_PROG2 } },	// Mode, Fn+F7
+	{ KE_END, 0 }
+};
+
+static struct input_dev *gigabyte_laptop_input;
+
+static int gigabyte_laptop_input_setup(struct device *parent)
+{
+	struct input_dev *input;
+	int err;
+
+	input = input_allocate_device();
+	if (!input)
+		return -ENOMEM;
+
+	input->name = "Gigabyte laptop hotkeys";
+	input->phys = GIGABYTE_LAPTOP_FILE "/input0";
+	input->id.bustype = BUS_HOST;
+	input->dev.parent = parent;
+
+	err = sparse_keymap_setup(input, gigabyte_laptop_keymap, NULL);
+	if (err)
+		goto fail;
+
+	err = input_register_device(input);
+	if (err)
+		goto fail;
+
+	gigabyte_laptop_input = input;
+	return 0;
+
+fail:
+	input_free_device(input);
+	return err;
+}
+
+static void gigabyte_laptop_input_destroy(void)
+{
+	if (!gigabyte_laptop_input)
+		return;
+
+	input_unregister_device(gigabyte_laptop_input);
+	gigabyte_laptop_input = NULL;
+}
 
 static acpi_handle gigabyte_laptop_gapd_handle;
 
@@ -1264,22 +1319,27 @@ static void gigabyte_laptop_remove_acpi_notify(void)
  */
 static void gigabyte_laptop_wmi_notify(struct wmi_device *wdev, union acpi_object *obj)
 {
-	if (!obj) {
-		pr_info("WMI event: no data\n");
+	u8 code;
+
+	if (!obj || obj->type != ACPI_TYPE_BUFFER || obj->buffer.length < 1) {
+		pr_warn("WMI event carried no usable payload\n");
 		return;
 	}
 
-	if (obj->type == ACPI_TYPE_BUFFER) {
-		pr_info("WMI event: %*ph\n", (int)min_t(u32, obj->buffer.length, 16u),
-			obj->buffer.pointer);
-		if (obj->buffer.length >= 2)
-			pr_info("WMI event: number 0x%02x state 0x%02x\n",
-				obj->buffer.pointer[0], obj->buffer.pointer[1]);
+	code = obj->buffer.pointer[0];
+
+	if (!gigabyte_laptop_input) {
+		pr_info("WMI event 0x%02x arrived with no input device\n", code);
+		return;
 	}
-	else if (obj->type == ACPI_TYPE_INTEGER)
-		pr_info("WMI event: integer 0x%llx\n", obj->integer.value);
-	else
-		pr_info("WMI event: unexpected ACPI type %u\n", obj->type);
+
+	/*
+	 * Log only what the keymap does not cover, so an event number this
+	 * firmware uses but we have not seen still shows up and can be added.
+	 */
+	if (!sparse_keymap_report_event(gigabyte_laptop_input, code, 1, true))
+		pr_info("Unrecognised WMI event 0x%02x (state 0x%02x)\n", code,
+			obj->buffer.length >= 2 ? obj->buffer.pointer[1] : 0);
 }
 
 static const struct wmi_device_id gigabyte_laptop_event_ids[] = {
@@ -1526,11 +1586,13 @@ static void __exit gigabyte_laptop_exit(void)
 
 	pr_info("Stopping Gigabyte laptop WMI driver\n");
 
+	// Stop the event sources before the input device they report into
 	gigabyte_laptop_remove_acpi_notify();
 	if (gigabyte_laptop_event_driver_live) {
 		wmi_driver_unregister(&gigabyte_laptop_event_driver);
 		gigabyte_laptop_event_driver_live = false;
 	}
+	gigabyte_laptop_input_destroy();
 
 	gigabyte = platform_get_drvdata(platform_device);
 	hwmon_device_unregister(gigabyte->hwmon_dev);
@@ -1607,7 +1669,15 @@ static int __init gigabyte_laptop_init(void)
 		goto fail_probe;
 	}
 
-	// Event watchers are diagnostics, so neither failure is worth aborting over
+	/*
+	 * Hotkeys are a bonus on top of the sensors and controls, so none of
+	 * this is worth failing the whole driver over. The input device goes
+	 * first, since the event handler reports into it.
+	 */
+	result = gigabyte_laptop_input_setup(&gigabyte->pdev->dev);
+	if (result)
+		pr_warn("Could not create the hotkey input device (%d)\n", result);
+
 	result = wmi_driver_register(&gigabyte_laptop_event_driver);
 	if (result)
 		pr_warn("Could not register WMI event driver (%d)\n", result);
@@ -1615,6 +1685,7 @@ static int __init gigabyte_laptop_init(void)
 		gigabyte_laptop_event_driver_live = true;
 
 	gigabyte_laptop_install_acpi_notify();
+	result = 0;
 
 	pr_info("Gigabyte laptop WMI driver started\n");
 	return 0;

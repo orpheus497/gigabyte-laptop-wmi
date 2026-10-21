@@ -625,7 +625,7 @@ Both commits build clean with `-Wall -Wextra`.
 | 2 | Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel | medium |
 | 3 | Register a `platform_profile` handler over `perf_mode` + `dynamic_boost` | low |
 | 4 | Writable `pwm1`/`pwm2` for CoolerControl | medium |
-| 5 | GiMate button — path identified; input device + `sparse_keymap` left | low |
+| ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** | low |
 | 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
 
 Steps 0, 1 and 1b are complete and verified on hardware: `gigabyte-laptop/0.2.0`
@@ -722,8 +722,25 @@ Three things are confirmed by that output:
   negative rather than a lost race:
   `/sys/bus/wmi/devices/ABBC0F72-…-3/driver -> gigabyte-laptop-events`.
 
-What remains for Step 5 is therefore an input device with a `sparse_keymap`
-over those two event numbers. No further diagnosis is needed.
+**Step 5 is implemented on that basis.** The driver creates an input device,
+"Gigabyte laptop hotkeys", and reports both keys through `sparse_keymap` as
+programmable keycodes rather than acting on them in the kernel, so GNOME and
+KDE can bind them:
+
+| Key | `WEVN` | Keycode | Typical keysym |
+|---|---|---|---|
+| GiMate | `0xCE` | `KEY_PROG1` (148) | `XF86Launch1`-class |
+| Mode (Fn+F7) | `0xCC` | `KEY_PROG2` (149) | `XF86Launch2`-class |
+
+`asus-wmi` uses `KEY_PROG1`..`4` for vendor keys for the same reason. Events the
+keymap does not cover are still logged, so a number this firmware uses that we
+have not seen can be added. Mode may *additionally* drive
+`platform_profile_cycle()` once Step 3's handler exists; that is deliberately
+not wired yet, so the key has one meaning rather than changing behaviour
+underneath the user.
+
+The module now depends on `sparse-keymap`, which is `CONFIG_INPUT_SPARSEKMAP=m`
+on this kernel and loaded automatically as a dependency.
 
 ### The candidates, for the record
 
@@ -731,14 +748,23 @@ over those two event numbers. No further diagnosis is needed.
    on this BIOS. An `acpi_driver` with a notify handler. Simplest of the two,
    and the Windows driver binds exactly here.
 2. **`_Q45` → `SMGR(WEVN, WEVS)` → `WMBC(0, 0x03, n)` → `Notify (AMW0, 0xD2)`**,
-   the generic WMI event path. The driver now *registers* a diagnostic handler
-   for `WMI_EVENT`, as the `gigabyte-laptop-events` `wmi_driver`, but whether it
-   logs anything depends on winning the device: `eeepc_wmi` matches the same
-   GUID, and only one driver binds. Blacklisting it (below) is a prerequisite
-   for trusting silence as a negative result. Check ownership with
-   `ls -l /sys/bus/wmi/devices/ABBC0F72*/driver` before concluding the path is
-   dead. There is still no input device and no `sparse_keymap`, so nothing is
-   mapped to a key yet.
+   the generic WMI event path, and **the one these keys actually use**. The
+   driver *registers* a handler as the `gigabyte-laptop-events` `wmi_driver`,
+   but it only receives anything if it wins the device: `eeepc_wmi` matches the
+   same GUID and only one driver binds.
+
+   **Blacklisting is not enough on its own.** `modprobe.d` stops future loads
+   but does not touch a module already resident, so after writing the blacklist
+   either reboot or unbind explicitly. Then confirm ownership before treating
+   silence as a negative result:
+
+   ```sh
+   ls -l /sys/bus/wmi/devices/ABBC0F72*/driver
+   # must point at .../drivers/gigabyte-laptop-events
+   ```
+
+   On this machine that check passed, which is what makes the absence of
+   `GBT0005` notifies meaningful rather than a lost race.
 3. The `\_SB_.I2CB.ECSH` i2c-HID pipe.
 
 **Confirmed on hardware: the keys do reach ACPI.** `gpe0A` is the EC's GPE and
