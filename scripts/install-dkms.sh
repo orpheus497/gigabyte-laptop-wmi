@@ -58,8 +58,15 @@ install -m 644 Makefile aorus-laptop.c "$SRC/"
 sed "s/@PKGVER@/$VERSION/" dkms.conf > "$SRC/dkms.conf"
 
 echo "== Building and installing =="
-dkms add "$NAME/$VERSION"
-dkms install "$NAME/$VERSION" --force
+# `dkms add` returns non-zero when the version is already registered, which is
+# not a failure worth aborting on. Under `set -e` it would skip everything
+# below, including the reload, and leave the old module running while reporting
+# success.
+dkms add "$NAME/$VERSION" || true
+if ! dkms install "$NAME/$VERSION" --force; then
+	echo "dkms install failed" >&2
+	exit 1
+fi
 
 if [ "$AUTOLOAD" -eq 1 ]; then
 	echo "== Enabling autoload at boot =="
@@ -80,10 +87,29 @@ if lsmod | grep -q '^aorus_laptop '; then
 		echo "         but NOT running." >&2
 	fi
 fi
-modprobe aorus-laptop
+modprobe aorus-laptop || echo "WARNING: modprobe aorus-laptop failed" >&2
 
 echo
 dkms status "$NAME"
+
 signer=$(modinfo -F signer aorus-laptop 2>/dev/null) || signer=
+installed=$(modinfo -F srcversion aorus-laptop 2>/dev/null) || installed=
+loaded=$(cat /sys/module/aorus_laptop/srcversion 2>/dev/null) || loaded=
+
 echo "signature: ${signer:-UNSIGNED}"
+echo "installed: ${installed:-none}"
+echo "loaded:    ${loaded:-not loaded}"
 echo "nodes:     /sys/devices/platform/aorus_laptop"
+echo
+
+# Say plainly whether the code just built is the code now running. Getting this
+# wrong silently costs a debugging session chasing symptoms of an old build.
+if [ -n "$installed" ] && [ "$installed" = "$loaded" ]; then
+	echo "The running module is the one just installed."
+else
+	echo "WARNING: the running module is NOT the one just installed." >&2
+	echo "         Reload it with:" >&2
+	echo "           modprobe -r aorus_laptop && modprobe aorus-laptop" >&2
+	echo "         or reboot, since autoload is enabled." >&2
+	exit 1
+fi
