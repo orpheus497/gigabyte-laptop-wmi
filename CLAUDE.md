@@ -882,6 +882,18 @@ supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 
 ## Open decisions
 
+- **What Step 3 becomes, now that GPU TGP is unreachable.** The original design
+  — `platform_profile` over `perf_mode` + `dynamic_boost` — would register a
+  profile that changes nothing. Two alternatives:
+  - **Profiles over fan policy instead**, mapping `quiet`/`balanced`/
+    `performance` onto `fan_mode` 1/0/2. That works entirely within the EC,
+    needs nothing from NVIDIA, and `tuned` already asks for those three names,
+    so GNOME and KDE would switch fan behaviour immediately. It contradicts the
+    "leave fan settings alone" rule, but that rule existed to protect a custom
+    curve *while profiles drove the GPU*; with the GPU out of reach, leaving
+    fans alone means leaving the profile inert.
+  - **Drop Step 3.** Keep `perf_mode` and `dynamic_boost` as raw nodes against a
+    future BIOS fix, and let fan control live entirely in Step 4's PWM.
 - **Upstreaming** — the probe fixes, the `gpu_boost` oops (#45) and the duty
   clamp (#46) are all plausibly acceptable upstream, which would reduce rebase
   burden.
@@ -1010,8 +1022,43 @@ on this driver — it maps to "Requested Power Limit". The useful numbers are
 `power.max_limit` 85 W, which matches the 30/50/85 the three modes are expected
 to select.
 
-**D3 is therefore not resolved**, and the honest state is "blocked on the
-NVPCF/SBIOS path", not "`perf_mode` does not work".
+**The load test was a red herring, and GPU TGP is closed.** A power limit is a
+setting, not a measurement, so if `perf_mode` moved it the change would show at
+idle too. And 30 W sits *below* the 50 W VBIOS default, which is not what
+Dynamic Boost arbitration looks like — arbitration raises above base rather than
+pinning under it. That pattern means capped, not idle.
+
+Confirmed by trying to set it directly:
+
+```
+$ sudo nvidia-smi -pl 85
+Changing power management limit is not supported in current scope for GPU: 00000000:01:00.0.
+$ nvidia-smi --query-gpu=enforced.power.limit --format=csv,noheader
+30.00 W
+```
+
+Rejected for 85, 50 and 30 alike. On laptop GPUs the platform owns TGP through
+NVPCF, which is why the driver refuses manual changes — and the platform
+interface is the thing that is broken, so nobody can set it. Both routes are
+shut:
+
+| Route | Result |
+|---|---|
+| `perf_mode` → NPCF → `nvidia-powerd` | daemon cannot initialise; SBIOS withholds the power-limit table |
+| `nvidia-smi -pl` | refused, "not supported in current scope" |
+
+**D3 and D4 are closed as blocked by firmware, not by this driver.** The WMI
+write lands, the AML executes, the notify arrives; the consumer above us is
+broken on BIOS FB03 with the 615.78.08 open kernel module. Nothing in
+`gigabyte-laptop.c` can change that. Revisit only if a BIOS or driver update
+makes `nvidia-powerd` start cleanly — the one-line check is
+`journalctl -u nvidia-powerd -b | head`.
+
+**Consequence for Step 3.** The settled design was "a profile switch sets
+`perf_mode` and `dynamic_boost` only, fan settings deliberately left alone".
+That rationale assumed `perf_mode` did something. With TGP unreachable, a
+profile built on it would do nothing at all, so the design needs revisiting —
+see Open decisions.
 
 ### `dynamic_boost` round-trips, direction still unknown
 
