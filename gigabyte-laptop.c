@@ -119,10 +119,15 @@ struct gigabyte_laptop_wmi {
 	u8 has_four_fans;
 };
 
+/*
+ * pwm_enable values, as Documentation/hwmon/sysfs-interface defines them.
+ * The names upstream used had AUTO and MANUAL the other way round, which did
+ * not match what userspace expects of the attribute.
+ */
 enum fan_ctrl {
-	GIGABYTE_FAN_CTRL_DISABLED = 0,
-	GIGABYTE_FAN_CTRL_AUTO = 1,
-	GIGABYTE_FAN_CTRL_MANUAL = 2
+	GIGABYTE_FAN_CTRL_FULL_SPEED = 0,
+	GIGABYTE_FAN_CTRL_MANUAL = 1,
+	GIGABYTE_FAN_CTRL_AUTO = 2
 };
 
 static struct platform_device *platform_device;
@@ -282,9 +287,8 @@ static umode_t gigabyte_laptop_hwmon_is_visible(const void *data, enum hwmon_sen
 		case hwmon_pwm:
 			switch (attr) {
 				case hwmon_pwm_input:
-					return 0444;
 				case hwmon_pwm_enable:
-					return 0444;
+					return 0644;
 				default:
 					break;
 			}
@@ -351,12 +355,15 @@ static int gigabyte_laptop_hwmon_read(struct device *dev, enum hwmon_sensor_type
 					*val = output;
 					break;
 				case hwmon_pwm_enable:
-					if (gigabyte->fan_mode < 3) // normal, gaming, silent
-						*val = GIGABYTE_FAN_CTRL_DISABLED;
-					else if (gigabyte->fan_mode > 3) // auto-max or fixed
-						*val = GIGABYTE_FAN_CTRL_AUTO;
-					else // the fan curve
+					/*
+					 * Only fixed mode is manual control. Normal, silent and
+					 * gaming are EC curves, and so are the custom curve and
+					 * auto-maximum, which the EC still drives from temperature.
+					 */
+					if (gigabyte->fan_mode == 5)
 						*val = GIGABYTE_FAN_CTRL_MANUAL;
+					else
+						*val = GIGABYTE_FAN_CTRL_AUTO;
 					break;
 				default:
 					break;
@@ -365,6 +372,95 @@ static int gigabyte_laptop_hwmon_read(struct device *dev, enum hwmon_sensor_type
 			break;
 	}
 	return 0;
+}
+
+/* Defined with the other fan helpers, in the sysfs section below */
+static int set_fan_mode(struct gigabyte_laptop_wmi *gigabyte, u32 fan_mode);
+static int set_fan_custom_speed(struct gigabyte_laptop_wmi *gigabyte, u32 speed);
+
+/*
+ * Writing a duty is what makes this driver useful to a fan-curve daemon, and it
+ * only takes effect in fixed fan mode, so a pwm write latches that mode. Going
+ * back to pwm_enable 2 hands the fans to the EC again.
+ *
+ * fan_mode 5 therefore doubles as "userspace holds the fans", which is the
+ * precedence rule the platform_profile handler uses: it leaves fan policy alone
+ * while PWM is under manual control.
+ */
+static int gigabyte_laptop_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
+					u32 attr, int channel, long val)
+{
+	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+	int ret;
+
+	if (type != hwmon_pwm)
+		return -EOPNOTSUPP;
+
+	switch (attr) {
+		case hwmon_pwm_input:
+			if (val < 0 || val > 255)
+				return -EINVAL;
+
+			/*
+			 * Clamp instead of rejecting. Duties above FAN_DUTY_MAX have
+			 * been reported to stop the fans outright, and running a little
+			 * slower than asked is a far better failure than a stopped fan
+			 * under load. The node still accepts the full 0-255 a caller
+			 * may reasonably write.
+			 */
+			ret = set_fan_custom_speed(gigabyte, min_t(long, val, FAN_DUTY_MAX));
+			if (ret)
+				return ret;
+
+			if (gigabyte->fan_mode != 5) {
+				ret = set_fan_mode(gigabyte, FAN_FIXED_MODE);
+				if (ret)
+					return ret;
+				gigabyte->fan_mode = 5;
+			}
+
+			// The duty is ours now, so any turbo that was on is retired
+			gigabyte->fan_turbo = 0;
+			return 0;
+
+		case hwmon_pwm_enable:
+			switch (val) {
+				case GIGABYTE_FAN_CTRL_FULL_SPEED:
+				case GIGABYTE_FAN_CTRL_MANUAL:
+					if (val == GIGABYTE_FAN_CTRL_FULL_SPEED) {
+						ret = set_fan_custom_speed(gigabyte, FAN_DUTY_MAX);
+						if (ret)
+							return ret;
+					}
+
+					if (gigabyte->fan_mode != 5) {
+						ret = set_fan_mode(gigabyte, FAN_FIXED_MODE);
+						if (ret)
+							return ret;
+						gigabyte->fan_mode = 5;
+					}
+					return 0;
+
+				case GIGABYTE_FAN_CTRL_AUTO:
+					if (gigabyte->fan_mode < 3)
+						return 0;
+
+					ret = set_fan_mode(gigabyte, fan_modes[0]);
+					if (ret)
+						return ret;
+
+					gigabyte->fan_mode = 0;
+					gigabyte->fan_turbo = 0;
+					return 0;
+
+				default:
+					return -EINVAL;
+			}
+
+		default:
+			break;
+	}
+	return -EOPNOTSUPP;
 }
 
 static const struct hwmon_channel_info *gigabyte_laptop_hwmon_info[] = {
@@ -385,6 +481,7 @@ static const struct hwmon_channel_info *gigabyte_laptop_hwmon_info[] = {
 
 static const struct hwmon_ops gigabyte_laptop_hwmon_ops = {
 	.read = gigabyte_laptop_hwmon_read,
+	.write = gigabyte_laptop_hwmon_write,
 	.is_visible = gigabyte_laptop_hwmon_is_visible,
 };
 

@@ -626,7 +626,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~1b~~ | ~~Extend `debug_method` to take an argument~~ **done** | low |
 | 2 | Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel | medium |
 | 3 | Register a `platform_profile` handler over `perf_mode` + `dynamic_boost` | low |
-| 4 | Writable `pwm1`/`pwm2` for CoolerControl | medium |
+| ~~4~~ | ~~Writable `pwm1`/`pwm2` for CoolerControl~~ **done, untested on hardware** | medium |
 | ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** | low |
 | 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
 
@@ -882,18 +882,6 @@ supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 
 ## Open decisions
 
-- **What Step 3 becomes, now that GPU TGP is unreachable.** The original design
-  — `platform_profile` over `perf_mode` + `dynamic_boost` — would register a
-  profile that changes nothing. Two alternatives:
-  - **Profiles over fan policy instead**, mapping `quiet`/`balanced`/
-    `performance` onto `fan_mode` 1/0/2. That works entirely within the EC,
-    needs nothing from NVIDIA, and `tuned` already asks for those three names,
-    so GNOME and KDE would switch fan behaviour immediately. It contradicts the
-    "leave fan settings alone" rule, but that rule existed to protect a custom
-    curve *while profiles drove the GPU*; with the GPU out of reach, leaving
-    fans alone means leaving the profile inert.
-  - **Drop Step 3.** Keep `perf_mode` and `dynamic_boost` as raw nodes against a
-    future BIOS fix, and let fan control live entirely in Step 4's PWM.
 - **Upstreaming** — the probe fixes, the `gpu_boost` oops (#45) and the duty
   clamp (#46) are all plausibly acceptable upstream, which would reduce rebase
   burden.
@@ -925,6 +913,30 @@ supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
   read `/sys/class/platform-profile/*/{name,profile,choices}`. Revert with
   `grubby --remove-args`.
 - **Keep `tuned`; do not install `power-profiles-daemon`.**
+
+### Step 3 redesigned: profiles over fan policy, with PWM taking precedence
+
+The original design — `platform_profile` over `perf_mode` + `dynamic_boost` —
+became inert when GPU TGP turned out to be unreachable. Replaced with fan
+policy, which works entirely inside the EC:
+
+| Profile | `fan_mode` |
+|---|---|
+| `quiet` | 1 silent |
+| `balanced` | 0 normal |
+| `performance` | 2 gaming |
+
+`tuned` already asks for exactly those three names, so GNOME and KDE drive it
+with no further configuration. `perf_mode` and `dynamic_boost` stay as raw
+nodes, written by nothing, in case a BIOS update makes NVPCF work.
+
+**Precedence rule, so profiles and CoolerControl do not fight.** The hwmon ABI
+already carries the state: `pwm_enable` is `1` when userspace holds the fans and
+`2` when the EC does, and in this driver that is exactly `fan_mode == 5`. So
+**manual control wins while it is active** — a profile switch records the
+profile but leaves fan policy alone whenever `pwm_enable` reads `1`, and applies
+it on the next switch after `pwm_enable` returns to `2`. Nothing yanks the fans
+out from under a running fan curve.
 
 ### Step 2 validation
 
