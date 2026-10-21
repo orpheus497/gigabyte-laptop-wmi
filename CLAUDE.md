@@ -461,9 +461,18 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   wrapper flushed out a third buffer caller — `power_on_time_show()` reads
   **five** bytes — which the old `void *` signature had hidden. Buffer
   destinations are zero-initialised so a short reply cannot expose stack bytes.
-- **`ec_read()` offsets are unverified on this EC.** `0xD` (auto-max fan mode
-  detect) and `0x62` (board temp, `temp3_input`) were derived from Intel
-  Aero/AORUS units. Cross-check `temp3_input` against `k10temp`.
+- **`temp3_input` is dead on this machine — ignore it.** `ec_read(0x62)`
+  returns 0, so `temp3` reads `+0.0°C` while `temp1` tracks `k10temp` correctly
+  (46000 vs 46375). That EC offset came from Intel Aero/AORUS units and is
+  wrong, or simply unpopulated, on this AMD EC. `ec_read(0xD)` (auto-max fan
+  mode detect) is unverified for the same reason, but is only reached when the
+  machine is already in custom fan mode at load time.
+- **`power_on_time` is mislabelled on this firmware.** The driver defines
+  `POWER_ON_TIME` as `0x63`, but `WMBC 0x63` on this generation returns
+  `TEST[0..4] = RXCM(0xD2)..RXCM(0xD6)` — the **five CMOS bytes** that
+  `WMBD 0x63` writes, not a timestamp. It read `0 1 5 5 2` here. Useful rather
+  than harmful: this node *is* the pre-write CMOS snapshot that Step 6 needs, so
+  that requirement is already satisfied by `cat power_on_time`.
 - **`eeepc_wmi` steals our event GUID.** `/lib/modules/$(uname -r)/modules.alias`
   contains `alias wmi:ABBC0F72-8EA1-11D1-00A0-C90629100000 eeepc_wmi`. udev
   coldplugs the WMI event device, matches `eeepc_wmi`, which pulls in `asus_wmi`
@@ -555,6 +564,32 @@ check`, `Dual fan speed control required`, `Using old light sensor method` and
 mode, custom speed, charging mode, charging limit, the fan curve **and
 `dynamic_boost` (`0xE7`)** all read successfully — the first on-hardware
 evidence that `0xE7` is implemented here, not merely on the CWH.
+
+### Sensors verified end to end under load
+
+A 20-second all-core load, sampled every 2 s:
+
+```
+t=6s   87C-bound  cpu=73C  pwm1=0   fan1=0     fan2=0
+t=10s             cpu=86C  pwm1=20  fan1=0     fan2=0
+t=14s             cpu=88C  pwm1=24  fan1=1863  fan2=1807
+t=22s             cpu=85C  pwm1=32  fan1=2500  fan2=2727
+```
+
+`temp1` matches `k10temp`, PWM rises with temperature, both fan tachometers
+follow PWM and move independently. This also confirms the little-endian branch
+for `GIGABYTE GAMING` is correct — a wrong byte order would give values in the
+tens of thousands rather than a clean `pwm 0 → 0 RPM`, `pwm 32 → ~2500 RPM`
+relationship.
+
+Two behaviours worth knowing, both normal:
+
+- **The fans stop entirely at idle.** `pwm1` goes to 0 and both tachs read 0
+  with the CPU at 46–47 °C. Semi-passive cooling, not a failed read.
+- **`fan_mode` reads `1` (silent), and the EC holds the fans off until ~86 °C
+  in that mode.** That looks like a correct read rather than a misparse, and it
+  is the concrete argument for Step 4: writable PWM is what would let the user
+  override a fan curve that tolerates 86 °C before spinning up.
 
 Step 2 gates everything GPU-related. Step 6 is open-ended research; treat it as
 a separate project rather than a blocker.
