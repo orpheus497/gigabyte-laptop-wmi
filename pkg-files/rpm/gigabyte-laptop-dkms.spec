@@ -8,7 +8,7 @@ Summary:        DKMS package for Gigabyte laptop kernel module
 
 License:        GPL
 URL:            https://github.com/tangalbert919/gigabyte-laptop-wmi
-Source0:        https://github.com/tangalbert919/gigabyte-laptop-wmi/releases/download/0.1.0-rc1/driver.tar.gz
+Source0:        https://github.com/tangalbert919/gigabyte-laptop-wmi/releases/download/%{version}/driver.tar.gz
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildArch:      noarch
 

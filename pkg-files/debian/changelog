@@ -1,4 +1,4 @@
-gigabyte-laptop-dkms (0.1.0-1) stable; urgency=medium
+gigabyte-laptop-dkms (0.2.0-1) stable; urgency=medium
 
   * Gigabyte laptop DKMS Debian package
 

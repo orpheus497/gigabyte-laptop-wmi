@@ -20,8 +20,10 @@ NAME=gigabyte-laptop
 # Take the version from the RPM spec, which is the project's canonical source,
 # so DKMS registration cannot drift from packaging. Overridable, with the
 # current value as a last resort if the spec is unreadable.
+# `|| true` keeps a missing or unreadable spec from aborting the script under
+# set -e and pipefail, which would make the fallback below unreachable.
 VERSION="${VERSION:-$(sed -n 's/^Version:[[:space:]]*//p' \
-	"$(dirname "$0")/../pkg-files/rpm/gigabyte-laptop-dkms.spec" 2>/dev/null | head -1)}"
+	"$(dirname "$0")/../pkg-files/rpm/gigabyte-laptop-dkms.spec" 2>/dev/null | head -1 || true)}"
 VERSION="${VERSION:-0.2.0}"
 SRC=/usr/src/$NAME-$VERSION
 AUTOLOAD=1
@@ -45,18 +47,28 @@ cd "$(dirname "$0")/.."
 # name has to go, or the machine keeps a second DKMS tree, a second autoload
 # entry and a stale module that still claims the WMI devices.
 echo "== Removing the pre-rename aorus-laptop install, if present =="
+# Both modules claim the same WMI devices and poke the same EC, so refuse to
+# continue while the old one is still resident rather than install alongside it.
 if lsmod | grep -q '^aorus_laptop '; then
-	modprobe -r aorus_laptop || echo "WARNING: could not unload aorus_laptop" >&2
+	if ! modprobe -r aorus_laptop; then
+		echo "Could not unload the old aorus_laptop module." >&2
+		echo "It claims the same WMI devices as gigabyte-laptop, so installing" >&2
+		echo "alongside it would leave two drivers on one EC. Close whatever is" >&2
+		echo "using it, or reboot, then run this again." >&2
+		exit 1
+	fi
 fi
 while read -r ver; do
 	[ -n "$ver" ] || continue
 	echo "   removing aorus-laptop/$ver"
+	# The rm is the fallback for a registration dkms itself cannot remove, so
+	# it runs either way; leaving an orphaned tree is what this block exists
+	# to prevent. dkms remove --all deletes the installed .ko.
 	dkms remove "aorus-laptop/$ver" --all >/dev/null 2>&1 || true
 	rm -rf "/var/lib/dkms/aorus-laptop/$ver" "/usr/src/aorus-laptop-$ver"
 done < <(dkms status aorus-laptop 2>/dev/null | sed -n "s|^aorus-laptop/\([^,:]*\).*|\1|p" | sort -u)
 rm -rf /var/lib/dkms/aorus-laptop
 rm -f /etc/modules-load.d/aorus-laptop.conf
-find /lib/modules -name 'aorus-laptop.ko*' -delete 2>/dev/null || true
 
 echo "== Removing any previous registration =="
 # Includes the "@PKGVER@" version left behind by `dkms ldtarball` on a tarball
@@ -89,7 +101,9 @@ if [ "$AUTOLOAD" -eq 1 ]; then
 	echo "== Enabling autoload at boot =="
 	install -m 644 gigabyte-laptop.conf /etc/modules-load.d/gigabyte-laptop.conf
 else
-	echo "== Autoload skipped (--no-autoload) =="
+	# Drop any entry a previous run left, or --no-autoload would be a no-op
+	rm -f /etc/modules-load.d/gigabyte-laptop.conf
+	echo "== Autoload disabled (--no-autoload) =="
 fi
 
 echo "== Loading =="
@@ -121,7 +135,16 @@ echo
 
 # Say plainly whether the code just built is the code now running. Getting this
 # wrong silently costs a debugging session chasing symptoms of an old build.
-if [ -n "$installed" ] && [ "$installed" = "$loaded" ]; then
+if ! lsmod | grep -q '^gigabyte_laptop '; then
+	echo "WARNING: the module is installed but not loaded." >&2
+	echo "         Load it with: modprobe gigabyte-laptop" >&2
+	exit 1
+elif [ -z "$installed" ] || [ -z "$loaded" ]; then
+	# srcversion is normally present for both, but do not call a loaded module
+	# stale just because the attribute could not be read.
+	echo "The module is loaded. Could not compare source versions to confirm"
+	echo "it is the build just installed."
+elif [ "$installed" = "$loaded" ]; then
 	echo "The running module is the one just installed."
 else
 	echo "WARNING: the running module is NOT the one just installed." >&2

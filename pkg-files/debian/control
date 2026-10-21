@@ -10,4 +10,7 @@ Package: gigabyte-laptop-dkms
 Architecture: amd64
 Version: 0.2.0
 Depends: dkms
-Description: Kernel driver for Aero/AORUS laptops
+Conflicts: aorus-laptop-dkms
+Breaks: aorus-laptop-dkms
+Replaces: aorus-laptop-dkms
+Description: Kernel driver for Gigabyte Aero/AORUS/Gaming laptops

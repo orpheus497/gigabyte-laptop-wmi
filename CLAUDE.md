@@ -628,10 +628,12 @@ Both commits build clean with `-Wall -Wextra`.
 | 5 | GiMate button — diagnose, then notify handler + keymap | low |
 | 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
 
-Steps 0 and 1 are complete and verified on hardware: `gigabyte-laptop/0.2.0`
+Steps 0, 1 and 1b are complete and verified on hardware: `gigabyte-laptop/0.2.0`
 installed through DKMS, signed by the `DKMS module signing key`, loaded, with
-all 20 sysfs nodes present including the three Gaming-only ones. Step 1b *is* a
-blocker for Step 2.
+all **18** driver attributes present including the three Gaming-only ones. The
+platform device directory lists 25 entries, the other seven being device-core
+(`driver`, `driver_override`, `hwmon`, `modalias`, `power`, `subsystem`,
+`uevent`). With 1b done, nothing blocks Step 2.
 
 The load log is itself free reconnaissance, because Step 1 made every optional
 read report itself. On this machine it printed only `Skipping silent fan mode ID
@@ -694,8 +696,10 @@ Remaining candidates, both needing kernel work:
    on this BIOS. An `acpi_driver` with a notify handler. Simplest of the two,
    and the Windows driver binds exactly here.
 2. **`_Q45` → `SMGR(WEVN, WEVS)` → `WMBC(0, 0x03, n)` → `Notify (AMW0, 0xD2)`**,
-   the generic WMI event path. The driver defines `WMI_EVENT` and never uses it
-   — no `wmi_install_notify_handler`, no input device, no `sparse_keymap`.
+   the generic WMI event path. `WMI_EVENT` is now bound, by the diagnostic
+   `gigabyte-laptop-events` `wmi_driver`, which logs whatever arrives. There is
+   still no input device and no `sparse_keymap`, so nothing is mapped to a key
+   yet.
 3. The `\_SB_.I2CB.ECSH` i2c-HID pipe.
 
 **Confirmed on hardware: the keys do reach ACPI.** `gpe0A` is the EC's GPE and

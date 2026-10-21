@@ -532,6 +532,13 @@ static ssize_t fan_mode_store(struct device *dev, struct device_attribute *attr,
 	}
 
 	gigabyte->fan_mode = fan_mode;
+
+	/*
+	 * Turbo is a fan mode plus a duty rather than a bit of its own, so a mode
+	 * change out from under it means it is no longer in effect. Say so instead
+	 * of leaving fan_turbo reading 1 over a state that has been replaced.
+	 */
+	gigabyte->fan_turbo = 0;
 	return count;
 }
 
@@ -577,6 +584,9 @@ static ssize_t fan_custom_speed_store(struct device *dev, struct device_attribut
 	if (ret)
 		return ret;
 
+	// As in fan_mode_store: changing the duty retires any turbo that was on.
+	// The helper itself stays untouched, since fan_turbo_store() uses it.
+	gigabyte->fan_turbo = 0;
 	return count;
 }
 
@@ -1176,7 +1186,13 @@ static int find_str(const char *dmi_name, const char *dmi_sub) {
 }
 
 static int check_sku(const char *dmi_sku, const char *end) {
-	u8 length = strlen(dmi_sku);
+	size_t length;
+
+	// DMI fields can be absent, and an empty one would index backwards
+	if (!dmi_sku || !*dmi_sku)
+		return -1;
+
+	length = strlen(dmi_sku);
 
 	char last_char = dmi_sku[length - 1];
 	if (last_char == end[0]) {
@@ -1301,8 +1317,9 @@ static int gigabyte_laptop_probe(struct device *dev)
 		goto obtain_fan_mode;
 	}
 
+	// A failed read leaves output untouched, so check ret before trusting it
 	ret = gigabyte_laptop_get_devstate(FAN_SILENT_OLD, &output);
-	if (output < 0) { // -1 on newer devices
+	if (ret || output < 0) { // -1, or no answer at all, on newer devices
 		pr_info("Newer model detected, using new silent fan mode ID\n");
 		gigabyte->fan_silent_method = FAN_SILENT_MODE;
 	}

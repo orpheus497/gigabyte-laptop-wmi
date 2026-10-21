@@ -9,7 +9,7 @@ override_dh_install:
 	cp ../dkms.conf .
 	sed -i dkms.conf -e "s/@PKGVER@/$(VERSION)/"
 	dh_install dkms.conf ../Makefile ../README.md ../gigabyte-laptop.c usr/src/$(MODULE)-$(VERSION)/
-	dh_install ../gigabyte-laptop.conf /etc/modules.load.d/
+	dh_install ../gigabyte-laptop.conf /etc/modules-load.d/
 	rm dkms.conf
 
 override_dh_dkms:
