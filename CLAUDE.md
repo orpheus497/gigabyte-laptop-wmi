@@ -571,20 +571,40 @@ fork, not the project. Upstream updates come from
 
 `master` still sits at upstream's `4b817ea`, untouched.
 
-### PR #1 is a review surface. **Do not merge it.**
+### PR #1 was a review surface, and was closed without merging
 
 [`orpheus497/gigabyte-laptop-wmi#1`](https://github.com/orpheus497/gigabyte-laptop-wmi/pull/1)
-— "[WIP] Functionality for Gigabyte Gaming A16 5th", `master <- a16-5th` — is
-open on purpose and stays open. Its job is to be a place CodeRabbit reviews and
-the diff can be read. **It is deliberately never merged**, and that is a settled
-decision, not an oversight.
+— "[WIP] Functionality for Gigabyte Gaming A16 5th", `master <- a16-5th` — existed
+to be a place CodeRabbit reviewed and the diff could be read, never to be merged.
+**Closed without merging on 2026-10-21**, which honoured that: `merged=False`,
+and `master` is still exactly upstream's `4b817ea` on both the local and the fork
+copy. Verified, not assumed.
 
-Merging it would put the whole integration branch onto `master`, which costs
-exactly what the table above protects: `git log upstream/master` stops being a
-clean comparison, the cherry-pick strategy loses its baseline, and the eventual
-upstream patch series gets harder to extract from a fork point that no longer
-exists. If it ever *does* need merging, preserve the baseline first —
-`git branch upstream-pristine 4b817ea` — and say so here.
+**The never-merge rule is the durable part and still stands.** Merging the
+integration branch onto `master` would cost exactly what the table above
+protects: `git log upstream/master` stops being a clean comparison, the
+cherry-pick strategy loses its baseline, and the eventual upstream patch series
+gets harder to extract from a fork point that no longer exists. If a merge is
+ever wanted, preserve the baseline first — `git branch upstream-pristine 4b817ea`
+— and record the decision here.
+
+What the surface produced while it was open: one full-diff review (29 files) and
+one incremental one, four actionable findings, three acted on and one declined
+with reasons. All four are described below under the commits that closed them.
+
+To get another review later, reopen that PR or raise a fresh one from `a16-5th`
+— to a scratch branch, not `master`. Two things to expect, both learned the hard
+way:
+
+- **Reviews are manual-trigger on this fork** ("fewer than 10 stars"), via the
+  🔍 Trigger review checkbox or an `@coderabbitai review` comment. Pushes do not
+  auto-review.
+- **The free tier rate-limits to one review per ~45 minutes**, and a run that
+  hits the limit stops partway, leaving some findings unmarked. Spend a review on
+  a batch of real work, not a docs-only push.
+- The **Autofix** and **Generate docstrings** checkboxes push the bot's own
+  commits to the branch. Leave both unticked; the docstring one in particular
+  would act on a Docstring Coverage check that does not apply to kernel C.
 
 Two consequences of using a PR this way:
 
@@ -599,13 +619,17 @@ Two consequences of using a PR this way:
 
 ### CI is green, and it validates the packaging
 
-The push of `920ca3b` ran the `Release driver (debug)` workflow to success on all
-four jobs:
+Both pushed heads ran the `Release driver (debug)` workflow to success on all
+four jobs — `920ca3b`, and `75f870d` after it:
 
 ```
 Generate driver tar file                      success
 Publish driver (fc42 / fc43 / fc44)           success x3
 ```
+
+The `75f870d` run matters on its own: its only packaging change was the three
+RPM `%changelog` dates, and a malformed changelog date is exactly what breaks an
+rpm build. Green across fc42, fc43 and fc44 settles that.
 
 Those jobs build the RPMs in **mock** on three Fedora releases, which is the
 first end-to-end check of packaging work that cannot be tested locally. It
