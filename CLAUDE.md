@@ -151,6 +151,18 @@ first. A dump drops ~43 `.dat` files and `iasl -d dsdt.dat ssdt*.dat` produces a
 matching set of `.dsl`. `*.dat` is gitignored; `*.dsl` deliberately is not, so
 firmware kept as reference gets committed on purpose rather than by accident.
 
+**Only commit the tables you need, and never the whole dump.** ACPI tables are
+firmware code, identical across every unit of a given model and BIOS, so a DSDT
+carries nothing specific to one machine. Two tables in a full dump do:
+
+- **`MSDM`** holds the OEM Windows licence key.
+- **`SLIC`/`SLIT`**, where present, hold OEM licensing data.
+
+Neither is committed here, and `*.dat` being gitignored means a stray
+`acpidump` cannot add them by accident. Per-machine identifiers such as the
+serial number live in SMBIOS/DMI rather than in ACPI, and are not in these
+files either.
+
 ### Method IDs present in the AMD sibling
 
 Verified by reading the `Switch` case lists directly:
@@ -431,7 +443,14 @@ machine does not end up carrying both.
 | `master` | Pristine upstream tracking. **Never commit here.** |
 | `a16-5th` | Integration branch. All work lands here. |
 
-Remotes: `origin` = upstream, `a16` = the A16 fork.
+Remotes: `a16` = the A16 fork. **`origin` is currently absent** — `master` still
+sits at upstream's `4b817ea`, so the history is intact, but there is nothing to
+fetch upstream updates from. The cherry-pick strategy below needs it back:
+
+```sh
+git remote add origin https://github.com/tangalbert919/gigabyte-laptop-wmi.git
+git fetch origin
+```
 
 ### Why the fork is ported, not merged
 
@@ -627,7 +646,7 @@ Both commits build clean with `-Wall -Wextra`.
 | 2 | Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel | medium |
 | ~~3~~ | ~~`platform_profile` handler~~ **done** — over fan policy, not GPU power | low |
 | 4 | Writable `pwm1`/`pwm2` — **two mechanisms tried and rejected**, read scaling kept | medium |
-| ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** | low |
+| ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **built**; keycodes not yet observed in userspace | low |
 | 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
 
 Steps 0, 1 and 1b are complete and verified on hardware: `gigabyte-laptop/0.2.0`
@@ -954,7 +973,29 @@ only reads (WMBC). A matching write-side node would let `0x46`/`0x47` and the
 curve be tried deliberately, one value at a time, without exposing a path that
 a fan daemon can drive into a fan stop. Add that before the next attempt.
 
-### Step 3: profiles over fan policy, with PWM taking precedence
+### Step 3: profiles over fan policy — verified on hardware
+
+```
+$ cat /sys/class/platform-profile/*/name       -> gigabyte_laptop
+$ cat /sys/class/platform-profile/*/choices    -> quiet balanced performance
+$ cat /sys/firmware/acpi/platform_profile      -> balanced   (synced from fan_mode)
+$ echo performance > ...  -> fan_mode 2   (gaming)
+$ echo quiet       > ...  -> fan_mode 1   (silent)
+```
+
+**The legacy aggregate really is created by the class API.** That was the one
+assumption in this design taken from kernel source rather than observation, and
+it is now confirmed: registering through `devm_platform_profile_register()`
+produced `/sys/firmware/acpi/platform_profile`, which is the file `tuned` writes.
+
+**`tuned` picks it up from the next boot, automatically.**
+`systemd-modules-load.service` is `Before=sysinit.target` and ran at 1.3 s,
+while `tuned.service` is `After=sysinit.target`, so the module and its profile
+file exist before `tuned` applies anything. Installing the handler *mid-session*
+leaves them out of step, because `tuned` already tried at boot, found no file and
+logged "not supported"; `tuned-adm profile <name>` re-applies.
+
+### Step 3 design: profiles over fan policy, with PWM taking precedence
 
 The original design — `platform_profile` over `perf_mode` + `dynamic_boost` —
 became inert when GPU TGP turned out to be unreachable. Replaced with fan
