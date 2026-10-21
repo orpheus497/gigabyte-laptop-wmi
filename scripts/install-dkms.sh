@@ -12,8 +12,13 @@
 # Usage: sudo bash scripts/install-dkms.sh [--autoload]
 set -euo pipefail
 
-VERSION=0.2.0
 NAME=aorus-laptop
+# Take the version from the RPM spec, which is the project's canonical source,
+# so DKMS registration cannot drift from packaging. Overridable, with the
+# current value as a last resort if the spec is unreadable.
+VERSION="${VERSION:-$(sed -n 's/^Version:[[:space:]]*//p' \
+	"$(dirname "$0")/../pkg-files/rpm/aorus-laptop-dkms.spec" 2>/dev/null | head -1)}"
+VERSION="${VERSION:-0.2.0}"
 SRC=/usr/src/$NAME-$VERSION
 AUTOLOAD=0
 
@@ -59,10 +64,21 @@ else
 fi
 
 echo "== Loading =="
-modprobe -r aorus_laptop 2>/dev/null || true
+# If the old module is in use the removal fails, and modprobe below would then
+# be a no-op on the already-loaded copy. Say so rather than imply the new build
+# is live.
+if lsmod | grep -q '^aorus_laptop '; then
+	if ! modprobe -r aorus_laptop; then
+		echo "WARNING: could not unload the running aorus_laptop." >&2
+		echo "         The previously loaded module stays active until you" >&2
+		echo "         unload it manually or reboot. The new build is installed" >&2
+		echo "         but NOT running." >&2
+	fi
+fi
 modprobe aorus-laptop
 
 echo
 dkms status "$NAME"
-echo "signature: $(modinfo -F signer aorus-laptop 2>/dev/null || echo 'UNSIGNED')"
+signer=$(modinfo -F signer aorus-laptop 2>/dev/null) || signer=
+echo "signature: ${signer:-UNSIGNED}"
 echo "nodes:     /sys/devices/platform/aorus_laptop"

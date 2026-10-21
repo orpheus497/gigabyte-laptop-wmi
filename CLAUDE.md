@@ -34,8 +34,15 @@ Everything here is verified from the live machine, not assumed.
 
 ### Model line — read this before applying anything found online
 
-This is an **A16 5-series** machine. Do not apply findings from the A16
-3-series (`3VH`, `3WH`) — different generation.
+This is an **A16 5-series** machine. Separate two kinds of external finding:
+
+- **Hardware-specific numbers do not transfer.** TGP and power figures, fan RPM
+  targets, GPU tier, and anything on an Intel-only code path belong to the unit
+  that produced them.
+- **DSDT method analysis does transfer, as a starting point.** The AML is
+  near-identical across this firmware generation, so `GAMING-A16-3VH-DSDT.dsl`
+  in this repo **is** the accepted reference for WMI method bodies and EC field
+  names — pending `debug_method` validation on `GA65TH`.
 
 Gigabyte's A16 gen codes follow `GA6` + a two-or-three character suffix, and the
 suffix tracks the generation and GPU tier, so reports from other suffixes are
@@ -49,7 +56,7 @@ not transferable without checking:
 | Upstream README | `GA6H` | generic Gaming (2025+) reference |
 | GigaMate experimental list | `CMH`, `CVH`, `CTH`, `CWH` | other gens, unverified here |
 | Luminous418 RGB repo | `CTH` | different gen, and USB keyboard this unit lacks |
-| **Not applicable** | `3VH`, `3WH` | different model line entirely |
+| A16 3-series | `3VH`, `3WH`, `3TH` | different line; **firmware analysis reusable**, hardware numbers not |
 
 Two consequences:
 
@@ -103,8 +110,9 @@ blocked in code), `has_three_fans = has_four_fans = 0` → **2 fans, 3 temps,
   The slot is free — see "Power profiles" below.
 - **`GBT0005:00` is resolved: ignore it.** It is `Device (GAPD)` under `\_SB`,
   and its `_STA` exists for side effects rather than to report presence. On the
-  AMD firmware it latches the dGPU off when the EC says it is disabled, then
-  returns `Zero`:
+  AMD firmware it latches the dGPU off when **CMOS** says it is disabled —
+  `RXCM` reads the extended CMOS index/data ports `0x72`/`0x73`, not the EC —
+  then returns `Zero`:
 
   ```asl
   Name (_HID, EisaId ("GBT0005"))
@@ -140,11 +148,18 @@ verify with `debug_method` before relying on it.
 Verified by reading the `Switch` case lists directly:
 
 ```
-WMBD (write): 02 03 46 47 50 51 57 61 63 64 65 66 67 68 6A 6B 70 71 7D 80
-              87 88 A1 A3 C4 C7 C9 CA CB D9 E6 E7 ED F6 FA
-WMBC (read):  46 47 50 57 61 63 64 65 67 68 6A 6B 6F 70 71 7D 80 87 88 A1
-              A2 A3 C4 C7 C9 CA D9 E1 E2 E3 E4 E5 E6 E7 EB EF F6
+WMBD (write): 46 47 50 51 57 61 63 64 65 66 67 68 6A 6B 70 71 7D 80 87 88
+              A1 A3 C4 C7 C9 CA CB D9 E6 E7 ED F6 FA
+WMBC (read):  03 46 47 50 57 61 63 64 65 67 68 6A 6B 6F 70 71 7D 80 87 88
+              A1 A2 A3 C4 C7 C9 CA D9 E1 E2 E3 E4 E5 E6 E7 EB EF F6
 ```
+
+Count only the cases at the switch's own indent level. Both methods contain
+nested switches — `0xED`'s body has its own `Case (0x02)`/`Case (0x03)` setting
+`NPCF.ATPP` — and a naive range grep picks those up as if they were method IDs.
+`WMBD` has no `0x02` or `0x03`; `0x03` is WMBC-only and is the synthetic event
+trigger described below. `WMBD` also has no `If (Arg1 == ...)` prelude, going
+straight to `Switch (Arg1)`.
 
 All three ported IDs are present on **AMD** firmware, which is the main thing
 Phase 2 needed: `0xED`, `0xE7`, `0x7D`.
@@ -167,14 +182,15 @@ argument that was sent. Two consequences:
   take an argument, and validation must use a **sentinel**: read with `0x5A`,
   and if `0x5A` comes back the ID is not implemented. **Step 2 is not
   trustworthy until that is done.**
-- **It is also why the module still loads.** `0xFC` (`LIGHT_SENSOR_NEW`) is
-  absent from AMD firmware, and the probe does `if (ret) return ret` after that
-  read, with init treating probe failure as fatal. The Default rescues it: the
-  read "succeeds" with zeroes, `light_sensor_result[0] != 0xF7`, and probe
-  carries on to the old light-sensor path — which is equally absent and equally
-  harmless. The unbounded `memcpy` is not reachable here either, because the
-  echoed buffer is only 4 bytes. Still worth clamping, but it is hygiene rather
-  than a live hazard.
+- **It is also why the module loaded before Step 1 hardened the probe.** `0xFC`
+  (`LIGHT_SENSOR_NEW`) is absent from AMD firmware, and the probe then did
+  `if (ret) return ret` after that read, with init treating probe failure as
+  fatal. The Default rescued it: the read "succeeded" with zeroes,
+  `light_sensor_result[0] != 0xF7`, and probe carried on to the old
+  light-sensor path — equally absent, equally harmless. Confirmed on hardware:
+  the load logs `Using old light sensor method` and no light-sensor warning.
+  The unbounded `memcpy` was not reachable either, because the echoed buffer is
+  only 4 bytes. Both are fixed regardless; see Hazards.
 
 Every other WMI read the probe performs *is* implemented in AMD WMBC: `0x57`,
 `0x71`, `0x67`, `0x6A`, `0x6B`, `0x64`, `0x65`, `0x68`, plus `0xE7`. The only
@@ -343,8 +359,12 @@ governs GPU TGP and fans. Consequences to design around: the legacy aggregate
 becomes the intersection, disagreement surfaces as `custom`, a legacy write
 goes to *every* handler and fails if any returns `-EOPNOTSUPP`, and
 `platform_profile_cycle()` starts returning `-EINVAL` whenever the two
-disagree. Whether the Gigabyte BIOS exposes
-`APMF_FUNC_STATIC_SLIDER_GRANULAR` is unknown without the DSDT.
+disagree.
+
+Whether the Gigabyte BIOS exposes `APMF_FUNC_STATIC_SLIDER_GRANULAR` is still
+unknown. Note that the committed 3VH DSDT contains **neither `AMDI0100` nor any
+`APMF` method**, so those live in an **SSDT**, not the DSDT — checking them
+means dumping and decompiling every table, not just `dsdt.dat`.
 
 ## Repo layout and conventions
 
@@ -514,8 +534,8 @@ Both commits build clean with `-Wall -Wextra`.
 
 | Step | Work | Risk |
 |---|---|---|
-| 0 | DKMS install, load, verify hwmon channels appear | low |
-| 1 | Clamp the `memcpy`; make optional probe reads non-fatal | low |
+| ~~0~~ | ~~DKMS install, load, verify hwmon channels appear~~ **done** | low |
+| ~~1~~ | ~~Clamp the `memcpy`; make optional probe reads non-fatal~~ **done** | low |
 | **1b** | **Extend `debug_method` to take an argument** — prerequisite for Step 2 | low |
 | 2 | Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel | medium |
 | 3 | Register a `platform_profile` handler over `perf_mode` + `dynamic_boost` | low |
@@ -523,9 +543,18 @@ Both commits build clean with `-Wall -Wextra`.
 | 5 | GiMate button — diagnose, then notify handler + keymap | low |
 | 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
 
-Step 1 is **not** a blocker for Step 0 — the WMBC Default rescues the one
-missing probe read, so the module is expected to load as committed. Step 1b
-*is* a blocker for Step 2.
+Steps 0 and 1 are complete and verified on hardware: `aorus-laptop/0.2.0`
+installed through DKMS, signed by the `DKMS module signing key`, loaded, with
+all 20 sysfs nodes present including the three Gaming-only ones. Step 1b *is* a
+blocker for Step 2.
+
+The load log is itself free reconnaissance, because Step 1 made every optional
+read report itself. On this machine it printed only `Skipping silent fan mode ID
+check`, `Dual fan speed control required`, `Using old light sensor method` and
+`AORUS WMI kernel driver started`. The absence of the other warnings means fan
+mode, custom speed, charging mode, charging limit, the fan curve **and
+`dynamic_boost` (`0xE7`)** all read successfully — the first on-hardware
+evidence that `0xE7` is implemented here, not merely on the CWH.
 
 Step 2 gates everything GPU-related. Step 6 is open-ended research; treat it as
 a separate project rather than a blocker.
@@ -561,12 +590,28 @@ PS/2 Gigabyte keyboard.
 
 1. **`0xF6` / `KBLL` over WMI** — brightness only, but it is read/write, in
    firmware, on AMD, and needs no reverse engineering. Do this first.
-2. **`WMBD 0x63`** — writes five bytes to `WXCM 0xD2`–`0xD6`, `WMBC 0x63` reads
-   them back. GigaMate's `research.md` lists this under "What Didn't Work" on an
-   AERO X16 because it "doesn't reach the USB RGB controller" — but **this
-   machine has no USB RGB controller**, the keyboard is behind the ENE part.
-   Whether it reaches the ENE controller on a PS/2 unit is untested by anyone.
-   Cheap experiment, genuinely unknown outcome. *Hypothesis, not a finding.*
+2. **`WMBD 0x63` — but it writes CMOS, not the EC.** `WXCM(i, v)` sets
+   `XCMI = i; XCMD = v` over `OperationRegion (CMS1, SystemIO, 0x72, 0x02)`,
+   and `RXCM(i)` sets the index then reads `XCMD` back. Ports `0x72`/`0x73` are
+   the **extended CMOS index/data pair**; this machine's EC is at `0x66`/`0x62`
+   (`ACPI: EC: EC_CMD/EC_SC=0x66, EC_DATA=0x62`). So `0x63` stores five bytes in
+   **CMOS NVRAM**, most likely for the firmware to consume at the next boot
+   rather than to drive anything live. That is a better explanation of
+   GigaMate's "doesn't reach the RGB controller" result than the USB-versus-ENE
+   distinction, and it lowers this lead's prospects considerably.
+
+   Two hazards before trying it:
+
+   - **It needs an input buffer of at least five bytes.** The body dereferences
+     `Arg2[0]` through `Arg2[0x04]`, and `gigabyte_laptop_set_devstate()` passes
+     `sizeof(u32)` — four. The fifth `DerefOf` would fail *after* the first four
+     `WXCM` writes have already landed, leaving a **partially written CMOS
+     block**. A wider setter is required first.
+   - **Record the existing CMOS values with `RXCM(0xD2)`–`RXCM(0xD6)` before
+     writing anything**, so the previous contents can be restored.
+
+   The same correction applies to `GBT0005`: its `_STA` check `RXCM(0xC7)` is a
+   **CMOS read**, not an EC read.
 3. **The 41-byte `0x0B` pipe on `/dev/hidraw2`.** The closest precedent is the
    ASUS ITE5570 family (`vrgb` issue #1), where firmware-mode report `0x0B` and
    a separate colour report `0x05` are used over i2c-HID, and one reporter
@@ -638,9 +683,9 @@ ceiling which stopped fans on the AERO 17-XA (upstream #46).
 Neither can run from a non-interactive shell; they need a password.
 
 ```sh
-# DSDT dump — identifies GBT0005, shows whether APMF methods exist,
-# and shows what \_SB_.I2CB.ECSH is wired to
-sudo acpidump -b && iasl -d dsdt.dat
+# Dump every table and decompile all of them, not just the DSDT. AMDI0100 and
+# the APMF methods are not in the DSDT, so they must be in an SSDT.
+sudo acpidump -b && iasl -d dsdt.dat ssdt*.dat
 
 # Live capture on the ECSH vendor pipe. Press GiMate / Fn+Space / Mode
 # while this runs. Read-only; it only listens.

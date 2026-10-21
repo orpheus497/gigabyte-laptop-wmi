@@ -181,7 +181,11 @@ NPCF interface. Three modes are available:
 - Balanced (1)
 - Boost (2)
 
-The firmware resets this to its default on every boot.
+The firmware cannot report which mode is active: method `0xED` exists for
+writing but has no matching read, so this node returns the last value written to
+it rather than the mode actually in effect. It starts at `0` when the driver
+loads, whatever the firmware is doing. The firmware also resets the mode on
+every boot.
 
 **Node:** `/sys/devices/platform/aorus_laptop/perf_mode`
 

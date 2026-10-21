@@ -826,14 +826,22 @@ static ssize_t fan_turbo_store(struct device *dev, struct device_attribute *attr
 			return ret;
 
 		ret = set_fan_mode(gigabyte, FAN_FIXED_MODE);
-		if (ret)
+		if (ret) {
+			// Put the duty back, so a failed latch does not leave the fans pinned
+			set_fan_custom_speed(gigabyte, gigabyte->fan_turbo_saved_speed);
 			return ret;
+		}
 
 		gigabyte->fan_mode = 5;
 	} else {
+		/*
+		 * Best effort. A stale TFAN bit is a far smaller problem than
+		 * returning here would be, since that would skip the restore
+		 * below and leave the fans latched at maximum duty.
+		 */
 		ret = gigabyte_laptop_set_devstate(FAN_TURBO, 0, &output);
 		if (ret)
-			return ret;
+			pr_warn("Could not clear turbo fan bit (%d), restoring anyway\n", ret);
 
 		// Restore the duty first, since auto mode programs the fans with it.
 		ret = set_fan_custom_speed(gigabyte, gigabyte->fan_turbo_saved_speed);
