@@ -221,3 +221,30 @@ switched off, so this node can be toggled without losing a custom fan curve.
 ```sh
 echo '1' | sudo tee /sys/devices/platform/aorus_laptop/fan_turbo
 ```
+
+## Debug method
+
+**Disclaimer:** This node evaluates an arbitrary WMI read method. It is a
+development aid, not a supported interface.
+
+The node takes a method ID and an optional argument, then reads that method and
+prints the result:
+
+```sh
+echo '0xE7' | sudo tee /sys/devices/platform/aorus_laptop/debug_method
+cat /sys/devices/platform/aorus_laptop/debug_method
+# method 0xe7 arg 0x0 -> 0x0 (0)
+```
+
+The argument matters when checking whether a method exists at all. The firmware
+answers an unimplemented method ID with whatever argument was passed in, so a
+read with argument 0 returns 0 either way. Reading with a distinctive argument
+tells the two apart, and the node says so when the result matches:
+
+```sh
+echo '0xED 0x5A' | sudo tee /sys/devices/platform/aorus_laptop/debug_method
+cat /sys/devices/platform/aorus_laptop/debug_method
+# method 0xed arg 0x5a -> 0x5a (90) [echoed argument: method not implemented]
+```
+
+**Node:** `/sys/devices/platform/aorus_laptop/debug_method`

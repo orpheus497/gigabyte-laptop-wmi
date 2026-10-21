@@ -582,7 +582,7 @@ Both commits build clean with `-Wall -Wextra`.
 |---|---|---|
 | ~~0~~ | ~~DKMS install, load, verify hwmon channels appear~~ **done** | low |
 | ~~1~~ | ~~Clamp the `memcpy`; make optional probe reads non-fatal~~ **done** | low |
-| **1b** | **Extend `debug_method` to take an argument** — prerequisite for Step 2 | low |
+| ~~1b~~ | ~~Extend `debug_method` to take an argument~~ **done** | low |
 | 2 | Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel | medium |
 | 3 | Register a `platform_profile` handler over `perf_mode` + `dynamic_boost` | low |
 | 4 | Writable `pwm1`/`pwm2` for CoolerControl | medium |
@@ -682,22 +682,45 @@ against lockdown first. `/sys/module/acpi/parameters/debug_{level,layer}` are
 writable and lockdown-exempt, but they are ACPICA-level and do not print the
 `Query(0x%02x) scheduled` line, which comes from Linux's `ec.c` via `pr_debug`.
 
-Two routes that do work:
+**So the driver carries the diagnostic instead.** Both candidate paths are
+instrumented and log what they receive, so a keypress names its own path:
 
-1. **Make the driver the diagnostic** — preferred, and it is Step 5 work either
-   way. Install both a WMI notify handler on `ABBC0F72` and an ACPI notify
-   handler on `GBT0005`, each logging what it receives. Whichever fires names
-   the path, and the `_WED` payload gives the event byte. No reboot, no
-   lockdown fight, and the module is signed.
-2. **`dyndbg` on the kernel command line**, which is parsed at boot and so is
-   not subject to the debugfs restriction:
-   `sudo grubby --update-kernel=ALL --args='dyndbg="file drivers/acpi/ec.c +p"'`
-   then reboot and `dmesg | grep Query`. Zero code, one reboot. Remove the
-   argument afterwards — EC query logging is chatty in normal use.
+- `gigabyte_laptop_wmi_notify()`, reached via the WMI route, dumps the event
+  buffer and breaks out byte 0 (EC event number) and byte 1 (state).
+- `gigabyte_laptop_acpi_notify()`, on `GBT0005`, logs the notify value — `0xCF`
+  is what `_Q63` sends.
 
-Expect `0x63` for the `GBT0005` path or `0x45` for the WMI path; anything else
-is a query not yet accounted for, and this machine's DSDT is committed to look
-it up.
+Both registrations are non-fatal; a diagnostic must not stop the driver loading.
+Watch with `journalctl -kf | grep aorus` while pressing the keys. The WMI path
+also self-tests without any keypress, since reading method `0x03` fires
+`Notify (AMW0, 0xD2)` on demand:
+`echo 0x03 > debug_method && cat debug_method`.
+
+**`wmi_install_notify_handler()` does not exist on this kernel.** It was
+removed, and the only route is a `struct wmi_driver` with a `.notify` callback
+bound to the event GUID by its `id_table`. That is why the module now registers
+a second, event-only `wmi_driver` ("aorus-laptop-events") alongside the platform
+driver. `.notify` is itself deprecated in favour of `.notify_new` taking a
+`struct wmi_buffer`; `min_event_size` is set to 0 so events carrying no data are
+still delivered.
+
+**This makes the `eeepc_wmi` blacklist matter more.** Two drivers matching one
+GUID means whichever binds first wins the device. `eeepc_wmi` currently probes
+and fails, leaving `ABBC0F72` with `driver=NONE`, so our driver can take it —
+but that is luck, not design. Blacklist it before relying on the handler:
+
+```sh
+printf 'blacklist eeepc_wmi\nblacklist asus_wmi\n' | sudo tee /etc/modprobe.d/gigabyte-a16.conf
+```
+
+No `MODULE_DEVICE_TABLE(wmi, ...)` is declared for the event IDs on purpose.
+Binding works without it; adding one would give the module a modalias and let
+udev autoload it, which is a change to load behaviour worth making separately
+from this diagnostic.
+
+Expect `0x63`/`0xCF` for the `GBT0005` path or a WMI event for the `_Q45` path;
+anything else is a query not yet accounted for, and this machine's DSDT is
+committed to look it up.
 
 On USB Gigabyte models the vendor-HID path carries report ID `0x04` with
 payload `00 00 84` = Mode key and `00 00 91` = GigaMate key (GigaMate's

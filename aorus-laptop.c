@@ -105,6 +105,8 @@ struct gigabyte_laptop_wmi {
 	int fan_turbo_saved_mode;
 	int fan_turbo_saved_speed;
 
+	u32 debug_arg;
+
 	u8 gaming_family;
 	u8 fan_silent_method;
 	u8 debug_method;
@@ -988,30 +990,58 @@ static ssize_t has_dgpu_ejector_show(struct device *dev, struct device_attribute
 	return sysfs_emit(buf, "%d\n", gigabyte->has_dgpu_ejector);
 }
 
+/*
+ * Debug node. Takes a method ID and an optional argument:
+ *
+ *	echo '0xE7'      > debug_method   # read method 0xE7 with argument 0
+ *	echo '0xED 0x5A' > debug_method   # read method 0xED with argument 0x5A
+ *
+ * The argument matters. WMBC ends in Default { Return (Arg2) }, so a method ID
+ * the firmware does not implement answers with whatever was passed in rather
+ * than failing. Reading with a distinctive argument is the only way to tell an
+ * unimplemented method from one that genuinely returns that value, which is
+ * why the show handler flags the echo.
+ */
 static ssize_t debug_method_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
-	int ret;
-	u8 data;
+	unsigned int method, arg = 0;
+	int parsed;
 	struct gigabyte_laptop_wmi *gigabyte;
 
-	ret = kstrtou8(buf, 0, &data);
-	if (ret)
-		return ret;
+	parsed = sscanf(buf, "%i %i", &method, &arg);
+	if (parsed < 1) {
+		pr_err("Expected a method ID, optionally followed by an argument\n");
+		return -EINVAL;
+	}
+
+	if (method > 0xFF) {
+		pr_err("Invalid method ID\n");
+		return -EINVAL;
+	}
 
 	gigabyte = dev_get_drvdata(dev);
-	gigabyte->debug_method = data;
+	gigabyte->debug_method = method;
+	gigabyte->debug_arg = (parsed > 1) ? arg : 0;
 	return count;
 }
 
 static ssize_t debug_method_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	int ret, output;
+	bool echoed;
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
 
-	ret = gigabyte_laptop_get_devstate(gigabyte->debug_method, &output);
+	ret = gigabyte_laptop_get_devstate2(gigabyte->debug_method,
+					gigabyte->debug_arg, &output);
 	if (ret)
 		return ret;
-	return sysfs_emit(buf, "%d, %d\n", gigabyte->debug_method, output);
+
+	// Only conclusive when the argument was something the firmware would not return
+	echoed = gigabyte->debug_arg && output == (int)gigabyte->debug_arg;
+
+	return sysfs_emit(buf, "method 0x%02x arg 0x%x -> 0x%x (%d)%s\n",
+			gigabyte->debug_method, gigabyte->debug_arg, output, output,
+			echoed ? " [echoed argument: method not implemented]" : "");
 }
 
 #define TOGGLE_DEVICE(_device, _id) \
@@ -1155,6 +1185,103 @@ static int check_sku(const char *dmi_sku, const char *end) {
 	}
 	return -1;
 }
+
+/* Hotkey events ******************************************/
+
+/*
+ * The GiMate and Mode keys emit no i8042 scancode and nothing on the ENE
+ * i2c-HID pipe, but pressing either does raise an EC query: the EC GPE count
+ * advances by two per press against zero idle drift. The firmware offers two
+ * paths for that query to surface on, and which one carries these keys is not
+ * yet known:
+ *
+ *	_Q45 -> SMGR(WEVN, WEVS) -> WMBC(0, 0x03, n) -> Notify (AMW0, 0xD2)
+ *	_Q63 -> Notify (GAPD, 0xCF)                     [GAPD is _HID GBT0005]
+ *
+ * Both are instrumented here so a keypress names its own path, rather than
+ * guessing and writing the wrong handler. Neither does anything yet beyond
+ * logging; the keymap follows once the path is known.
+ */
+#define GBT_ACPI_DEVICE "GBT0005"
+
+static acpi_handle gigabyte_laptop_gapd_handle;
+
+static void gigabyte_laptop_acpi_notify(acpi_handle handle, u32 event, void *data)
+{
+	pr_info("ACPI event: " GBT_ACPI_DEVICE " notify 0x%02x\n", event);
+}
+
+static void gigabyte_laptop_install_acpi_notify(void)
+{
+	struct acpi_device *adev;
+	acpi_status status;
+
+	adev = acpi_dev_get_first_match_dev(GBT_ACPI_DEVICE, NULL, -1);
+	if (!adev) {
+		pr_info("No " GBT_ACPI_DEVICE " device, skipping its notify handler\n");
+		return;
+	}
+
+	status = acpi_install_notify_handler(adev->handle, ACPI_DEVICE_NOTIFY,
+					gigabyte_laptop_acpi_notify, NULL);
+	if (ACPI_FAILURE(status))
+		pr_warn("Could not watch " GBT_ACPI_DEVICE " for events\n");
+	else
+		gigabyte_laptop_gapd_handle = adev->handle;
+
+	acpi_dev_put(adev);
+}
+
+static void gigabyte_laptop_remove_acpi_notify(void)
+{
+	if (!gigabyte_laptop_gapd_handle)
+		return;
+
+	acpi_remove_notify_handler(gigabyte_laptop_gapd_handle, ACPI_DEVICE_NOTIFY,
+				gigabyte_laptop_acpi_notify);
+	gigabyte_laptop_gapd_handle = NULL;
+}
+
+/*
+ * WMI events arrive as the buffer _WED returns, which the DSDT fills from
+ * DEVS: byte 0 is the EC's event number and byte 1 its state.
+ */
+static void gigabyte_laptop_wmi_notify(struct wmi_device *wdev, union acpi_object *obj)
+{
+	if (!obj) {
+		pr_info("WMI event: no data\n");
+		return;
+	}
+
+	if (obj->type == ACPI_TYPE_BUFFER) {
+		pr_info("WMI event: %*ph\n", (int)min_t(u32, obj->buffer.length, 16u),
+			obj->buffer.pointer);
+		if (obj->buffer.length >= 2)
+			pr_info("WMI event: number 0x%02x state 0x%02x\n",
+				obj->buffer.pointer[0], obj->buffer.pointer[1]);
+	}
+	else if (obj->type == ACPI_TYPE_INTEGER)
+		pr_info("WMI event: integer 0x%llx\n", obj->integer.value);
+	else
+		pr_info("WMI event: unexpected ACPI type %u\n", obj->type);
+}
+
+static const struct wmi_device_id gigabyte_laptop_event_ids[] = {
+	{ WMI_EVENT, NULL },
+	{ }
+};
+
+static struct wmi_driver gigabyte_laptop_event_driver = {
+	.driver = {
+		.name = "aorus-laptop-events",
+	},
+	.id_table = gigabyte_laptop_event_ids,
+	.notify = gigabyte_laptop_wmi_notify,
+	// This firmware's events carry a 4-byte buffer, but tolerate none
+	.min_event_size = 0,
+};
+
+static bool gigabyte_laptop_event_driver_live;
 
 /* Driver init ********************************************/
 
@@ -1381,6 +1508,13 @@ static void __exit gigabyte_laptop_exit(void)
 	struct gigabyte_laptop_wmi *gigabyte;
 
 	pr_info("Stopping AORUS WMI kernel driver\n");
+
+	gigabyte_laptop_remove_acpi_notify();
+	if (gigabyte_laptop_event_driver_live) {
+		wmi_driver_unregister(&gigabyte_laptop_event_driver);
+		gigabyte_laptop_event_driver_live = false;
+	}
+
 	gigabyte = platform_get_drvdata(platform_device);
 	hwmon_device_unregister(gigabyte->hwmon_dev);
 	sysfs_remove_group(&gigabyte->pdev->dev.kobj, &gigabyte_laptop_attr_group);
@@ -1455,6 +1589,16 @@ static int __init gigabyte_laptop_init(void)
 		pr_err("Probe failed\n");
 		goto fail_probe;
 	}
+
+	// Event watchers are diagnostics, so neither failure is worth aborting over
+	result = wmi_driver_register(&gigabyte_laptop_event_driver);
+	if (result)
+		pr_warn("Could not register WMI event driver (%d)\n", result);
+	else
+		gigabyte_laptop_event_driver_live = true;
+
+	gigabyte_laptop_install_acpi_notify();
+
 	pr_info("AORUS WMI kernel driver started\n");
 	return 0;
 
