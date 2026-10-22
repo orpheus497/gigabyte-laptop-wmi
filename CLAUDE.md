@@ -956,7 +956,8 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~3~~ | ~~`platform_profile` handler~~ **done** — over fan policy, not GPU power | low |
 | 4 | Writable `pwm1`/`pwm2` — **three mechanisms tried and rejected**, read scaling kept. One lead left (the 15-point curve). **The only functional gap.** | medium |
 | ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** — both keys scan in and are bound in KDE | low |
-| 6 | `0xF6`/`KBLL` brightness first, then RGB over `/dev/hidraw2` | high |
+| ~~6a~~ | ~~`0xF6`/`KBLL` keyboard brightness~~ **done** — LED class device, `max_brightness` 1 measured from the EC's own events | low |
+| 6b | RGB **colour** over `/dev/hidraw2` — not started, no precedent on this hardware. Open-ended research, not a blocker | high |
 
 Steps 0, 1 and 1b are complete and verified on hardware: `gigabyte-laptop/0.2.0`
 installed through DKMS, signed by the `DKMS module signing key`, loaded, with
@@ -1008,8 +1009,10 @@ Two behaviours worth knowing, both normal:
   is the concrete argument for Step 4: writable PWM is what would let the user
   override a fan curve that tolerates 86 °C before spinning up.
 
-Step 2 gates everything GPU-related. Step 6 is open-ended research; treat it as
-a separate project rather than a blocker.
+Step 2 gated everything GPU-related and is **settled**: all three methods
+validated, and GPU TGP closed as firmware-blocked, so nothing further sits behind
+that gate. Step 6b is open-ended research; treat it as a separate project
+rather than a blocker.
 
 **GiMate diagnosis order** (stop `input-remapper` first — it clones the keyboard
 into `input21`/`input22` and will confuse scancode capture):
@@ -1281,7 +1284,10 @@ own DSDT and this kernel's headers, not inferred from field names.
   implemented, where a sentinel can collide with a real value. Validate it
   against `0xED` (expect not-implemented) and `0xE7` (expect implemented).
 
-**Blocked on hardware measurement, deliberately not written:**
+**Was blocked on hardware measurement -- both have since shipped.** Kept
+because the reasoning that chose the LED class over a plain sysfs node, and
+the four handler defects the charge test was waiting on, are still the
+record of why the code looks as it does:
 
 - ~~**`0xF6` / `KBLL` as an LED class device.**~~ **Landed**, once the EC
   answered the range question itself — see the measurements below.
@@ -1488,6 +1494,39 @@ hardware `status` is not a reliable indicator of whether charge is flowing.
 The `60 <= limit <= 100` and `mode > 1` range checks stay. Still no firmware
 basis — there is no clamp — but they keep every written value inside its field
 width, which matters more now that the field is known to be live.
+
+### Open: `BCPC` reads 0 after a reboot, and nothing restores it
+
+Observed 22 Oct 2026, and **not yet explained.** `charge_limit` reads `0` where
+the recorded factory baseline was `100`:
+
+```
+charge_mode=0  charge_limit=0          # was 0 / 100 when first measured
+```
+
+The load log shows no failed read, so `charge_limit_show` did reach the firmware
+and `BCPC` genuinely is 0. Neither candidate explains it: `charge_limit_store`
+refuses anything below 60, and the battery extension writes `limit = 100` when
+disabling. So **the leading hypothesis is that `BCPC` does not survive a power
+cycle** — which would mean a ceiling is *not* persistent across reboots and has
+to be re-applied at boot, as on many laptops. That is **one data point** and
+must not be written up as a finding until it is reproduced from a known starting
+value.
+
+**There is a real hazard either way.** `charge_mode_store()` does not check that
+the limit is sane, so `echo 1 > charge_mode` with `BCPC` at 0 enables the mode
+with a 0 % ceiling, and what the EC does with that is unknown — plausibly
+refusing to charge at all. The battery extension guards its *reporting*
+(`charge_limit <= 0` reports 100); nothing guards the *write*. A guard is worth
+adding once the persistence question is answered, because the right guard
+depends on the answer.
+
+One read settles it, and now also reports whether the method is implemented:
+
+```sh
+echo '0x65 0x5A' | sudo tee $S/debug_method && sudo cat $S/debug_method
+# 0x5a -> not implemented;  0x0 -> BCPC really is 0;  0x64 -> the node is lying
+```
 
 ### Keyboard backlight: verified end to end, 22 Oct 2026
 
@@ -1697,6 +1736,10 @@ supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 - **Whether to try the 15-point curve**, which is the only Step 4 lead left.
   The write-side debug node it needs already shipped as `debug_method_write`.
   See the Step 4 section.
+- **Whether `BCPC` survives a power cycle**, which decides both whether a
+  charge ceiling needs re-applying at boot and what guard
+  `charge_mode_store()` should carry. One `debug_method` read settles it; see
+  "Open: `BCPC` reads 0 after a reboot".
 
 ## Decided: upstreaming comes last
 
@@ -2040,6 +2083,13 @@ with argument `0x5A`:
 method 0xed arg 0x5a -> 0x5a (90) [echoed argument: method not implemented]
 method 0xe7 arg 0x5a -> 0x0 (0)
 ```
+
+**That sample is in the node's _old_ wording.** `debug_method` was later
+given the typed read, and the same call now prints
+`[not implemented: reply was not an integer] [argument echoed back]`. The
+reading is unchanged -- see the bracket-matching note under "WMBC echoes
+unknown method IDs" for why the two strings are not interchangeable when
+parsed.
 
 `0xED` echoes the sentinel, confirming on this machine's firmware that
 performance mode is write-only exactly as the ASL said. `0xE7` does not echo,
