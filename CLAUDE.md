@@ -608,9 +608,16 @@ To get another review later, reopen that PR or raise a fresh one from `a16-5th`
 — to a scratch branch, not `master`. Two things to expect, both learned the hard
 way:
 
-- **Reviews are manual-trigger on this fork** ("fewer than 10 stars"), via the
-  🔍 Trigger review checkbox or an `@coderabbitai review` comment. Pushes do not
-  auto-review.
+- **Reviews are manual-trigger on this fork, for two independent reasons**, so
+  expect to ask for every one:
+  - *"fewer than 10 stars"* — the free tier does not auto-review small repos.
+  - *"Auto reviews are disabled on base/target branches other than the default
+    branch"* — the fork's default branch is `master`, so **any PR based on
+    `a16-5th` is skipped**, which is every feature-to-integration PR by design.
+    Seen on PR #2 (`a16-5th <- a16-5th-kbd-charge-uevent`).
+
+  Either way: the 🔍 Trigger review checkbox or an `@coderabbitai review`
+  comment. Pushes do not auto-review.
 - **The free tier rate-limits to one review per ~45 minutes**, and a run that
   hits the limit stops partway, leaving some findings unmarked. Spend a review on
   a batch of real work, not a docs-only push.
