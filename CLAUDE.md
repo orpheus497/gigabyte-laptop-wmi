@@ -1477,6 +1477,63 @@ It reacts to the **key only**, because the driver calls `sysfs_notify()` only
 from the key path. A sysfs write to `fan_preset` or `fan_mode` raises nothing,
 which is correct: the caller of a write already knows what it did.
 
+### `charge_control_end_threshold`: verified end to end, 22 Oct 2026
+
+The standard ABI now exists and the whole chain works.
+
+```
+/sys/class/power_supply/BAT1/charge_control_end_threshold
+  exists, mode 644                       <- property_is_writeable did its job
+  reads 100 with no ceiling in force
+  echo 80  -> reads 80, driver charge_mode reads 1   (both views agree)
+  echo 100 -> back off
+```
+
+**udev imports upower's hwdb entry now**, which it could not before because the
+attribute was absent:
+
+```
+E: POWER_SUPPLY_CHARGE_CONTROL_END_THRESHOLD=100
+E: CHARGE_LIMIT=75,80
+```
+
+**And upower exposes the whole interface**, which is the part that matters:
+
+```
+.ChargeThresholdSupported          b       true
+.ChargeThresholdEnabled            b       false
+.ChargeEndThreshold                u       80      <- from the hwdb, not the firmware
+.ChargeStartThreshold              u       75
+.EnableChargeThreshold             method  b
+```
+
+The D-Bus method works, which is the real desktop route:
+
+```
+EnableChargeThreshold(true)  -> sysfs 100 -> 80,  charge_mode 0 -> 1
+EnableChargeThreshold(false) -> sysfs 80 -> 100,  charge_mode 1 -> 0
+```
+
+No polkit prompt from a user shell. Note that `ChargeEndThreshold` 80 and
+`ChargeStartThreshold` 75 are upower's **hwdb-suggested** pair for this DMI
+match, not a reading of the firmware — the firmware has no start threshold at
+all, and upower skips that write when the file is absent.
+
+**A claim I made and had to withdraw.** This was pitched as giving a native
+slider in KDE System Settings, on an investigation's finding that powerdevil's
+`chargethresholdhelper` contained the sysfs literals. **That is false on this
+machine**, checked four ways: nothing in `powerdevil-6.7.5-3` references
+`charge_control_end_threshold` or even `power_supply`, and the helper holds no
+path literals at all, though the binary and both polkit actions do exist. The
+only consumers on this system are `/usr/libexec/upowerd`, the upower udev rule
+and its hwdb.
+
+So the desktop path is real but it runs **through upower's D-Bus interface**,
+not through powerdevil reading sysfs. Whether Plasma 6.7.5 surfaces a slider on
+top of that interface is still not demonstrated here, and should not be claimed
+without checking. What *is* demonstrated: any D-Bus client, `upowerctl`, GNOME,
+and TLP can all drive it.
+
 ### Step 6 leads, in order of cost
 
 1. **`0xF6` / `KBLL` over WMI** — brightness only, but it is read/write, in
