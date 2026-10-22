@@ -243,6 +243,22 @@ argument that was sent. Two consequences:
   with `0x5A`, and if `0x5A` comes back the ID is not implemented. The node says
   so itself when the result matches the argument. Step 2 was done on that basis
   and its results are trustworthy; see "Step 2 validation".
+
+  **Parsing that node: match `[implemented]` with its brackets.** The format is
+
+  ```c
+  "method 0x%02x arg 0x%x -> 0x%x (%d) [%s]%s\n"   // %s = "implemented" or
+                                                   // "not implemented: reply
+                                                   //  was not an integer"
+  ```
+
+  so the *negative* string contains the word `implemented` as a substring. A
+  `grep implemented` or a `*implemented*` glob therefore passes both cases and
+  silently accepts an absent method. Only `[implemented]` — brackets included —
+  distinguishes them. Caught in `scripts/test-charge-limit.sh`, which parsed the
+  decimal out of the reply without checking the marker at all, so an absent
+  `0x64`/`0x65` would have echoed the sentinel, parsed as a plausible `90`, run
+  the whole ceiling test against a field nothing reads, and then "restored" 90.
 - **It is also why the module loaded before Step 1 hardened the probe.** `0xFC`
   (`LIGHT_SENSOR_NEW`) is absent from AMD firmware, and the probe then did
   `if (ret) return ret` after that read, with init treating probe failure as
@@ -561,6 +577,26 @@ Two consequences to keep in mind:
 `/usr/src` tree, autoload entry and stale `.ko` files — before installing, so a
 machine does not end up carrying both.
 
+### A `.gitignore` entry does not untrack a file that is already tracked
+
+`tools/gigabyte-fan-preset-notify` — a 13 KB unstripped ELF — was committed in
+`7f0f8d5`, the same commit that added `tools/.gitignore` listing it on line 1.
+Ignore rules are only consulted for *untracked* paths, so a binary that was
+already staged sails straight past the rule meant to stop it. It stayed
+invisible because `git status` is quiet about tracked files and the build
+rewrites it in place; `make clean` is what exposed it, as a deletion.
+
+Untracked with `git rm --cached` (the blob stays in history, which is not worth
+a rewrite for 13 KB on a pushed branch). The check, for any generated file:
+
+```sh
+git ls-files tools/          # a build artifact here is a mistake
+```
+
+CodeRabbit listed it among the files it reviewed, which is the other tell — a
+review that reports a compiled binary as a reviewed file is reporting a repo
+defect, not a review.
+
 ### Branches
 
 | Branch | Purpose |
@@ -772,6 +808,7 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   ```
 
   Nothing in the repo or the driver causes or fixes this; it is machine state.
+
 - Manual signing fallback: `/usr/src/kernels/$(uname -r)/scripts/sign-file`
   with the same key pair.
 
@@ -923,6 +960,14 @@ the time, **19** since `fan_preset` was added. The platform device directory
 listed 25 entries, the other seven being device-core
 (`driver`, `driver_override`, `hwmon`, `modalias`, `power`, `subsystem`,
 `uevent`). With 1b done, nothing blocks Step 2.
+
+Those counts are the Step 1b snapshot. The figure now, verified on the installed
+build, is **20** driver attributes (`debug_method_write` joined them) out of
+**30** directory entries, the other ten being device-core — the three additions
+being `input`, `leds` and `platform-profile`, one per interface Steps 3 and 5
+and the keyboard backlight registered. Re-count with
+`ls /sys/devices/platform/gigabyte_laptop` rather than trusting this number,
+since it goes stale every time a node lands.
 
 The load log is itself free reconnaissance, because Step 1 made every optional
 read report itself. On this machine it printed only `Skipping silent fan mode ID

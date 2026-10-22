@@ -16,8 +16,17 @@ $(BIN): $(BIN).c
 # the binary actually went. A fixed /usr/local/bin in a committed unit breaks
 # any install with a different PREFIX, which is the one way to get a service
 # that enables cleanly and then fails to start.
-$(BIN).service: $(BIN).service.in
+#
+# It depends on the stamp as well, because Make cannot see a variable change:
+# `make PREFIX=/usr/local && make PREFIX=/usr install` would otherwise think
+# the unit up to date and install one pointing at the wrong prefix.
+$(BIN).service: $(BIN).service.in .bindir.stamp
 	sed -e 's|@BINDIR@|$(BINDIR)|g' $< > $@
+
+# Rewritten only when BINDIR actually differs, so this is not a rebuild on
+# every run.
+.bindir.stamp: FORCE
+	@printf '%s\n' '$(BINDIR)' | cmp -s - $@ || printf '%s\n' '$(BINDIR)' > $@
 
 # A user unit, not a system one: it has to reach the session bus to post a
 # notification. $(PREFIX)/lib/systemd/user is in systemd's user unit path.
@@ -27,6 +36,7 @@ install: $(BIN) $(BIN).service
 	install -Dm644 $(BIN).path    $(DESTDIR)$(UNITDIR)/$(BIN).path
 
 clean:
-	rm -f $(BIN) $(BIN).service
+	rm -f $(BIN) $(BIN).service .bindir.stamp
 
-.PHONY: all install clean
+.PHONY: all install clean FORCE
+FORCE:

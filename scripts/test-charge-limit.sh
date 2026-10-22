@@ -74,6 +74,25 @@ BASE_LIMIT=$(raw 0x65) || die "could not read 0x65"
 echo "   0x64 BCPS : $BASE_MODE"
 echo "   0x65 BCPC : $BASE_LIMIT"
 
+# Refuse a baseline from a method this firmware does not implement. WMBC ends in
+# Default { Return (Arg2) }, so an absent ID echoes the 0x5A sentinel, which
+# parses as a thoroughly plausible 90 -- enough to run the whole test against a
+# field nothing reads, then "restore" 90 as the ceiling.
+#
+# Match the brackets, not the bare word. The negative form is
+#   [not implemented: reply was not an integer]
+# which *contains* "implemented", so a *implemented* glob passes both.
+for reply in "$BASE_MODE" "$BASE_LIMIT"; do
+	case $reply in
+	*"[implemented]"*) ;;
+	*) die "
+This firmware does not implement the charging methods:
+  $BASE_MODE
+  $BASE_LIMIT
+There is no ceiling to test and no baseline to put back." ;;
+	esac
+done
+
 # The decimal in parentheses, for the restore. Printed form is
 #   method 0x65 arg 0x5a -> 0x50 (80) [implemented]
 BASE_MODE_N=$(printf '%s' "$BASE_MODE" | sed -n 's/.*(\([0-9]\+\)).*/\1/p')
