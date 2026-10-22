@@ -1274,6 +1274,48 @@ distinguishes nothing. The restore ran, and the nodes read 0 and 100 again.
 the first place: discharge to roughly 60 %, set the limit to 80, then watch for
 `state` leaving `charging` as it approaches 80 rather than continuing to 100.
 
+### Keyboard backlight: verified end to end, 22 Oct 2026
+
+Installed through DKMS, signed, `installed == loaded`. The node appears with the
+measured ceiling and a brightness seeded from hardware:
+
+```
+/sys/class/leds/gigabyte_laptop::kbd_backlight/
+  brightness=1  max_brightness=1  brightness_hw_changed present
+```
+
+No `Keyboard backlight unsupported by this firmware` in the load log, so the
+runtime capability gate passed. Writes through the LED node take effect.
+
+**`upower` picked it up, and the whole desktop path works.** Round trip over the
+same D-Bus call KDE's slider makes, with no polkit prompt:
+
+```
+GetMaxBrightness                -> i 1
+SetBrightness(0) -> sysfs brightness 0   (keyboard off)
+SetBrightness(1) -> sysfs brightness 1   (keyboard on)
+```
+
+**Check `GetMaxBrightness`, not `NativePath`.** `NativePath` reads `""` even
+when it is working — `upower` 1.91.5 exposes the property on the interface but
+does not populate it for this object. It was used as the success criterion at
+first and was simply the wrong test; `GetMaxBrightness` returning the real
+ceiling instead of `0` is what proves discovery.
+
+**One link still unverified: the hardware-changed direction.**
+`brightness_hw_changed` reads `ENODATA` until the notifier has fired once, which
+is its documented initial state and not a fault. Confirming it needs Fn+Space
+pressed *after* a module load, then:
+
+```sh
+cat /sys/class/leds/gigabyte_laptop::kbd_backlight/brightness_hw_changed
+```
+
+A number rather than `ENODATA` proves the `0xF6` event reached
+`led_classdev_notify_brightness_hw_changed()`, and therefore that KDE's slider
+tracks the key. Until that is seen, treat the write direction as proven and the
+read-back-on-key-press as designed-but-untested.
+
 ### Step 6 leads, in order of cost
 
 1. **`0xF6` / `KBLL` over WMI** — brightness only, but it is read/write, in

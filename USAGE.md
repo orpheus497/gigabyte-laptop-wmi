@@ -230,6 +230,15 @@ If the slider does not appear after loading the module mid-session, restart
 `upower` — it coldplugs LEDs at startup. From the next boot the ordering is
 right by construction.
 
+To check that `upower` has picked it up, call the interface rather than reading
+`NativePath`, which `upower` leaves empty for this object:
+
+```sh
+busctl --system call org.freedesktop.UPower /org/freedesktop/UPower/KbdBacklight \
+    org.freedesktop.UPower.KbdBacklight GetMaxBrightness
+# i 1   <- found it; 0 means it did not
+```
+
 ## Power on time (added in version 0.2.0)
 
 Aero/AORUS laptops support "power on time", though its use is unknown. This node is read-only.
