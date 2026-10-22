@@ -1140,6 +1140,22 @@ own DSDT and this kernel's headers, not inferred from field names.
   uevent prefixes extra variables with `SYNTH_ARG_`, so a rule matching the bare
   name will not fire. `udevadm monitor --property --kernel` works unprivileged.
 
+  **Verified 22 Oct 2026.** Four presses produced four events, one per preset,
+  each carrying the right value:
+
+  ```
+  ACTION=change  DEVPATH=/devices/platform/gigabyte_laptop  SUBSYSTEM=platform
+  GIGABYTE_FAN_PRESET=silent   then normal, gaming, auto
+  DRIVER=gigabyte_laptop  MODALIAS=platform:gigabyte_laptop
+  ```
+
+  **It is not a route to a desktop notification**, and should not be offered as
+  one. A udev rule runs as root in `systemd-udevd`, outside the session, with no
+  bus to post a notification on. What it is for is system-level policy and
+  race-free value delivery. A notification needs a session-side watcher, which
+  is the `sysfs_notify` + `poll()` path — measured working, and needing no root,
+  no rule and no packaging.
+
 - **A typed WMBC read**, `gigabyte_laptop_get_devstate_typed()`, mirroring the
   typed setter, and `debug_method` now prints whether the reply was an integer.
   This retires the two-sentinel dance: a BUFFER reply *is* the
@@ -1302,19 +1318,37 @@ does not populate it for this object. It was used as the success criterion at
 first and was simply the wrong test; `GetMaxBrightness` returning the real
 ceiling instead of `0` is what proves discovery.
 
-**One link still unverified: the hardware-changed direction.**
-`brightness_hw_changed` reads `ENODATA` until the notifier has fired once, which
-is its documented initial state and not a fault. Confirming it needs Fn+Space
-pressed *after* a module load, then:
+**The hardware-changed direction is confirmed too.** After pressing Fn+Space,
+`brightness_hw_changed` reads `1` instead of `ENODATA`, so the `0xF6` event does
+reach `led_classdev_notify_brightness_hw_changed()`. Both directions work.
 
-```sh
-cat /sys/class/leds/gigabyte_laptop::kbd_backlight/brightness_hw_changed
-```
+(`busctl --system monitor` needs root — `BecomeMonitor` is privileged — so use
+`sudo` if watching upower's signals.)
 
-A number rather than `ENODATA` proves the `0xF6` event reached
-`led_classdev_notify_brightness_hw_changed()`, and therefore that KDE's slider
-tracks the key. Until that is seen, treat the write direction as proven and the
-read-back-on-key-press as designed-but-untested.
+### What the keyboard backlight work actually bought, honestly
+
+**Fn+Space already toggled the backlight before any of this**, entirely inside
+the EC, and that was recorded from the first day. So this did not make the
+keyboard light up; it was never broken. What it adds, in descending order of
+real value:
+
+- **Software control at all.** Before, the only way to change it was the
+  physical key. Now it is scriptable and automatable — "backlight off on
+  battery" becomes a rule rather than a habit.
+- **The state is readable.** Nothing could previously tell whether it was on.
+- **The desktop's own control works**, and tracks the key.
+- **Save/restore across reboots**, free from systemd's `leds` rule.
+
+**And what it does not buy: more levels.** It is a two-level backlight, so the
+"slider" is a toggle. For a user who is happy pressing Fn+Space, the practical
+gain is small, and it would be dishonest to present this as a feature that
+unlocked something. It is a correct, standard ABI over a control that already
+worked by hand — worth having for automation and for upstreaming, not a
+transformation.
+
+The genuinely interesting by-product is the `0xF6` event discovery: it proved
+`KBLL` is live EC-maintained state, which is what made `max_brightness`
+measurable without a single speculative write.
 
 ### Step 6 leads, in order of cost
 
