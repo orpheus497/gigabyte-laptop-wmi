@@ -87,6 +87,39 @@ attribute and show the new preset. The kernel log also names it:
 gigabyte_laptop: Mode key: fan preset gaming
 ```
 
+### Desktop notifications for the Mode key
+
+`tools/gigabyte-fan-preset-notify` puts a toast on screen when the key changes
+the preset. It is a small C program — about 150 lines with comments — that
+`poll()`s the `fan_preset` attribute and runs `notify-send`.
+
+```sh
+cd tools && make && sudo make install
+systemctl --user enable --now gigabyte-fan-preset-notify.path
+```
+
+**Enable the `.path` unit, not the service.** The path unit starts the watcher
+when the driver's attribute appears, and starts it again after a module reload —
+the service alone would exit when the driver went away and never come back.
+
+It needs no privileges, allocates nothing, and uses 1.3 MB of memory sitting
+blocked in `poll()` at zero CPU.
+
+Two things about it are worth knowing, because both are easy to get wrong:
+
+- **The attribute has to be read once before `poll()` will block.** Until the
+  event counter is consumed, `poll()` returns immediately and a loop around it
+  spins at 100% CPU. The first read also gives the current preset, which is
+  recorded rather than announced, since it is state and not a change.
+- **The uevent is not the route to a notification.** The driver emits one for
+  the same change, but a udev rule runs as root in `systemd-udevd`, outside the
+  session, with no bus to post on. A notification has to come from something
+  running in the session, which is what this is.
+
+It reacts to the **key** only. Writing `fan_preset` or `fan_mode` from a script
+does not raise the notification, because the driver does not notify on a write —
+the caller of a write already knows what it did.
+
 ## Custom fan speed
 
 Aero/AORUS laptops support setting a custom fan speed. However, this only takes effect if either auto or fixed mode is enabled.
@@ -130,6 +163,50 @@ Aero/AORUS laptops support a charging limit. Charging mode must be set to custom
 ```text
 echo '80' | sudo tee /sys/devices/platform/gigabyte_laptop/charge_limit
 ```
+
+## Charge threshold (the standard ABI)
+
+The charge ceiling is also exposed where the rest of Linux looks for it:
+
+```text
+/sys/class/power_supply/BAT*/charge_control_end_threshold
+```
+
+That is the standard attribute `upower` reads and TLP writes, so a desktop or
+power-management tool that understands charge limits will find it without
+knowing anything about this driver.
+
+```sh
+# Stop charging at 80 %
+echo 80  | sudo tee /sys/class/power_supply/BAT1/charge_control_end_threshold
+# No limit
+echo 100 | sudo tee /sys/class/power_supply/BAT1/charge_control_end_threshold
+```
+
+The firmware has **two** fields where the ABI has one number — a ceiling byte
+and a separate enable bit — so the mapping is fixed and worth knowing:
+
+| Written | Effect |
+|---|---|
+| `1`–`99` | sets the ceiling, then enables the mode |
+| `100` or `0` | sets the ceiling to 100, then disables the mode |
+| above `100` | rejected, nothing written |
+
+Reads return `100` whenever no ceiling is in force, including when the mode is
+off but the firmware still remembers a previous ceiling. Reporting a remembered
+but inactive limit would be the one answer that actively misleads.
+
+Writes always set the ceiling **before** the enable bit, because enabling the
+mode latches whatever the ceiling byte already holds. That order also means a
+partial failure is harmless: a ceiling with the mode off enforces nothing, and
+an enable that lands on 100 enforces nothing either.
+
+Unlike `charge_limit`, this node is not restricted to 60–100. That floor has no
+basis in the firmware, and here the ABI defines the range instead.
+
+**It coexists with `charge_mode` and `charge_limit`**, which remain the raw
+view of the two fields and are what upstream exposes. All three share a lock, so
+they cannot interleave, and each updates the state the others report.
 
 ## Fan curve data (added in version 0.1.0)
 
@@ -187,6 +264,56 @@ Aero/AORUS laptops support USB power output when they are asleep (S3) or in hibe
 ```text
 /sys/devices/platform/gigabyte_laptop/usb_charge_s3_toggle
 /sys/devices/platform/gigabyte_laptop/usb_charge_s4_toggle
+```
+
+## Keyboard backlight
+
+Exposed as an **LED class device**, not as a node under the platform directory:
+
+```text
+/sys/class/leds/gigabyte_laptop::kbd_backlight/brightness
+/sys/class/leds/gigabyte_laptop::kbd_backlight/max_brightness
+```
+
+That name is what the desktop already watches. `upower` matches on subsystem
+`leds` with a name containing `kbd_backlight`, exports it on
+`org.freedesktop.UPower.KbdBacklight`, and KDE's keyboard-brightness slider
+reads it from there — so the slider works with nothing else installed. systemd's
+`99-systemd.rules` matches the same name and gives save/restore across reboots
+for free.
+
+**`max_brightness` is 1 — the backlight has two levels, off and on.** That was
+measured, not assumed: the firmware's `KBLL` field is eight bits wide with no
+clamp anywhere, but the embedded controller publishes its own level as a WMI
+event, and across repeated Fn+Space presses it only ever reports 0 or 1.
+
+```sh
+# Off, then on
+echo 0 | sudo tee /sys/class/leds/gigabyte_laptop::kbd_backlight/brightness
+echo 1 | sudo tee /sys/class/leds/gigabyte_laptop::kbd_backlight/brightness
+```
+
+**Fn+Space keeps working, and the driver follows it.** The key is handled inside
+the embedded controller, so the level can change without the driver writing it.
+Two things keep the two in step: reads go to the hardware rather than to a cached
+value, and the `0xF6` event the controller sends is forwarded to the LED core, so
+`brightness_hw_changed` fires and the desktop's slider tracks the key.
+
+The node appears only if the firmware implements method `0xF6`; on models that do
+not, the driver logs `Keyboard backlight unsupported by this firmware` and the
+LED is absent rather than present and inert.
+
+If the slider does not appear after loading the module mid-session, restart
+`upower` — it coldplugs LEDs at startup. From the next boot the ordering is
+right by construction.
+
+To check that `upower` has picked it up, call the interface rather than reading
+`NativePath`, which `upower` leaves empty for this object:
+
+```sh
+busctl --system call org.freedesktop.UPower /org/freedesktop/UPower/KbdBacklight \
+    org.freedesktop.UPower.KbdBacklight GetMaxBrightness
+# i 1   <- found it; 0 means it did not
 ```
 
 ## Power on time (added in version 0.2.0)

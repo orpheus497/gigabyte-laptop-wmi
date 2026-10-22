@@ -243,6 +243,22 @@ argument that was sent. Two consequences:
   with `0x5A`, and if `0x5A` comes back the ID is not implemented. The node says
   so itself when the result matches the argument. Step 2 was done on that basis
   and its results are trustworthy; see "Step 2 validation".
+
+  **Parsing that node: match `[implemented]` with its brackets.** The format is
+
+  ```c
+  "method 0x%02x arg 0x%x -> 0x%x (%d) [%s]%s\n"   // %s = "implemented" or
+                                                   // "not implemented: reply
+                                                   //  was not an integer"
+  ```
+
+  so the *negative* string contains the word `implemented` as a substring. A
+  `grep implemented` or a `*implemented*` glob therefore passes both cases and
+  silently accepts an absent method. Only `[implemented]` — brackets included —
+  distinguishes them. Caught in `scripts/test-charge-limit.sh`, which parsed the
+  decimal out of the reply without checking the marker at all, so an absent
+  `0x64`/`0x65` would have echoed the sentinel, parsed as a plausible `90`, run
+  the whole ceiling test against a field nothing reads, and then "restored" 90.
 - **It is also why the module loaded before Step 1 hardened the probe.** `0xFC`
   (`LIGHT_SENSOR_NEW`) is absent from AMD firmware, and the probe then did
   `if (ret) return ret` after that read, with init treating probe failure as
@@ -362,11 +378,23 @@ its own resync than the forced write this note anticipated.
 ### Method IDs we are not using yet
 
 Worth knowing these exist on AMD firmware, all verified in both directions
-unless noted:
+unless noted.
+
+**`EC0.<field>` in this table means the ACPI scope, not the bus.** Most of these
+fields live in `OperationRegion (PECM, SystemMemory, 0xFC7E0800, 0x1000)`, which
+is a memory-mapped window, *not* the `ERAM` `EmbeddedControl` region. Two
+consequences, both already bitten once:
+
+- **`ec_read()` cannot reach them.** That is the distinction that killed
+  `temp3_input`, and it applies here too: WMI is the only route.
+- **A WMBD case that writes a field and returns it reads back the byte it just
+  wrote.** It proves the ACPI store landed. It proves nothing about whether the
+  embedded controller read it, accepted it, or acted on it. Only observed
+  behaviour does that.
 
 | ID | EC field | What it is |
 |---|---|---|
-| `0xF6` | `EC0.KBLL` (8-bit) | **Keyboard backlight brightness**, read *and* write |
+| `0xF6` | `KBLL` (8-bit, **`PECM`**) | **Keyboard backlight brightness**, read *and* write. Verified: `Case (0xF6)` exists in both WMBD (9286) and WMBC (9691). |
 | `0xD9` | `EC0.KBAT` (1-bit) | Keyboard backlight auto/timeout |
 | `0xC9` | — | Fn-lock |
 | `0xC7` | `EC0.MUTE` | Mute status |
@@ -549,6 +577,26 @@ Two consequences to keep in mind:
 `/usr/src` tree, autoload entry and stale `.ko` files — before installing, so a
 machine does not end up carrying both.
 
+### A `.gitignore` entry does not untrack a file that is already tracked
+
+`tools/gigabyte-fan-preset-notify` — a 13 KB unstripped ELF — was committed in
+`7f0f8d5`, the same commit that added `tools/.gitignore` listing it on line 1.
+Ignore rules are only consulted for *untracked* paths, so a binary that was
+already staged sails straight past the rule meant to stop it. It stayed
+invisible because `git status` is quiet about tracked files and the build
+rewrites it in place; `make clean` is what exposed it, as a deletion.
+
+Untracked with `git rm --cached` (the blob stays in history, which is not worth
+a rewrite for 13 KB on a pushed branch). The check, for any generated file:
+
+```sh
+git ls-files tools/          # a build artifact here is a mistake
+```
+
+CodeRabbit listed it among the files it reviewed, which is the other tell — a
+review that reports a compiled binary as a reviewed file is reporting a repo
+defect, not a review.
+
 ### Branches
 
 | Branch | Purpose |
@@ -596,9 +644,16 @@ To get another review later, reopen that PR or raise a fresh one from `a16-5th`
 — to a scratch branch, not `master`. Two things to expect, both learned the hard
 way:
 
-- **Reviews are manual-trigger on this fork** ("fewer than 10 stars"), via the
-  🔍 Trigger review checkbox or an `@coderabbitai review` comment. Pushes do not
-  auto-review.
+- **Reviews are manual-trigger on this fork, for two independent reasons**, so
+  expect to ask for every one:
+  - *"fewer than 10 stars"* — the free tier does not auto-review small repos.
+  - *"Auto reviews are disabled on base/target branches other than the default
+    branch"* — the fork's default branch is `master`, so **any PR based on
+    `a16-5th` is skipped**, which is every feature-to-integration PR by design.
+    Seen on PR #2 (`a16-5th <- a16-5th-kbd-charge-uevent`).
+
+  Either way: the 🔍 Trigger review checkbox or an `@coderabbitai review`
+  comment. Pushes do not auto-review.
 - **The free tier rate-limits to one review per ~45 minutes**, and a run that
   hits the limit stops partway, leaving some findings unmarked. Spend a review on
   a batch of real work, not a docs-only push.
@@ -713,6 +768,47 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   depending on it, so `dnf autoremove` will try to take it. Losing
   `/var/lib/dkms/mok.key` means re-enrolling a MOK key and a reboot into the
   MOK manager.
+- **The MOK *enrolment* can be lost while the key files survive, and it has
+  been.** After a reboot on 22 Oct 2026 the module stopped loading:
+
+  ```
+  systemd-modules-load[903]: Failed to insert module 'gigabyte_laptop':
+                             Key was rejected by service
+  ```
+
+  `EKEYREJECTED`. Everything looked fine from the DKMS side — `dkms status`
+  said installed, `/lib/modules/$(uname -r)/extra/gigabyte-laptop.ko.xz`
+  existed, `modinfo -F signer` said `DKMS module signing key`, and both
+  `/var/lib/dkms/mok.key` and `mok.pub` were intact. The failure was one level
+  down:
+
+  ```
+  $ mokutil --list-enrolled | grep -c '^\[key'      -> 1
+  $ mokutil --list-enrolled | grep Subject          -> only CN=fedoraca
+  $ mokutil --list-new                              -> empty
+  $ openssl x509 -in /var/lib/dkms/mok.pub -noout -subject
+                                                    -> CN=DKMS module signing key
+  ```
+
+  So the key on disk is no longer in the firmware's enrolled list, and nothing
+  is pending. The cause was not determined — a firmware update, a Secure Boot
+  key reset or a trip through the MOK manager would all do it, and none can be
+  distinguished after the fact.
+
+  **Diagnose in this order**, because every earlier step looks healthy:
+  `dkms status` → the `.ko` exists → `modinfo -F signer` → **`mokutil
+  --list-enrolled`**. Only the last one shows it. A "Key was rejected by
+  service" in `journalctl -b -u systemd-modules-load` is the symptom to match.
+
+  **Recovery** keeps the existing key, since the files are intact:
+
+  ```sh
+  sudo mokutil --import /var/lib/dkms/mok.pub   # sets a one-time password
+  sudo reboot                                    # then: Enroll MOK -> Continue
+  ```
+
+  Nothing in the repo or the driver causes or fixes this; it is machine state.
+
 - Manual signing fallback: `/usr/src/kernels/$(uname -r)/scripts/sign-file`
   with the same key pair.
 
@@ -864,6 +960,14 @@ the time, **19** since `fan_preset` was added. The platform device directory
 listed 25 entries, the other seven being device-core
 (`driver`, `driver_override`, `hwmon`, `modalias`, `power`, `subsystem`,
 `uevent`). With 1b done, nothing blocks Step 2.
+
+Those counts are the Step 1b snapshot. The figure now, verified on the installed
+build, is **20** driver attributes (`debug_method_write` joined them) out of
+**30** directory entries, the other ten being device-core — the three additions
+being `input`, `leds` and `platform-profile`, one per interface Steps 3 and 5
+and the keyboard backlight registered. Re-count with
+`ls /sys/devices/platform/gigabyte_laptop` rather than trusting this number,
+since it goes stale every time a node lands.
 
 The load log is itself free reconnaissance, because Step 1 made every optional
 read report itself. On this machine it printed only `Skipping silent fan mode ID
@@ -1052,13 +1156,30 @@ also self-tests without any keypress, since reading method `0x03` fires
 `echo 0x03 > debug_method && cat debug_method` (as root — the node is `0600`,
 since a read evaluates a firmware method).
 
-**`wmi_install_notify_handler()` does not exist on this kernel.** It was
-removed, and the only route is a `struct wmi_driver` with a `.notify` callback
-bound to the event GUID by its `id_table`. That is why the module now registers
-a second, event-only `wmi_driver` ("gigabyte-laptop-events") alongside the platform
-driver. `.notify` is itself deprecated in favour of `.notify_new` taking a
-`struct wmi_buffer`; `min_event_size` is set to 0 so events carrying no data are
-still delivered.
+~~**`wmi_install_notify_handler()` does not exist on this kernel.**~~
+**Wrong — it does exist**, and this was corrected after checking:
+
+```
+include/linux/acpi.h:429: extern acpi_status wmi_install_notify_handler(
+                              const char *guid, wmi_notify_handler handler, void *data);
+```
+
+plus an entry in `Module.symvers`, so it is exported and callable. The original
+note claimed it had been removed and that a `struct wmi_driver` was therefore
+the *only* route. The conclusion happened to be right and the reason was not —
+believing a constraint that is not there is how a design gets locked in for no
+reason, so check before recording one.
+
+**The `wmi_driver` route is still correct, on its own merits.** A driver bound
+to the GUID through `id_table` is the modern idiom, it is what makes
+`/sys/bus/wmi/devices/ABBC0F72-…/driver` point at us — which is the check that
+made the absence of `GBT0005` notifies a real negative rather than a lost race
+— and it does not fight `eeepc_wmi` for the same GUID by a different mechanism.
+So the module registers a second, event-only `wmi_driver`
+("gigabyte-laptop-events") alongside the platform driver, deliberately rather
+than by necessity. `.notify` is itself deprecated in favour of `.notify_new`
+taking a `struct wmi_buffer`; `min_event_size` is set to 0 so events carrying no
+data are still delivered.
 
 **This makes the `eeepc_wmi` blacklist matter more.** Two drivers matching one
 GUID means whichever binds first wins the device. `eeepc_wmi` currently probes
@@ -1085,6 +1206,425 @@ hard-wired to USB `0414:8105` interface 2, so **none of them work here** —
 GigaMate's README explicitly carves out "laptops without a Gigabyte USB
 keyboard (e.g. GIGABYTE GAMING A16)". No project anywhere handles this key on a
 PS/2 Gigabyte keyboard.
+
+### Branch `a16-5th-kbd-charge-uevent` — what is landed and what is blocked
+
+Three items, investigated before any code was written because two of them had a
+real unknown at the centre. Everything below was verified against this machine's
+own DSDT and this kernel's headers, not inferred from field names.
+
+**Landed, because it needs no hardware measurement:**
+
+- **A uevent on the Mode key.** `kobject_uevent_env(KOBJ_CHANGE)` carrying
+  `GIGABYTE_FAN_PRESET=<name>`, emitted from
+  `gigabyte_laptop_cycle_fan_preset()` *after* `fan_lock` is released — it
+  allocates `GFP_KERNEL` and can enter reclaim, so it must not extend the hold.
+  The value travels with the event rather than being re-read, because three
+  quick presses can otherwise leave a slow consumer seeing one event and the
+  final value with the intermediate presets never observed. `sysfs_notify()`
+  stays for `poll()` consumers; this is additional, not a replacement.
+
+  Emitted from that one site only. A sysfs write to `fan_preset` or `fan_mode`
+  is a change its writer already knows about, and both hold `fan_lock` across
+  their whole body. A key press is the change userspace has no other way to see.
+
+  Test it by **pressing the key**, not with `echo change > uevent`: a synthetic
+  uevent prefixes extra variables with `SYNTH_ARG_`, so a rule matching the bare
+  name will not fire. `udevadm monitor --property --kernel` works unprivileged.
+
+  **Verified 22 Oct 2026.** Four presses produced four events, one per preset,
+  each carrying the right value:
+
+  ```
+  ACTION=change  DEVPATH=/devices/platform/gigabyte_laptop  SUBSYSTEM=platform
+  GIGABYTE_FAN_PRESET=silent   then normal, gaming, auto
+  DRIVER=gigabyte_laptop  MODALIAS=platform:gigabyte_laptop
+  ```
+
+  **It is not a route to a desktop notification**, and should not be offered as
+  one. A udev rule runs as root in `systemd-udevd`, outside the session, with no
+  bus to post a notification on. What it is for is system-level policy and
+  race-free value delivery. A notification needs a session-side watcher, which
+  is the `sysfs_notify` + `poll()` path — measured working, and needing no root,
+  no rule and no packaging.
+
+- **A typed WMBC read**, `gigabyte_laptop_get_devstate_typed()`, mirroring the
+  typed setter, and `debug_method` now prints whether the reply was an integer.
+  This retires the two-sentinel dance: a BUFFER reply *is* the
+  `Default { Return (Arg2) }` echo, so one read settles whether an ID is
+  implemented, where a sentinel can collide with a real value. Validate it
+  against `0xED` (expect not-implemented) and `0xE7` (expect implemented).
+
+**Blocked on hardware measurement, deliberately not written:**
+
+- ~~**`0xF6` / `KBLL` as an LED class device.**~~ **Landed**, once the EC
+  answered the range question itself — see the measurements below.
+  `max_brightness` is **1**, `LED_BRIGHT_HW_CHANGED` is set and wired from the
+  real `0xF6` event, and `gigabyte_laptop_method_implemented()` landed with it
+  as the runtime capability gate. Original reasoning kept below, since the
+  evidence for the LED route rather than a sysfs node is unchanged.
+
+  The target is
+  `gigabyte_laptop::kbd_backlight`, which is the one missing link in a chain
+  that is otherwise already running here: the systemd rule
+  `SUBSYSTEM=="leds", KERNEL=="*kbd_backlight*"` exists at
+  `99-systemd.rules:74`, `CONFIG_LEDS_CLASS=y` so it adds no module dependency,
+  `devm_led_classdev_register()` exists at `leds.h:280`, nothing in
+  `/sys/class/leds/` collides, and upower already exports a `KbdBacklight`
+  interface with an empty `NativePath`. `brightness_set_blocking` is mandatory,
+  not a preference — `leds.h` says *"Must not sleep. Use
+  brightness_set_blocking for drivers that can sleep"*, and the write path
+  evaluates AML.
+
+  **What blocks it: `max_brightness`.** `KBLL` is 8 bits, and the firmware has
+  no clamp, mask, comparison or table anywhere near it — only four references in
+  the whole DSDT, none of them a read. So 0–3, 0–100 and 0–255 are all
+  consistent with the AML, and `max_brightness` is fixed at registration, read
+  by desktops and baked into saved slider state. Registering the LED is also
+  what invites *automatic* writes from Powerdevil's dim-on-idle, which is the
+  same exposure that kept `pwm1`/`pwm2` read-only. On a vendor whose EC treats
+  over-range input as a different command (`FAN_DUTY_MAX`: duties above 229
+  *stop* the fans), a guessed ceiling is not acceptable. **Measure first.**
+
+  `gigabyte_laptop_method_implemented()` is written and deliberately *not*
+  committed, because its only consumer is the capability gate this blocks and
+  the build must stay clean under `W=1`. It lands with the LED code.
+
+- **`charge_mode` / `charge_limit`.** No new feature code: the handlers exist
+  and are write/read symmetric (`mode << 2` out, `output >> 2` back), so the
+  work is a hardware test. Firmware verified: `0x64` → `BCPS`, **4 bits** at
+  `PECM` 0x10; `0x65` → `BCPC`, 8 bits at 0x05; both present in WMBD and WMBC,
+  no clamp in any of the four case bodies.
+
+  Four defects found, none urgent, all waiting on the test outcome because the
+  test needs no code change: both `show` handlers return the cached value
+  although WMBC implements both reads, so the nodes cannot confirm a write
+  landed; both store handlers discard the post-write readback; the comment
+  claiming "only bit 2" understates that `BCPS = Arg2` zeroes bits 0, 1 and 3 on
+  every write; and `probe`'s `else if (output)` cannot tell a genuine 0 from an
+  unread field.
+
+  **Keep the `mode > 1` and `60 <= limit <= 100` checks.** They have no firmware
+  basis — there is no clamp — but they are what keeps every written value inside
+  its field width given a four-byte argument buffer and a four-bit destination.
+  Load-bearing for a reason their author did not state.
+
+### Hardware measurements, 22 Oct 2026 — results and what they settle
+
+Run against the installed module with the debug nodes, no rebuild. Separated
+into what is established and what is not, because one of the two tests did not
+measure what it was meant to.
+
+#### `0xF6` / `KBLL`: the EC publishes its own level, and it looks binary
+
+**The zero-write test paid off.** Pressing Fn+Space produces WMI events:
+
+```
+gigabyte_laptop: Unrecognised WMI event 0xf6 (state 0x00)
+gigabyte_laptop: Unrecognised WMI event 0xf6 (state 0x01)
+gigabyte_laptop: Unrecognised WMI event 0xf6 (state 0x00)
+   ... alternating, with the backlight toggling on and off per press
+```
+
+Two findings, one solid and one strongly indicated:
+
+- **`KBLL` is live state the EC maintains and publishes**, not a write-only
+  command byte. That is the behaviour the Intel siblings implement explicitly
+  as `_Q94 { SMGR (0xF6, KBLL) }`; the 5TH has no `_Q94` and delivers it through
+  the generic `_Q45 { SMGR (WEVN, WEVS) }` path instead, which is why it arrives
+  as an ordinary event the driver already logs.
+- **The backlight appears to have exactly two levels.** The state byte alternates
+  `0x00`/`0x01` in step with the light going off and on. If that holds,
+  `max_brightness` is **1** — not 3, not 100, not 255 — and the whole "probe
+  upward for the ceiling" exercise is unnecessary, because the EC answered it.
+
+**Why `state` is probably the level and not a key make/break.** The obvious
+alternative reading is that `0x00`/`0x01` is press-and-release. It is not,
+because GiMate behaves differently on the same event path: five presses gave
+five events, all with `state` `0x00` (`ce 00 bb cc` ×5). A make/break
+interpretation would have to alternate there too. **Still worth one correlated
+press to confirm** — see below — because the whole `max_brightness` decision
+rests on it.
+
+**Consequence if confirmed: the design gets better, not just unblocked.** A
+two-level backlight is a plain on/off LED, and the `0xF6` event makes
+`LED_BRIGHT_HW_CHANGED` honestly wireable from
+`gigabyte_laptop_wmi_notify()` — Fn+Space would update the desktop's slider
+instead of leaving it stale. The earlier plan ruled that flag out precisely
+because no such event was known to exist.
+
+**Not yet established: whether writing works.** `0xF6 0` through `0xF6 4` were
+written and accepted, but the effect on the keyboard was not recorded, so the
+write direction is still unmeasured. Nothing should be built on the assumption
+that it works.
+
+#### Charging: factory defaults recorded, ceiling test inconclusive
+
+**The values worth keeping.** Both IDs are implemented — neither echoed the
+`0x5A` sentinel:
+
+```
+method 0x64 arg 0x5a -> 0x0  (0)     BCPS = 0    charge mode off
+method 0x65 arg 0x5a -> 0x64 (100)   BCPC = 100  no limit
+```
+
+Those are this unit's factory defaults and there is no AML path that restores
+them, so they are recorded here as the durable copy.
+
+**The ceiling test did not test the ceiling.** `charge_limit 80` and
+`charge_mode 1` were accepted, but the battery was at **89 %** — already above
+the ceiling — so "charging stops at 80 %" was not observable. `upower` showed
+`charging` at 89 %, which is consistent both with the EC ignoring `BCPC` *and*
+with a working implementation that only gates the transition upward. It
+distinguishes nothing. The restore ran, and the nodes read 0 and 100 again.
+
+**Re-run it from below the ceiling**, which is the condition the test needed in
+the first place. `scripts/test-charge-limit.sh` does it properly:
+
+```sh
+sudo bash scripts/test-charge-limit.sh        # or pass a ceiling, default 80
+```
+
+It is a script and not a list of commands for a concrete reason: the
+observation *is* a wait. Two earlier attempts failed on exactly that — the
+first started above the ceiling, and the second was a pasted block whose
+"watch it climb" step was a comment, so the restore ran a second after the
+write and nothing was observed. A sequence a human has to time by hand is the
+wrong shape for this test.
+
+The script refuses to run unless AC is online and the battery is at least two
+points below the ceiling, records the raw `BCPS`/`BCPC` first, writes the limit
+*before* the mode (enabling the mode latches whatever `BCPC` already holds),
+polls every 30 s, and restores on every exit path including Ctrl-C via a trap —
+`set -e` is deliberately **not** used, because an abort must still reach the
+restore. It decides for itself:
+
+| Outcome | Meaning |
+|---|---|
+| `HONOURED` | charging stopped within a point of the ceiling — the EC consumes `BCPC` |
+| `IGNORED` | still charging four points past it — the EC accepts the field and does nothing with it, like GPU TGP |
+| `ABORTED` | charger unplugged mid-run |
+| `INCONCLUSIVE` | an hour elapsed without either |
+
+A `HONOURED` verdict is what makes the four handler defects worth patching. An
+`IGNORED` one means charge limiting is firmware-blocked on this unit and the
+honest thing is to record that and leave the nodes alone.
+
+### Charge limiting WORKS — verdict `HONOURED`, 22 Oct 2026
+
+From 59 % on AC with an 80 % ceiling, the battery climbed steadily at roughly a
+point a minute and then **stopped dead at 80 %**:
+
+```
+  1021s   79%  Charging
+  1051s   80%  Charging
+  1081s   80%  Charging
+  1111s   80%  Charging
+  1141s   80%  Charging
+  1171s   80%  Charging     <- flat for two minutes
+```
+
+Restoring the limit to 100 resumed charging immediately. So **the EC consumes
+`BCPC`** and custom charging mode is a real, working feature on this unit —
+unlike GPU TGP, this one is not firmware-blocked.
+
+**The confirming evidence came from the desktop, not the script.** KDE's power
+tray stopped showing "Time To Full" when the battery reached 80 %, and the
+estimate reappeared the moment the test restored the ceiling. upower had
+concluded the battery was no longer charging toward full, which is a cleaner
+signal than anything the script was looking at.
+
+**And the script's verdict logic was wrong, which is why it printed nothing.**
+It required `status != Charging`, but this EC **keeps reporting `Charging`**
+while holding the charge. What actually changes is the current: about **3.4 A**
+while charging, near zero when held. Fixed to test the current, with a fallback
+that assumes nothing about either field — capacity simply not rising for four
+consecutive samples while at the ceiling. The lesson generalises: on this
+hardware `status` is not a reliable indicator of whether charge is flowing.
+
+**The handler defects are now patched**, since the feature is real:
+
+- Both `show` handlers read the firmware instead of reporting a cache. WMBC
+  implements `0x64` and `0x65`, so there was never a reason to report a
+  remembered value that cannot confirm a write landed. They fall back to the
+  cache on a failed read rather than claiming zero.
+- `probe` tested `else if (output)` rather than the return code, so a genuine
+  `BCPS` of 0 — the factory state here — left the cache at whatever it was
+  initialised with.
+- Both the probe decode and `charge_mode_show` now mask bit 2 (`(output >> 2) &
+  1`) instead of shifting the whole nibble, so a stray bit 3 cannot read back as
+  mode 2 or 3 from a node that only accepts 0 and 1.
+- The write-side comment now says what the code does: `BCPS = Arg2` assigns all
+  four bits, so bits 0, 1 and 3 are zeroed on every write. Harmless here, where
+  `BCPS` reads 0 and nothing is known to use them, but it is a blind write and
+  should become a read-modify-write if any of them ever turns out to matter.
+
+The `60 <= limit <= 100` and `mode > 1` range checks stay. Still no firmware
+basis — there is no clamp — but they keep every written value inside its field
+width, which matters more now that the field is known to be live.
+
+### Keyboard backlight: verified end to end, 22 Oct 2026
+
+Installed through DKMS, signed, `installed == loaded`. The node appears with the
+measured ceiling and a brightness seeded from hardware:
+
+```
+/sys/class/leds/gigabyte_laptop::kbd_backlight/
+  brightness=1  max_brightness=1  brightness_hw_changed present
+```
+
+No `Keyboard backlight unsupported by this firmware` in the load log, so the
+runtime capability gate passed. Writes through the LED node take effect.
+
+**`upower` picked it up, and the whole desktop path works.** Round trip over the
+same D-Bus call KDE's slider makes, with no polkit prompt:
+
+```
+GetMaxBrightness                -> i 1
+SetBrightness(0) -> sysfs brightness 0   (keyboard off)
+SetBrightness(1) -> sysfs brightness 1   (keyboard on)
+```
+
+**Check `GetMaxBrightness`, not `NativePath`.** `NativePath` reads `""` even
+when it is working — `upower` 1.91.5 exposes the property on the interface but
+does not populate it for this object. It was used as the success criterion at
+first and was simply the wrong test; `GetMaxBrightness` returning the real
+ceiling instead of `0` is what proves discovery.
+
+**The hardware-changed direction is confirmed too.** After pressing Fn+Space,
+`brightness_hw_changed` reads `1` instead of `ENODATA`, so the `0xF6` event does
+reach `led_classdev_notify_brightness_hw_changed()`. Both directions work.
+
+(`busctl --system monitor` needs root — `BecomeMonitor` is privileged — so use
+`sudo` if watching upower's signals.)
+
+### What the keyboard backlight work actually bought, honestly
+
+**Fn+Space already toggled the backlight before any of this**, entirely inside
+the EC, and that was recorded from the first day. So this did not make the
+keyboard light up; it was never broken. What it adds, in descending order of
+real value:
+
+- **Software control at all.** Before, the only way to change it was the
+  physical key. Now it is scriptable and automatable — "backlight off on
+  battery" becomes a rule rather than a habit.
+- **The state is readable.** Nothing could previously tell whether it was on.
+- **The desktop's own control works**, and tracks the key.
+- **Save/restore across reboots**, free from systemd's `leds` rule.
+
+**And what it does not buy: more levels.** It is a two-level backlight, so the
+"slider" is a toggle. For a user who is happy pressing Fn+Space, the practical
+gain is small, and it would be dishonest to present this as a feature that
+unlocked something. It is a correct, standard ABI over a control that already
+worked by hand — worth having for automation and for upstreaming, not a
+transformation.
+
+The genuinely interesting by-product is the `0xF6` event discovery: it proved
+`KBLL` is live EC-maintained state, which is what made `max_brightness`
+measurable without a single speculative write.
+
+### Mode key notifications: working, 22 Oct 2026
+
+`tools/gigabyte-fan-preset-notify`, enabled as a systemd **user** service, puts
+a toast on screen for each Mode press. Confirmed on hardware — the
+notifications appear when the preset changes.
+
+```
+systemctl --user is-enabled   -> enabled
+systemctl --user is-active    -> active
+CPU ticks since start         -> 1      (total, across 23 presses this boot)
+memory                        -> 268 KB cgroup / 1.6 MB RSS
+```
+
+One CPU tick for a session's worth of notifications, because the process is
+blocked in `poll()` the whole time and only wakes to fork `notify-send`.
+
+**C, not Python, and the reasoning is worth keeping.** Python was the first
+suggestion and was habit rather than a decision: a resident interpreter costs
+~20 MB to sit in a `poll()` loop that fires a few times a day. `poll()` is a
+syscall and every other language wraps it; this repo is already C with a
+Makefile, so C added no toolchain, no language and no dependency. Lua would have
+been worse than either — `poll()` is not in its standard library, so it would
+have meant adding `luaposix` to avoid writing forty lines.
+
+**Memory safety by construction, not by care**, which is the part to preserve if
+anyone edits it: no `malloc` anywhere, fixed buffers, `read()` bounded by
+`sizeof(buf) - 1`, `execlp` rather than `system()` so there is no shell, and the
+value read from sysfs only ever selects an *index* into a compile-time table. No
+kernel-supplied string reaches the exec, so there is nothing to quote, escape or
+truncate.
+
+**Two traps, both verified rather than assumed:**
+
+- **The attribute must be read once before `poll()` will block.** Until the
+  event counter is consumed, `poll()` returns immediately and a loop around it
+  spins at 100 % CPU. That first read is also current state rather than a
+  change, so it is recorded and not announced.
+- **`POLLERR` accompanies every `POLLPRI`** on a sysfs attribute and is not an
+  error on its own. A failed *read* is, and means the driver has gone: the
+  program exits non-zero so the service manager decides, rather than looping on
+  a dead fd. Tested against a missing attribute.
+
+It reacts to the **key only**, because the driver calls `sysfs_notify()` only
+from the key path. A sysfs write to `fan_preset` or `fan_mode` raises nothing,
+which is correct: the caller of a write already knows what it did.
+
+### `charge_control_end_threshold`: verified end to end, 22 Oct 2026
+
+The standard ABI now exists and the whole chain works.
+
+```
+/sys/class/power_supply/BAT1/charge_control_end_threshold
+  exists, mode 644                       <- property_is_writeable did its job
+  reads 100 with no ceiling in force
+  echo 80  -> reads 80, driver charge_mode reads 1   (both views agree)
+  echo 100 -> back off
+```
+
+**udev imports upower's hwdb entry now**, which it could not before because the
+attribute was absent:
+
+```
+E: POWER_SUPPLY_CHARGE_CONTROL_END_THRESHOLD=100
+E: CHARGE_LIMIT=75,80
+```
+
+**And upower exposes the whole interface**, which is the part that matters:
+
+```
+.ChargeThresholdSupported          b       true
+.ChargeThresholdEnabled            b       false
+.ChargeEndThreshold                u       80      <- from the hwdb, not the firmware
+.ChargeStartThreshold              u       75
+.EnableChargeThreshold             method  b
+```
+
+The D-Bus method works, which is the real desktop route:
+
+```
+EnableChargeThreshold(true)  -> sysfs 100 -> 80,  charge_mode 0 -> 1
+EnableChargeThreshold(false) -> sysfs 80 -> 100,  charge_mode 1 -> 0
+```
+
+No polkit prompt from a user shell. Note that `ChargeEndThreshold` 80 and
+`ChargeStartThreshold` 75 are upower's **hwdb-suggested** pair for this DMI
+match, not a reading of the firmware — the firmware has no start threshold at
+all, and upower skips that write when the file is absent.
+
+**A claim I made and had to withdraw.** This was pitched as giving a native
+slider in KDE System Settings, on an investigation's finding that powerdevil's
+`chargethresholdhelper` contained the sysfs literals. **That is false on this
+machine**, checked four ways: nothing in `powerdevil-6.7.5-3` references
+`charge_control_end_threshold` or even `power_supply`, and the helper holds no
+path literals at all, though the binary and both polkit actions do exist. The
+only consumers on this system are `/usr/libexec/upowerd`, the upower udev rule
+and its hwdb.
+
+So the desktop path is real but it runs **through upower's D-Bus interface**,
+not through powerdevil reading sysfs. Whether Plasma 6.7.5 surfaces a slider on
+top of that interface is still not demonstrated here, and should not be claimed
+without checking. What *is* demonstrated: any D-Bus client, `upowerctl`, GNOME,
+and TLP can all drive it.
 
 ### Step 6 leads, in order of cost
 
