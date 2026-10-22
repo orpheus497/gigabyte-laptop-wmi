@@ -87,6 +87,35 @@ attribute and show the new preset. The kernel log also names it:
 gigabyte_laptop: Mode key: fan preset gaming
 ```
 
+### Desktop notifications for the Mode key
+
+`tools/gigabyte-fan-preset-notify` puts a toast on screen when the key changes
+the preset. It is a small C program — about 150 lines with comments — that
+`poll()`s the `fan_preset` attribute and runs `notify-send`.
+
+```sh
+cd tools && make && sudo make install
+systemctl --user enable --now gigabyte-fan-preset-notify
+```
+
+It needs no privileges, allocates nothing, and uses 1.3 MB of memory sitting
+blocked in `poll()` at zero CPU.
+
+Two things about it are worth knowing, because both are easy to get wrong:
+
+- **The attribute has to be read once before `poll()` will block.** Until the
+  event counter is consumed, `poll()` returns immediately and a loop around it
+  spins at 100% CPU. The first read also gives the current preset, which is
+  recorded rather than announced, since it is state and not a change.
+- **The uevent is not the route to a notification.** The driver emits one for
+  the same change, but a udev rule runs as root in `systemd-udevd`, outside the
+  session, with no bus to post on. A notification has to come from something
+  running in the session, which is what this is.
+
+It reacts to the **key** only. Writing `fan_preset` or `fan_mode` from a script
+does not raise the notification, because the driver does not notify on a write —
+the caller of a write already knows what it did.
+
 ## Custom fan speed
 
 Aero/AORUS laptops support setting a custom fan speed. However, this only takes effect if either auto or fixed mode is enabled.
