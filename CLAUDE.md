@@ -1287,8 +1287,36 @@ with a working implementation that only gates the transition upward. It
 distinguishes nothing. The restore ran, and the nodes read 0 and 100 again.
 
 **Re-run it from below the ceiling**, which is the condition the test needed in
-the first place: discharge to roughly 60 %, set the limit to 80, then watch for
-`state` leaving `charging` as it approaches 80 rather than continuing to 100.
+the first place. `scripts/test-charge-limit.sh` does it properly:
+
+```sh
+sudo bash scripts/test-charge-limit.sh        # or pass a ceiling, default 80
+```
+
+It is a script and not a list of commands for a concrete reason: the
+observation *is* a wait. Two earlier attempts failed on exactly that — the
+first started above the ceiling, and the second was a pasted block whose
+"watch it climb" step was a comment, so the restore ran a second after the
+write and nothing was observed. A sequence a human has to time by hand is the
+wrong shape for this test.
+
+The script refuses to run unless AC is online and the battery is at least two
+points below the ceiling, records the raw `BCPS`/`BCPC` first, writes the limit
+*before* the mode (enabling the mode latches whatever `BCPC` already holds),
+polls every 30 s, and restores on every exit path including Ctrl-C via a trap —
+`set -e` is deliberately **not** used, because an abort must still reach the
+restore. It decides for itself:
+
+| Outcome | Meaning |
+|---|---|
+| `HONOURED` | charging stopped within a point of the ceiling — the EC consumes `BCPC` |
+| `IGNORED` | still charging four points past it — the EC accepts the field and does nothing with it, like GPU TGP |
+| `ABORTED` | charger unplugged mid-run |
+| `INCONCLUSIVE` | an hour elapsed without either |
+
+A `HONOURED` verdict is what makes the four handler defects worth patching. An
+`IGNORED` one means charge limiting is firmware-blocked on this unit and the
+honest thing is to record that and leave the nodes alone.
 
 ### Keyboard backlight: verified end to end, 22 Oct 2026
 
