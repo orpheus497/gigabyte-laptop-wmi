@@ -160,6 +160,50 @@ Aero/AORUS laptops support a charging limit. Charging mode must be set to custom
 echo '80' | sudo tee /sys/devices/platform/gigabyte_laptop/charge_limit
 ```
 
+## Charge threshold (the standard ABI)
+
+The charge ceiling is also exposed where the rest of Linux looks for it:
+
+```text
+/sys/class/power_supply/BAT*/charge_control_end_threshold
+```
+
+That is the standard attribute `upower` reads and TLP writes, so a desktop or
+power-management tool that understands charge limits will find it without
+knowing anything about this driver.
+
+```sh
+# Stop charging at 80 %
+echo 80  | sudo tee /sys/class/power_supply/BAT1/charge_control_end_threshold
+# No limit
+echo 100 | sudo tee /sys/class/power_supply/BAT1/charge_control_end_threshold
+```
+
+The firmware has **two** fields where the ABI has one number — a ceiling byte
+and a separate enable bit — so the mapping is fixed and worth knowing:
+
+| Written | Effect |
+|---|---|
+| `1`–`99` | sets the ceiling, then enables the mode |
+| `100` or `0` | sets the ceiling to 100, then disables the mode |
+| above `100` | rejected, nothing written |
+
+Reads return `100` whenever no ceiling is in force, including when the mode is
+off but the firmware still remembers a previous ceiling. Reporting a remembered
+but inactive limit would be the one answer that actively misleads.
+
+Writes always set the ceiling **before** the enable bit, because enabling the
+mode latches whatever the ceiling byte already holds. That order also means a
+partial failure is harmless: a ceiling with the mode off enforces nothing, and
+an enable that lands on 100 enforces nothing either.
+
+Unlike `charge_limit`, this node is not restricted to 60–100. That floor has no
+basis in the firmware, and here the ABI defines the range instead.
+
+**It coexists with `charge_mode` and `charge_limit`**, which remain the raw
+view of the two fields and are what upstream exposes. All three share a lock, so
+they cannot interleave, and each updates the state the others report.
+
 ## Fan curve data (added in version 0.1.0)
 
 Aero/AORUS laptops support setting a custom fan curve. Custom fan mode must be enabled for it to take effect.

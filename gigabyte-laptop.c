@@ -7,6 +7,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <acpi/battery.h>
 #include <linux/acpi.h>
 #include <linux/cleanup.h>
 #include <linux/dmi.h>
@@ -20,6 +21,7 @@
 #include <linux/leds.h>
 #include <linux/platform_device.h>
 #include <linux/platform_profile.h>
+#include <linux/power_supply.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/wmi.h>
@@ -116,7 +118,18 @@ struct gigabyte_laptop_wmi {
 	struct device *hwmon_dev;
 	struct device *ppdev;
 	struct led_classdev kbd_led;
+	struct acpi_battery_hook battery_hook;
+	struct power_supply *battery;
 	struct fan_curve_data fan_curve;
+
+	/*
+	 * The charge ceiling is two fields written in sequence, and the order
+	 * matters: enabling BCPS latches whatever BCPC already holds. Three
+	 * writers reach them now -- charge_mode, charge_limit and the battery's
+	 * charge_control_end_threshold -- so the pair needs serialising the way
+	 * the fan state does.
+	 */
+	struct mutex charge_lock;
 
 	/*
 	 * Every fan transition is a read-modify-write: set_fan_mode() decides
@@ -159,6 +172,7 @@ struct gigabyte_laptop_wmi {
 	u8 light_sensor_method;
 	u8 has_dgpu_ejector;
 	u8 has_kbd_backlight;
+	u8 has_charge_control;
 	u8 has_three_fans;
 	u8 has_four_fans;
 };
@@ -970,9 +984,43 @@ static ssize_t charge_mode_show(struct device *dev, struct device_attribute *att
 	return sysfs_emit(buf, "%d\n", gigabyte->charge_mode);
 }
 
-static ssize_t charge_mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+/*
+ * Only bit 2 selects the mode, hence the shift. BCPS is a four-bit field and
+ * this assigns all of it, so bits 0, 1 and 3 are zeroed on every write.
+ * Harmless on this firmware, where BCPS reads 0 and nothing else is known to
+ * use those bits -- but it is a blind write, not a read-modify-write, and
+ * should become one if any of them ever turns out to mean something.
+ *
+ * Call with charge_lock held.
+ */
+static int set_charge_mode(struct gigabyte_laptop_wmi *gigabyte, u32 mode)
 {
 	int ret, output;
+
+	ret = gigabyte_laptop_set_devstate(CHARGING_MODE, mode << 2, &output);
+	if (ret)
+		return ret;
+
+	gigabyte->charge_mode = mode;
+	return 0;
+}
+
+/* Call with charge_lock held. */
+static int set_charge_limit(struct gigabyte_laptop_wmi *gigabyte, u32 limit)
+{
+	int ret, output;
+
+	ret = gigabyte_laptop_set_devstate(CHARGING_LIMIT, limit, &output);
+	if (ret)
+		return ret;
+
+	gigabyte->charge_limit = limit;
+	return 0;
+}
+
+static ssize_t charge_mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	int ret;
 	unsigned int mode;
 	struct gigabyte_laptop_wmi *gigabyte;
 
@@ -985,20 +1033,12 @@ static ssize_t charge_mode_store(struct device *dev, struct device_attribute *at
 		return -EINVAL;
 	}
 
-	/*
-	 * Only bit 2 selects the mode, hence the shift. Note that BCPS is a
-	 * four-bit field and this assigns all of it, so bits 0, 1 and 3 are
-	 * zeroed on every write. Harmless on this firmware, where BCPS reads 0
-	 * and nothing else is known to use those bits -- but it is a blind
-	 * write, not a read-modify-write, and should become one if any of them
-	 * ever turns out to mean something.
-	 */
-	ret = gigabyte_laptop_set_devstate(CHARGING_MODE, mode << 2, &output);
+	gigabyte = dev_get_drvdata(dev);
+	guard(mutex)(&gigabyte->charge_lock);
+
+	ret = set_charge_mode(gigabyte, mode);
 	if (ret)
 		return ret;
-
-	gigabyte = dev_get_drvdata(dev);
-	gigabyte->charge_mode = mode;
 	return count;
 }
 
@@ -1020,7 +1060,7 @@ static ssize_t charge_limit_show(struct device *dev, struct device_attribute *at
 
 static ssize_t charge_limit_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
-	int ret, output;
+	int ret;
 	unsigned int limit;
 	struct gigabyte_laptop_wmi *gigabyte;
 
@@ -1033,13 +1073,180 @@ static ssize_t charge_limit_store(struct device *dev, struct device_attribute *a
 		return -EINVAL;
 	}
 
-	ret = gigabyte_laptop_set_devstate(CHARGING_LIMIT, limit, &output);
+	gigabyte = dev_get_drvdata(dev);
+	guard(mutex)(&gigabyte->charge_lock);
+
+	ret = set_charge_limit(gigabyte, limit);
 	if (ret)
 		return ret;
 
-	gigabyte = dev_get_drvdata(dev);
-	gigabyte->charge_limit = limit;
 	return count;
+}
+
+/*
+ * charge_control_end_threshold on the ACPI battery.
+ *
+ * This is the standard ABI for a charge ceiling -- what upower reads, what TLP
+ * writes, and what a desktop's battery-limit setting is built on -- so the
+ * ceiling belongs here as well as on this driver's own two nodes.
+ *
+ * It is exposed through power_supply_register_extension() from inside an ACPI
+ * battery hook rather than by hanging a DEVICE_ATTR off the battery, for three
+ * reasons. The filename then comes from the core, so it cannot drift from the
+ * ABI. The callbacks are handed our drvdata explicitly, where a battery
+ * attribute's show/store would receive the battery's device and this file's
+ * universal dev_get_drvdata(dev) idiom would quietly return the wrong pointer.
+ * And registering emits the KOBJ_CHANGE that udev needs to import upower's
+ * CHARGE_LIMIT property.
+ *
+ * The ABI is one number where the firmware has two fields, so the mapping is
+ * stated once here and nowhere else:
+ *
+ *   read   mode off            -> 100   (no ceiling is in force)
+ *          mode on, 1..99      -> BCPC
+ *          mode on, 0 or 100+  -> 100
+ *   write  100 or 0            -> BCPC 100, then mode off
+ *          1..99               -> BCPC v,   then mode on
+ *          above 100           -> -EINVAL, nothing written
+ *
+ * Reporting a remembered-but-inactive ceiling is the one answer that actively
+ * misleads, so "mode off" reads 100 whatever BCPC holds.
+ *
+ * Writes go BCPC first and BCPS second, always. Enabling the mode latches
+ * whatever BCPC already holds, so the ceiling must be right before the enable
+ * bit goes up -- and that order makes every partial failure fail safe: a
+ * written ceiling with the mode still off enforces nothing, and an enable that
+ * lands on 100 enforces nothing either.
+ */
+static const enum power_supply_property gigabyte_laptop_battery_props[] = {
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
+};
+
+static int gigabyte_laptop_battery_get_property(struct power_supply *psy,
+					const struct power_supply_ext *ext,
+					void *data, enum power_supply_property psp,
+					union power_supply_propval *val)
+{
+	struct gigabyte_laptop_wmi *gigabyte = data;
+
+	if (psp != POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD)
+		return -EINVAL;
+
+	/*
+	 * Served from the cache on purpose, never from a WMI read.
+	 * power_supply_uevent() reads every property to build its environment
+	 * and tolerates only a few errnos; anything else would abort the whole
+	 * battery uevent and stop ordinary battery status reaching userspace.
+	 * The cache is sound because no AML outside the two WMBD cases writes
+	 * either field, so nothing can change them behind the driver.
+	 */
+	scoped_guard(mutex, &gigabyte->charge_lock) {
+		if (!gigabyte->charge_mode || gigabyte->charge_limit <= 0 ||
+			gigabyte->charge_limit >= 100)
+			val->intval = 100;
+		else
+			val->intval = gigabyte->charge_limit;
+	}
+
+	return 0;
+}
+
+static int gigabyte_laptop_battery_set_property(struct power_supply *psy,
+					const struct power_supply_ext *ext,
+					void *data, enum power_supply_property psp,
+					const union power_supply_propval *val)
+{
+	struct gigabyte_laptop_wmi *gigabyte = data;
+	int ret, limit, mode;
+
+	if (psp != POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD)
+		return -EINVAL;
+
+	if (val->intval < 0 || val->intval > 100)
+		return -EINVAL;
+
+	/*
+	 * 0 means off rather than a 0 % ceiling, which would be meaningless.
+	 * upower encodes "no limit" as start 0 / end 100 and clamps on the way
+	 * in, so both ends of the range arrive here as a disable request.
+	 *
+	 * The driver's own charge_limit node refuses below 60. That floor has
+	 * no firmware basis -- BCPC is a plain byte with no clamp anywhere in
+	 * the AML -- so it is not inherited here, where the ABI defines the
+	 * range instead.
+	 */
+	if (val->intval == 0 || val->intval == 100) {
+		limit = 100;
+		mode = 0;
+	} else {
+		limit = val->intval;
+		mode = 1;
+	}
+
+	guard(mutex)(&gigabyte->charge_lock);
+
+	ret = set_charge_limit(gigabyte, limit);
+	if (ret)
+		return ret;
+
+	return set_charge_mode(gigabyte, mode);
+}
+
+/*
+ * Mandatory, not optional: the core adds write permission only when this
+ * returns greater than zero. Omitting it yields a plausible-looking read-only
+ * file that works under cat and fails only when something tries to write it.
+ */
+static int gigabyte_laptop_battery_prop_writeable(struct power_supply *psy,
+					const struct power_supply_ext *ext,
+					void *data, enum power_supply_property psp)
+{
+	return psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD;
+}
+
+static const struct power_supply_ext gigabyte_laptop_battery_ext = {
+	.name			= GIGABYTE_LAPTOP_FILE,
+	.properties		= gigabyte_laptop_battery_props,
+	.num_properties		= ARRAY_SIZE(gigabyte_laptop_battery_props),
+	.get_property		= gigabyte_laptop_battery_get_property,
+	.set_property		= gigabyte_laptop_battery_set_property,
+	.property_is_writeable	= gigabyte_laptop_battery_prop_writeable,
+};
+
+/*
+ * Called for every ACPI battery, which on a one-battery machine means once --
+ * but the name is not fixed, so do not key on it: this unit's is BAT1, not
+ * BAT0. Attaching to whichever battery appears first is what the in-tree
+ * drivers do, and the firmware's ceiling is a property of the charger rather
+ * than of a particular pack.
+ */
+static int gigabyte_laptop_add_battery(struct power_supply *battery,
+				struct acpi_battery_hook *hook)
+{
+	struct gigabyte_laptop_wmi *gigabyte =
+		container_of(hook, struct gigabyte_laptop_wmi, battery_hook);
+
+	if (gigabyte->battery)
+		return 0;
+
+	gigabyte->battery = battery;
+	return power_supply_register_extension(battery,
+					&gigabyte_laptop_battery_ext,
+					&gigabyte->pdev->dev, gigabyte);
+}
+
+static int gigabyte_laptop_remove_battery(struct power_supply *battery,
+				struct acpi_battery_hook *hook)
+{
+	struct gigabyte_laptop_wmi *gigabyte =
+		container_of(hook, struct gigabyte_laptop_wmi, battery_hook);
+
+	if (gigabyte->battery != battery)
+		return 0;
+
+	power_supply_unregister_extension(battery, &gigabyte_laptop_battery_ext);
+	gigabyte->battery = NULL;
+	return 0;
 }
 
 static ssize_t gpu_boost_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -2258,17 +2465,29 @@ obtain_custom_fan_speed:
 	 * wide, so a stray bit 3 would otherwise read back as mode 2 or 3 from
 	 * a node that only accepts 0 and 1.
 	 */
-	ret = gigabyte_laptop_get_devstate(CHARGING_MODE, &output);
-	if (ret)
-		pr_info("Charging mode unsupported by this firmware\n");
-	else
+	/*
+	 * Test implementation by reply type, not by return code. An
+	 * unimplemented WMBC ID falls through to Default { Return (Arg2) } and
+	 * the echoed buffer is copied out as a successful read of the argument,
+	 * so `if (ret)` here never fires and the old "unsupported by this
+	 * firmware" messages were unreachable.
+	 *
+	 * Both IDs are required together: a ceiling without the enable bit is
+	 * inert, and the enable without a ceiling is meaningless.
+	 */
+	if (gigabyte_laptop_method_implemented(CHARGING_MODE) &&
+		gigabyte_laptop_method_implemented(CHARGING_LIMIT) &&
+		!gigabyte_laptop_get_devstate(CHARGING_MODE, &output)) {
 		gigabyte->charge_mode = (output >> 2) & 1;
 
-	ret = gigabyte_laptop_get_devstate(CHARGING_LIMIT, &output);
-	if (ret)
-		pr_info("Charging limit unsupported by this firmware\n");
-	else
-		gigabyte->charge_limit = output;
+		if (!gigabyte_laptop_get_devstate(CHARGING_LIMIT, &output)) {
+			gigabyte->charge_limit = output;
+			gigabyte->has_charge_control = 1;
+		}
+	}
+
+	if (!gigabyte->has_charge_control)
+		pr_info("Charge control unsupported by this firmware\n");
 
 	// Get the fan curve. Used by custom mode.
 	for (u8 i = 0; i < FAN_CURVE_POINTS; i++) {
@@ -2390,6 +2609,7 @@ static void __exit gigabyte_laptop_exit(void)
 	platform_driver_unregister(&platform_driver);
 	platform_device_unregister(gigabyte->pdev);
 	platform_device = NULL;
+	mutex_destroy(&gigabyte->charge_lock);
 	mutex_destroy(&gigabyte->fan_lock);
 	kfree(gigabyte);
 }
@@ -2423,6 +2643,7 @@ static int __init gigabyte_laptop_init(void)
 	}
 
 	mutex_init(&gigabyte->fan_lock);
+	mutex_init(&gigabyte->charge_lock);
 
 	// Needed before the attribute group is created, as it gates what is shown
 	gigabyte->gaming_family = gigabyte_laptop_is_gaming_family();
@@ -2515,6 +2736,27 @@ static int __init gigabyte_laptop_init(void)
 	}
 
 	/*
+	 * charge_control_end_threshold on the battery, after probe so the
+	 * cached pair the getter serves has been read from firmware.
+	 *
+	 * The hook can fire immediately, and add_battery runs with the cache
+	 * already valid because of that ordering. devm ties the unregistration
+	 * to the platform device, which exit unregisters before kfree, so the
+	 * extension is gone before the state its callbacks read.
+	 */
+	if (gigabyte->has_charge_control) {
+		gigabyte->battery_hook.name = GIGABYTE_LAPTOP_FILE "-charge-control";
+		gigabyte->battery_hook.add_battery = gigabyte_laptop_add_battery;
+		gigabyte->battery_hook.remove_battery = gigabyte_laptop_remove_battery;
+
+		result = devm_battery_hook_register(&gigabyte->pdev->dev,
+						&gigabyte->battery_hook);
+		if (result)
+			pr_warn("Could not register the charge threshold (%d)\n",
+				result);
+	}
+
+	/*
 	 * Hotkeys are a bonus on top of the sensors and controls, so none of
 	 * this is worth failing the whole driver over. The input device goes
 	 * first, since the event handler reports into it.
@@ -2546,6 +2788,7 @@ fail_platform_device:
 	// is_visible() reads this global, so leave nothing dangling behind it
 	platform_device = NULL;
 fail_alloc:
+	mutex_destroy(&gigabyte->charge_lock);
 	mutex_destroy(&gigabyte->fan_lock);
 	kfree(gigabyte);
 fail_platform_driver:
