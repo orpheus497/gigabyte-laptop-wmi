@@ -1350,6 +1350,52 @@ The genuinely interesting by-product is the `0xF6` event discovery: it proved
 `KBLL` is live EC-maintained state, which is what made `max_brightness`
 measurable without a single speculative write.
 
+### Mode key notifications: working, 22 Oct 2026
+
+`tools/gigabyte-fan-preset-notify`, enabled as a systemd **user** service, puts
+a toast on screen for each Mode press. Confirmed on hardware — the
+notifications appear when the preset changes.
+
+```
+systemctl --user is-enabled   -> enabled
+systemctl --user is-active    -> active
+CPU ticks since start         -> 1      (total, across 23 presses this boot)
+memory                        -> 268 KB cgroup / 1.6 MB RSS
+```
+
+One CPU tick for a session's worth of notifications, because the process is
+blocked in `poll()` the whole time and only wakes to fork `notify-send`.
+
+**C, not Python, and the reasoning is worth keeping.** Python was the first
+suggestion and was habit rather than a decision: a resident interpreter costs
+~20 MB to sit in a `poll()` loop that fires a few times a day. `poll()` is a
+syscall and every other language wraps it; this repo is already C with a
+Makefile, so C added no toolchain, no language and no dependency. Lua would have
+been worse than either — `poll()` is not in its standard library, so it would
+have meant adding `luaposix` to avoid writing forty lines.
+
+**Memory safety by construction, not by care**, which is the part to preserve if
+anyone edits it: no `malloc` anywhere, fixed buffers, `read()` bounded by
+`sizeof(buf) - 1`, `execlp` rather than `system()` so there is no shell, and the
+value read from sysfs only ever selects an *index* into a compile-time table. No
+kernel-supplied string reaches the exec, so there is nothing to quote, escape or
+truncate.
+
+**Two traps, both verified rather than assumed:**
+
+- **The attribute must be read once before `poll()` will block.** Until the
+  event counter is consumed, `poll()` returns immediately and a loop around it
+  spins at 100 % CPU. That first read is also current state rather than a
+  change, so it is recorded and not announced.
+- **`POLLERR` accompanies every `POLLPRI`** on a sysfs attribute and is not an
+  error on its own. A failed *read* is, and means the driver has gone: the
+  program exits non-zero so the service manager decides, rather than looping on
+  a dead fd. Tested against a missing attribute.
+
+It reacts to the **key only**, because the driver calls `sysfs_notify()` only
+from the key path. A sysfs write to `fan_preset` or `fan_mode` raises nothing,
+which is correct: the caller of a write already knows what it did.
+
 ### Step 6 leads, in order of cost
 
 1. **`0xF6` / `KBLL` over WMI** — brightness only, but it is read/write, in
