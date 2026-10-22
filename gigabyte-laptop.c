@@ -1194,13 +1194,40 @@ static int gigabyte_laptop_battery_set_property(struct power_supply *psy,
 		mode = 1;
 	}
 
-	guard(mutex)(&gigabyte->charge_lock);
+	/*
+	 * scoped_guard rather than guard, because power_supply_changed() must
+	 * be reached with charge_lock released -- the same rule the Mode key's
+	 * uevent follows. It schedules work that re-reads the properties, and
+	 * get_property takes this lock.
+	 */
+	scoped_guard(mutex, &gigabyte->charge_lock) {
+		ret = set_charge_limit(gigabyte, limit);
+		if (ret)
+			return ret;
 
-	ret = set_charge_limit(gigabyte, limit);
-	if (ret)
-		return ret;
+		/*
+		 * Only write the mode when it actually changes. Re-pointing an
+		 * already-enabled ceiling at a new limit would otherwise repeat
+		 * the mode write, and a failure there would report an error to
+		 * userspace after the limit had already moved. The cache is
+		 * sound to compare against because nothing outside the two WMBD
+		 * cases writes BCPS.
+		 */
+		if (gigabyte->charge_mode != mode) {
+			ret = set_charge_mode(gigabyte, mode);
+			if (ret)
+				return ret;
+		}
+	}
 
-	return set_charge_mode(gigabyte, mode);
+	/*
+	 * Nothing in the power-supply sysfs or extension dispatch path emits
+	 * this, so udev and upower would otherwise keep serving the previous
+	 * threshold until some unrelated battery event came along.
+	 */
+	power_supply_changed(psy);
+
+	return 0;
 }
 
 /*

@@ -152,6 +152,12 @@ while (( SECONDS - START < TIMEOUT )); do
 		break
 	fi
 
+	# Sailed past it with room to spare: the EC is ignoring BCPC.
+	if (( CAP >= CEILING + 4 )); then
+		VERDICT="IGNORED: still ${ST} at ${CAP}% with a ${CEILING}% ceiling"
+		break
+	fi
+
 	# Stopped at the ceiling: the EC honours BCPC.
 	#
 	# Do NOT test status alone. Measured on a GAMING A16 5TH: the EC holds
@@ -179,11 +185,6 @@ while (( SECONDS - START < TIMEOUT )); do
 	fi
 	LAST_CAP=$CAP
 
-	# Sailed past it with room to spare: the EC is ignoring BCPC.
-	if (( CAP >= CEILING + 4 )); then
-		VERDICT="IGNORED: still ${ST} at ${CAP}% with a ${CEILING}% ceiling"
-		break
-	fi
 
 	sleep "$POLL"
 done
