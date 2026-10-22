@@ -654,9 +654,14 @@ way:
 
   Either way: the 🔍 Trigger review checkbox or an `@coderabbitai review`
   comment. Pushes do not auto-review.
-- **The free tier rate-limits to one review per ~45 minutes**, and a run that
-  hits the limit stops partway, leaving some findings unmarked. Spend a review on
-  a batch of real work, not a docs-only push.
+- **The free tier allows one included review per hour**, and the bot says so
+  exactly: *"Review limit reached ... Next included review available in N
+  minutes"*. A run that hits the limit stops **before reviewing at all** -- it
+  still prints the scope it would have covered, which reads like a review that
+  ran. Check for that warning before trusting an empty result. Spend the hour's
+  review on a batch of real work, not a docs-only push, and do not fire several
+  triggers in quick succession: three in a row exhausted it on 22 Oct 2026 and
+  the fourth, which covered the actual fixes, never ran.
 - The **Autofix** and **Generate docstrings** checkboxes push the bot's own
   commits to the branch. Leave both unticked; the docstring one in particular
   would act on a Docstring Coverage check that does not apply to kernel C.
@@ -1207,7 +1212,28 @@ GigaMate's README explicitly carves out "laptops without a Gigabyte USB
 keyboard (e.g. GIGABYTE GAMING A16)". No project anywhere handles this key on a
 PS/2 Gigabyte keyboard.
 
-### Branch `a16-5th-kbd-charge-uevent` — what is landed and what is blocked
+### Branch `a16-5th-kbd-charge-uevent` — merged into `a16-5th` as PR #2
+
+**Squash-merged on 22 Oct 2026** as `de94609`, "A16 5th kbd charge uevent (#2)".
+Because it was a *squash*, the feature branch's individual commits are not
+ancestors of `a16-5th`, so `git merge-base --is-ancestor` answers "no" while the
+content is all present. Verify a squash by comparing trees instead:
+
+```sh
+git diff --stat origin/a16-5th origin/a16-5th-kbd-charge-uevent   # empty == captured
+```
+
+**`master` is untouched and still upstream's `4b817ea`**, checked on both the
+local and the fork copy after the merge, with the feature branch confirmed *not*
+an ancestor of it. The never-merge rule covers `master` only; `a16-5th` is the
+integration branch and is exactly where this was meant to land.
+
+Eleven CodeRabbit findings were addressed across three review rounds before the
+merge — six in `fc61b85`, two in `7e0ad94`, three in `1e3fc39`. One finding was
+never actioned because its text never arrived intact; if it matters it will
+resurface on the next review of this code.
+
+### What the branch carried — landed and blocked at the time
 
 Three items, investigated before any code was written because two of them had a
 real unknown at the centre. Everything below was verified against this machine's
