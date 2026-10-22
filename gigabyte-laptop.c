@@ -950,9 +950,22 @@ static ssize_t fan_pwm_show(struct device *dev, struct device_attribute *attr, c
  * 0 = default mode
  * 1 = custom mode
  */
+/*
+ * Read the firmware rather than the cache. WMBC implements 0x64, so there is no
+ * reason to report a remembered value that cannot confirm a write landed and
+ * goes stale if anything else moves BCPS. Falls back to the cache on a failed
+ * read, which is better than claiming zero.
+ *
+ * Only bit 2 of BCPS selects the mode; the rest of the nibble is masked off
+ * here rather than shifted into the answer.
+ */
 static ssize_t charge_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+	int output;
+
+	if (!gigabyte_laptop_get_devstate(CHARGING_MODE, &output))
+		gigabyte->charge_mode = (output >> 2) & 1;
 
 	return sysfs_emit(buf, "%d\n", gigabyte->charge_mode);
 }
@@ -972,7 +985,14 @@ static ssize_t charge_mode_store(struct device *dev, struct device_attribute *at
 		return -EINVAL;
 	}
 
-	// Only bit 2 affects the charging mode, so shift 2 bits to the left.
+	/*
+	 * Only bit 2 selects the mode, hence the shift. Note that BCPS is a
+	 * four-bit field and this assigns all of it, so bits 0, 1 and 3 are
+	 * zeroed on every write. Harmless on this firmware, where BCPS reads 0
+	 * and nothing else is known to use those bits -- but it is a blind
+	 * write, not a read-modify-write, and should become one if any of them
+	 * ever turns out to mean something.
+	 */
 	ret = gigabyte_laptop_set_devstate(CHARGING_MODE, mode << 2, &output);
 	if (ret)
 		return ret;
@@ -986,9 +1006,14 @@ static ssize_t charge_mode_store(struct device *dev, struct device_attribute *at
  * Maximum charge limit. Only works if custom charge mode is enabled.
  * Can be set between 60 and 100 percent.
  */
+/* Live, for the same reason as charge_mode above. BCPC is a whole byte. */
 static ssize_t charge_limit_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+	int output;
+
+	if (!gigabyte_laptop_get_devstate(CHARGING_LIMIT, &output))
+		gigabyte->charge_limit = output;
 
 	return sysfs_emit(buf, "%d\n", gigabyte->charge_limit);
 }
@@ -2223,16 +2248,26 @@ obtain_custom_fan_speed:
 		}
 	}
 
+	/*
+	 * A read of 0 is a value, not a missing answer: BCPS reads 0 on a
+	 * machine that has never enabled the custom charging mode, which is the
+	 * factory state here. Testing the value rather than the return code
+	 * meant the cache kept whatever it was initialised with.
+	 *
+	 * Mask bit 2 rather than shifting the whole nibble: BCPS is four bits
+	 * wide, so a stray bit 3 would otherwise read back as mode 2 or 3 from
+	 * a node that only accepts 0 and 1.
+	 */
 	ret = gigabyte_laptop_get_devstate(CHARGING_MODE, &output);
 	if (ret)
 		pr_info("Charging mode unsupported by this firmware\n");
-	else if (output)
-		gigabyte->charge_mode = output >> 2;
+	else
+		gigabyte->charge_mode = (output >> 2) & 1;
 
 	ret = gigabyte_laptop_get_devstate(CHARGING_LIMIT, &output);
 	if (ret)
 		pr_info("Charging limit unsupported by this firmware\n");
-	else if (output)
+	else
 		gigabyte->charge_limit = output;
 
 	// Get the fan curve. Used by custom mode.

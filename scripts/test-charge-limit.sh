@@ -18,8 +18,11 @@ set -uo pipefail   # deliberately not -e: a failure must still reach the restore
 
 CEILING=${1:-80}
 P=/sys/devices/platform/gigabyte_laptop
-POLL=30            # seconds between samples
-TIMEOUT=$((60*60)) # give up after an hour
+POLL=30             # seconds between samples
+TIMEOUT=$((60*60))  # give up after an hour
+HELD_UA=150000      # below this the battery is not really being charged
+                    # (measured: ~3.4 A while charging on this chassis)
+FLAT_NEEDED=4       # samples of unchanged capacity that count as "held"
 
 die() { echo "$*" >&2; exit 1; }
 
@@ -97,11 +100,15 @@ echo
 echo "== Watching. Ctrl-C is safe: the restore runs anyway. =="
 START=$SECONDS
 VERDICT="INCONCLUSIVE"
+LAST_CAP=-1
+FLAT=0
 
 while (( SECONDS - START < TIMEOUT )); do
 	CAP=$(cat "$BAT/capacity")
 	ST=$(cat "$BAT/status")
-	printf '   %4ds  %3s%%  %s\n' "$((SECONDS - START))" "$CAP" "$ST"
+	CUR=$(cat "$BAT/current_now" 2>/dev/null || echo 0)
+	printf '   %4ds  %3s%%  %-12s %5s mA\n' \
+		"$((SECONDS - START))" "$CAP" "$ST" "$((CUR/1000))"
 
 	if ! ac_online; then
 		VERDICT="ABORTED: charger was unplugged"
@@ -109,10 +116,31 @@ while (( SECONDS - START < TIMEOUT )); do
 	fi
 
 	# Stopped at the ceiling: the EC honours BCPC.
-	if (( CAP >= CEILING - 1 )) && [ "$ST" != "Charging" ]; then
-		VERDICT="HONOURED: charging stopped at ${CAP}% with a ${CEILING}% ceiling"
-		break
+	#
+	# Do NOT test status alone. Measured on a GAMING A16 5TH: the EC holds
+	# the charge but the battery keeps reporting "Charging", so an earlier
+	# version of this check never fired even though the ceiling worked. What
+	# actually changes is the current -- about 3.4 A charging, near zero when
+	# held -- and the capacity stops rising.
+	if (( CAP >= CEILING - 1 )); then
+		if [ "$ST" != "Charging" ] || (( CUR < HELD_UA )); then
+			VERDICT="HONOURED: held at ${CAP}% with a ${CEILING}% ceiling (status ${ST}, $((CUR/1000)) mA)"
+			break
+		fi
+
+		# Fallback that assumes nothing about either field: the capacity
+		# simply stopped climbing while at the ceiling.
+		if (( CAP == LAST_CAP )); then
+			(( FLAT++ ))
+			if (( FLAT >= FLAT_NEEDED )); then
+				VERDICT="HONOURED: capacity flat at ${CAP}% for $((FLAT*POLL))s with a ${CEILING}% ceiling"
+				break
+			fi
+		else
+			FLAT=0
+		fi
 	fi
+	LAST_CAP=$CAP
 
 	# Sailed past it with room to spare: the EC is ignoring BCPC.
 	if (( CAP >= CEILING + 4 )); then

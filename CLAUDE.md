@@ -1318,6 +1318,59 @@ A `HONOURED` verdict is what makes the four handler defects worth patching. An
 `IGNORED` one means charge limiting is firmware-blocked on this unit and the
 honest thing is to record that and leave the nodes alone.
 
+### Charge limiting WORKS — verdict `HONOURED`, 22 Oct 2026
+
+From 59 % on AC with an 80 % ceiling, the battery climbed steadily at roughly a
+point a minute and then **stopped dead at 80 %**:
+
+```
+  1021s   79%  Charging
+  1051s   80%  Charging
+  1081s   80%  Charging
+  1111s   80%  Charging
+  1141s   80%  Charging
+  1171s   80%  Charging     <- flat for two minutes
+```
+
+Restoring the limit to 100 resumed charging immediately. So **the EC consumes
+`BCPC`** and custom charging mode is a real, working feature on this unit —
+unlike GPU TGP, this one is not firmware-blocked.
+
+**The confirming evidence came from the desktop, not the script.** KDE's power
+tray stopped showing "Time To Full" when the battery reached 80 %, and the
+estimate reappeared the moment the test restored the ceiling. upower had
+concluded the battery was no longer charging toward full, which is a cleaner
+signal than anything the script was looking at.
+
+**And the script's verdict logic was wrong, which is why it printed nothing.**
+It required `status != Charging`, but this EC **keeps reporting `Charging`**
+while holding the charge. What actually changes is the current: about **3.4 A**
+while charging, near zero when held. Fixed to test the current, with a fallback
+that assumes nothing about either field — capacity simply not rising for four
+consecutive samples while at the ceiling. The lesson generalises: on this
+hardware `status` is not a reliable indicator of whether charge is flowing.
+
+**The handler defects are now patched**, since the feature is real:
+
+- Both `show` handlers read the firmware instead of reporting a cache. WMBC
+  implements `0x64` and `0x65`, so there was never a reason to report a
+  remembered value that cannot confirm a write landed. They fall back to the
+  cache on a failed read rather than claiming zero.
+- `probe` tested `else if (output)` rather than the return code, so a genuine
+  `BCPS` of 0 — the factory state here — left the cache at whatever it was
+  initialised with.
+- Both the probe decode and `charge_mode_show` now mask bit 2 (`(output >> 2) &
+  1`) instead of shifting the whole nibble, so a stray bit 3 cannot read back as
+  mode 2 or 3 from a node that only accepts 0 and 1.
+- The write-side comment now says what the code does: `BCPS = Arg2` assigns all
+  four bits, so bits 0, 1 and 3 are zeroed on every write. Harmless here, where
+  `BCPS` reads 0 and nothing is known to use them, but it is a blind write and
+  should become a read-modify-write if any of them ever turns out to matter.
+
+The `60 <= limit <= 100` and `mode > 1` range checks stay. Still no firmware
+basis — there is no clamp — but they keep every written value inside its field
+width, which matters more now that the field is known to be live.
+
 ### Keyboard backlight: verified end to end, 22 Oct 2026
 
 Installed through DKMS, signed, `installed == loaded`. The node appears with the
