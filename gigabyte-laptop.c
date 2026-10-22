@@ -978,6 +978,15 @@ static ssize_t charge_mode_show(struct device *dev, struct device_attribute *att
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
 	int output;
 
+	/*
+	 * Held because this *writes* the cache, not merely reads it. Without it
+	 * a read that fetched the old value can land after a concurrent write
+	 * updated both firmware and cache, leaving the cache stale -- and the
+	 * battery's get_property serves that cache, so it would report a
+	 * threshold the firmware does not have until the next write.
+	 */
+	guard(mutex)(&gigabyte->charge_lock);
+
 	if (!gigabyte_laptop_get_devstate(CHARGING_MODE, &output))
 		gigabyte->charge_mode = (output >> 2) & 1;
 
@@ -1046,11 +1055,13 @@ static ssize_t charge_mode_store(struct device *dev, struct device_attribute *at
  * Maximum charge limit. Only works if custom charge mode is enabled.
  * Can be set between 60 and 100 percent.
  */
-/* Live, for the same reason as charge_mode above. BCPC is a whole byte. */
+/* Live and locked, for the same reasons as charge_mode. BCPC is a whole byte. */
 static ssize_t charge_limit_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
 	int output;
+
+	guard(mutex)(&gigabyte->charge_lock);
 
 	if (!gigabyte_laptop_get_devstate(CHARGING_LIMIT, &output))
 		gigabyte->charge_limit = output;
@@ -2730,9 +2741,17 @@ static int __init gigabyte_laptop_init(void)
 
 		result = devm_led_classdev_register(&gigabyte->pdev->dev,
 						&gigabyte->kbd_led);
-		if (result)
+		if (result) {
 			pr_warn("Could not register the keyboard backlight (%d)\n",
 				result);
+			/*
+			 * Clear it, or a later 0xF6 event would call
+			 * led_classdev_notify_brightness_hw_changed() on a
+			 * class device that was never registered and so has no
+			 * brightness_hw_changed node for it to poke.
+			 */
+			gigabyte->has_kbd_backlight = 0;
+		}
 	}
 
 	/*

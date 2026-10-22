@@ -1,0 +1,22 @@
+[Unit]
+Description=Notify on Gigabyte laptop fan preset changes
+# Started by the matching .path unit when the driver's attribute appears, so
+# there is deliberately no ConditionPathExists here: that condition was what
+# stopped the service ever coming back after a module reload, because a skipped
+# start leaves nothing watching for the driver's return.
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/gigabyte-fan-preset-notify
+# No Restart=. The program exits non-zero when the attribute disappears, and
+# the .path unit re-arms and starts it again when the driver comes back. A
+# restart loop here would just poll for a device that is not there.
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native

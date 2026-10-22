@@ -95,8 +95,12 @@ the preset. It is a small C program — about 150 lines with comments — that
 
 ```sh
 cd tools && make && sudo make install
-systemctl --user enable --now gigabyte-fan-preset-notify
+systemctl --user enable --now gigabyte-fan-preset-notify.path
 ```
+
+**Enable the `.path` unit, not the service.** The path unit starts the watcher
+when the driver's attribute appears, and starts it again after a module reload —
+the service alone would exit when the driver went away and never come back.
 
 It needs no privileges, allocates nothing, and uses 1.3 MB of memory sitting
 blocked in `poll()` at zero CPU.

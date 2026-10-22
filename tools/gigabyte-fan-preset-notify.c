@@ -120,8 +120,6 @@ int main(void)
 	pfd.events = POLLPRI | POLLERR;
 
 	for (;;) {
-		int prev = idx;
-
 		if (poll(&pfd, 1, -1) < 0) {
 			perror("poll");
 			return 1;
@@ -144,8 +142,23 @@ int main(void)
 			continue;
 		}
 
-		/* The same value can be re-notified; do not toast twice for it. */
-		if (idx != prev)
-			notify(presets[idx].text);
+		/*
+		 * Announce every wake, without comparing against the previous
+		 * value. The driver notifies only from the key path and the key
+		 * always moves the preset, so a wake *is* a change and a
+		 * duplicate toast cannot happen -- while suppressing on equality
+		 * loses a real one: four fast presses go round the whole ring
+		 * back to the starting preset, and this would then report
+		 * nothing at all.
+		 *
+		 * What remains, and is inherent to sysfs_notify() rather than to
+		 * this comparison: presses faster than one wake collapse into a
+		 * single toast showing the final preset, because the attribute
+		 * carries a value and not a queue. Fixing that properly means
+		 * consuming the driver's uevent stream instead, which costs a
+		 * libudev dependency and a great deal more code to recover
+		 * intermediate states nobody saw on the keyboard either.
+		 */
+		notify(presets[idx].text);
 	}
 }

@@ -1,0 +1,12 @@
+[Unit]
+Description=Watch for the Gigabyte laptop fan preset attribute
+PartOf=graphical-session.target
+
+[Path]
+# Starts the service when the driver appears, and -- because the service exits
+# when the driver goes away -- starts it again on a later module load. This is
+# what makes a mid-session reinstall work without a manual start.
+PathExists=/sys/devices/platform/gigabyte_laptop/fan_preset
+
+[Install]
+WantedBy=graphical-session.target

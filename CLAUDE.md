@@ -725,6 +725,46 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   depending on it, so `dnf autoremove` will try to take it. Losing
   `/var/lib/dkms/mok.key` means re-enrolling a MOK key and a reboot into the
   MOK manager.
+- **The MOK *enrolment* can be lost while the key files survive, and it has
+  been.** After a reboot on 22 Oct 2026 the module stopped loading:
+
+  ```
+  systemd-modules-load[903]: Failed to insert module 'gigabyte_laptop':
+                             Key was rejected by service
+  ```
+
+  `EKEYREJECTED`. Everything looked fine from the DKMS side — `dkms status`
+  said installed, `/lib/modules/$(uname -r)/extra/gigabyte-laptop.ko.xz`
+  existed, `modinfo -F signer` said `DKMS module signing key`, and both
+  `/var/lib/dkms/mok.key` and `mok.pub` were intact. The failure was one level
+  down:
+
+  ```
+  $ mokutil --list-enrolled | grep -c '^\[key'      -> 1
+  $ mokutil --list-enrolled | grep Subject          -> only CN=fedoraca
+  $ mokutil --list-new                              -> empty
+  $ openssl x509 -in /var/lib/dkms/mok.pub -noout -subject
+                                                    -> CN=DKMS module signing key
+  ```
+
+  So the key on disk is no longer in the firmware's enrolled list, and nothing
+  is pending. The cause was not determined — a firmware update, a Secure Boot
+  key reset or a trip through the MOK manager would all do it, and none can be
+  distinguished after the fact.
+
+  **Diagnose in this order**, because every earlier step looks healthy:
+  `dkms status` → the `.ko` exists → `modinfo -F signer` → **`mokutil
+  --list-enrolled`**. Only the last one shows it. A "Key was rejected by
+  service" in `journalctl -b -u systemd-modules-load` is the symptom to match.
+
+  **Recovery** keeps the existing key, since the files are intact:
+
+  ```sh
+  sudo mokutil --import /var/lib/dkms/mok.pub   # sets a one-time password
+  sudo reboot                                    # then: Enroll MOK -> Continue
+  ```
+
+  Nothing in the repo or the driver causes or fixes this; it is machine state.
 - Manual signing fallback: `/usr/src/kernels/$(uname -r)/scripts/sign-file`
   with the same key pair.
 

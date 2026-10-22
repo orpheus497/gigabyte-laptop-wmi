@@ -74,16 +74,34 @@ BASE_LIMIT=$(raw 0x65) || die "could not read 0x65"
 echo "   0x64 BCPS : $BASE_MODE"
 echo "   0x65 BCPC : $BASE_LIMIT"
 
+# The decimal in parentheses, for the restore. Printed form is
+#   method 0x65 arg 0x5a -> 0x50 (80) [implemented]
+BASE_MODE_N=$(printf '%s' "$BASE_MODE" | sed -n 's/.*(\([0-9]\+\)).*/\1/p')
+BASE_LIMIT_N=$(printf '%s' "$BASE_LIMIT" | sed -n 's/.*(\([0-9]\+\)).*/\1/p')
+[ -n "$BASE_MODE_N" ] && [ -n "$BASE_LIMIT_N" ] ||
+	die "could not parse the baseline values; refusing to run without a restore path"
+
+# Only bit 2 of BCPS is the mode, and charge_mode takes 0 or 1.
+BASE_MODE_BIT=$(( (BASE_MODE_N >> 2) & 1 ))
+
+if [ "$BASE_MODE_BIT" = "1" ]; then
+	echo
+	echo "   NOTE: a ceiling of ${BASE_LIMIT_N}% is already in force. The test will"
+	echo "         set ${CEILING}% and put ${BASE_LIMIT_N}% back afterwards."
+fi
+
 restore() {
 	echo
-	echo "== Restoring =="
-	# Mode off first, then the limit: disabling the mode stops the ceiling
-	# being enforced before we widen it.
-	echo 0   > "$P/charge_mode"  2>/dev/null
-	echo 100 > "$P/charge_limit" 2>/dev/null
+	echo "== Restoring the recorded baseline =="
+	# The limit first and the mode last, mirroring the apply path: enabling
+	# the mode latches whatever the ceiling already holds, so the ceiling
+	# has to be right before the enable bit goes up. Writing a fixed 0/100
+	# here instead would silently discard a ceiling the user already had.
+	echo "$BASE_LIMIT_N" > "$P/charge_limit" 2>/dev/null
+	echo "$BASE_MODE_BIT" > "$P/charge_mode" 2>/dev/null
 	echo "   0x64 BCPS : $(raw 0x64)"
 	echo "   0x65 BCPC : $(raw 0x65)"
-	echo "   (compare against the baseline above)"
+	echo "   (expected: BCPS $BASE_MODE_N, BCPC $BASE_LIMIT_N)"
 }
 trap restore EXIT
 
