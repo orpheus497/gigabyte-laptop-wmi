@@ -401,6 +401,9 @@ consequences, both already bitten once:
 | `0x87` / `0x88` | — | Power LED / battery LED |
 | `0xE6` | — | dGPU mux (0 dynamic, 1 discrete, 2 MS-Hybrid) |
 | `0x63` | `WXCM 0xD2`–`0xD6` | Five bytes in, five back. RGB-shaped, see Step 6 |
+| `0x66` | `EC0.FLVL` (8-bit) | Current fan **step**, the index into the curve the EC is using |
+| `0x6B` | `EC0.FAN1` (8-bit) | CPU fan fixed duty. The driver calls this `FAN_CUSTOM_SPEED`; GCC uses it as the CPU side of its Max-mode recipe |
+| `0x57` | `EC0.CRAF` (1-bit) | The driver's `FAN_SILENT_MODE`. GCC treats it as a fourth fan-mode flag alongside `FANB`/`TENF`/`ADJF` — **never tried as a control here** |
 | `0x03` | — | Fires the WMI event synthetically: `WMBC(0, 0x03, n)` → `Notify (AMW0, 0xD2)` |
 
 `0xF6` is the significant one: **keyboard backlight brightness is reachable
@@ -619,7 +622,7 @@ fork, not the project. Upstream updates come from
 
 `master` still sits at upstream's `4b817ea`, untouched.
 
-### PR #1 was a review surface, and was closed without merging
+### How reviews work on this fork (and PR #1, the first review surface)
 
 [`orpheus497/gigabyte-laptop-wmi#1`](https://github.com/orpheus497/gigabyte-laptop-wmi/pull/1)
 — "[WIP] Functionality for Gigabyte Gaming A16 5th", `master <- a16-5th` — existed
@@ -679,8 +682,11 @@ Two consequences of using a PR this way:
 
 ### CI is green, and it validates the packaging
 
-Both pushed heads ran the `Release driver (debug)` workflow to success on all
-four jobs — `920ca3b`, and `75f870d` after it:
+Every pushed head has run the `Release driver (debug)` workflow to success on
+all four jobs. `920ca3b` and `75f870d` were the first two; `fc61b85`, `7e0ad94`,
+`1e3fc39` and the merge commit `de94609` have all gone green since. Rather than
+keep a list that goes stale on every push, treat it as: **CI has never been red
+on this branch**, and a red build is therefore a real regression.
 
 ```
 Generate driver tar file                      success
@@ -1385,10 +1391,14 @@ two-level backlight is a plain on/off LED, and the `0xF6` event makes
 instead of leaving it stale. The earlier plan ruled that flag out precisely
 because no such event was known to exist.
 
-**Not yet established: whether writing works.** `0xF6 0` through `0xF6 4` were
-written and accepted, but the effect on the keyboard was not recorded, so the
-write direction is still unmeasured. Nothing should be built on the assumption
-that it works.
+~~**Not yet established: whether writing works.**~~ **Since settled — writing
+works.** `0xF6 0` through `0xF6 4` were written and accepted here with the
+effect unrecorded, which is why this was left open at the time. The LED class
+device then demonstrated both directions: see "Keyboard backlight: verified end
+to end", where `SetBrightness(0)` and `SetBrightness(1)` over upower's D-Bus
+move the keyboard and the sysfs value together. Kept because the caution was
+right when written — an accepted WMI write proves only that the ACPI store
+landed, never that the EC acted on it.
 
 #### Charging: factory defaults recorded, ceiling test inconclusive
 
@@ -1437,6 +1447,15 @@ restore. It decides for itself:
 | `IGNORED` | still charging four points past it — the EC accepts the field and does nothing with it, like GPU TGP |
 | `ABORTED` | charger unplugged mid-run |
 | `INCONCLUSIVE` | an hour elapsed without either |
+
+**`IGNORED` is evaluated before `HONOURED`, and the order is load-bearing.**
+The `HONOURED` window is `CAP >= CEILING - 1` with **no upper bound**, so a
+battery already past the ceiling satisfies it. With an 80 % ceiling at 84 %, a
+momentary sub-threshold current or a non-`Charging` status reported
+"HONOURED at 84 %" — four points past, which is the definition of `IGNORED`.
+The capacity-flatline fallback was worse: a full battery resting at 100 % would
+have reported `HONOURED`. Reordering is sufficient because `IGNORED` is the
+stricter window. Found in the third review round, not by running the script.
 
 A `HONOURED` verdict is what makes the four handler defects worth patching. An
 `IGNORED` one means charge limiting is firmware-blocked on this unit and the
@@ -1494,6 +1513,30 @@ hardware `status` is not a reliable indicator of whether charge is flowing.
 The `60 <= limit <= 100` and `mode > 1` range checks stay. Still no firmware
 basis — there is no clamp — but they keep every written value inside its field
 width, which matters more now that the field is known to be live.
+
+**Two later fixes on the same path, from the third review round.** Both are the
+kind of thing only a second reader catches:
+
+- **The mode write is skipped when the mode is unchanged.** Re-pointing an
+  already-enabled ceiling at a new limit used to write the limit and then repeat
+  the mode write. A failure on that redundant write reported an error to
+  userspace *after* the limit had already moved. Comparing the cache is sound
+  here for the reason stated above — nothing outside the two WMBD cases writes
+  `BCPS`.
+- **`power_supply_changed()` is called, and it must be called with
+  `charge_lock` released.** Nothing in the power-supply sysfs or extension
+  dispatch path emits it, so udev and upower kept serving the previous threshold
+  until some unrelated battery event came along. The lock rule is not optional:
+  it schedules work that re-reads the properties, and `get_property` takes the
+  same mutex. That is why the setter uses `scoped_guard` and notifies after the
+  scope closes — **the same rule the Mode key's uevent follows**, for the same
+  reason. A suggested patch that called it inside the guard was declined on
+  these grounds.
+
+  Whether the core *also* emits it could not be checked here: this is a
+  headers-only kernel tree with no `power_supply_sysfs.c`. Calling it is
+  harmless if redundant and necessary if not, so it is called. That is a
+  judgement, not a verified fact.
 
 ### Open: `BCPC` reads 0 after a reboot, and nothing restores it
 
@@ -1693,8 +1736,10 @@ and TLP can all drive it.
 
 ### Step 6 leads, in order of cost
 
-1. **`0xF6` / `KBLL` over WMI** — brightness only, but it is read/write, in
-   firmware, on AMD, and needs no reverse engineering. Do this first.
+1. ~~**`0xF6` / `KBLL` over WMI**~~ — **done, shipped as Step 6a.** Brightness
+   only, read/write, in firmware, on AMD, and it needed no reverse engineering,
+   which is why it went first. See "Keyboard backlight: verified end to end".
+   The leads below are what remains, and both are about **colour**.
 2. **`WMBD 0x63` — but it writes CMOS, not the EC.** `WXCM(i, v)` sets
    `XCMI = i; XCMD = v` over `OperationRegion (CMS1, SystemIO, 0x72, 0x02)`,
    and `RXCM(i)` sets the index then reads `XCMD` back. Ports `0x72`/`0x73` are
@@ -1733,9 +1778,15 @@ supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 
 ## Open decisions
 
-- **Whether to try the 15-point curve**, which is the only Step 4 lead left.
-  The write-side debug node it needs already shipped as `debug_method_write`.
-  See the Step 4 section.
+- **Whether to try the indexed fan curve**, which is the only Step 4 lead left,
+  and it is now better armed than it was: a third-party CWH analysis names
+  `XFNW` as index/temperature/duty and records GCC's enabling sequence
+  (`ADJF`=0, `TENF`=1, `FANB`=0, `CRAF`=0, then the points). The write-side
+  debug node it needs already shipped as `debug_method_write`, and `WMBC 0x68`
+  reads a written point back. See the Step 4 section.
+- **Whether `CRAF` (`0x57`) does anything on this unit.** Present and
+  read/write in our firmware, named "quiet mode" by GCC, and never written here.
+  Cheap to test through `debug_method_write`.
 - **Whether `BCPC` survives a power cycle**, which decides both whether a
   charge ceiling needs re-applying at boot and what guard
   `charge_mode_store()` should carry. One `debug_method` read settles it; see
@@ -1853,7 +1904,8 @@ the EC's own firmware does with those bytes is not in any table we can dump. So
 there is no more static analysis to do here — only experiments, and only in
 modes where the EC is not running a curve.
 
-Field widths, for reference: `TFAN`, `GFAN`, `TENF`, `ADJF` are **1 bit**;
+Field widths, for reference: `TFAN`, `GFAN`, `TENF`, `ADJF`, `CRAF` are
+**1 bit**;
 `FAN1`, `FAN2`, `FDTY`, `GDTY`, `FLVL` are **8**; `XFNW` is **24**.
 
 **The one lead left: the 15-point curve.** `fan_mode 3` plus `fan_curve_index`
@@ -1875,7 +1927,88 @@ AERO X16, a different model — test rather than assume.
 
 Note the driver's current `fan_curve_data_store()` builds `data << 8 | index`,
 with a commented-out alternative packing speed/temp/index, and `XFNW` is 24
-bits. The packing is a guess and the read-back is the way to confirm it.
+bits. The packing was **a guess**; a third-party analysis now names the three
+fields — see "A third-party CWH analysis names the `XFNW` fields" below — and
+the read-back is still the way to confirm it.
+
+### A third-party CWH analysis names the `XFNW` fields
+
+[`benedikthth/gigabyte-a16-linux-power`](https://github.com/benedikthth/gigabyte-a16-linux-power)
+documents how GIGABYTE Control Center drives fans and GPU power, reverse
+engineered from the GCC binaries plus a DSDT. **Three caveats before using any
+of it:**
+
+- **It is a GAMING A16 `CWH` — Intel, RTX 5070.** The generation this repo's
+  own rules call "different gen, different vendor CPU". Method analysis
+  transfers as a starting point; numbers do not.
+- **"Status: static analysis only. No value in this document was sent to the
+  hardware."** Their words. Nothing in it is hardware-validated by anyone.
+- **It carries no licence**, so it is all rights reserved. Use the facts, cite
+  the source, and do not copy its text or files into this repo — which matters
+  for work headed upstream.
+
+**What was checked against `GAMING-A16-5TH-DSDT.dsl` and holds on our AMD
+firmware**, method body for method body:
+
+| ID | Their description | Confirmed here |
+|---|---|---|
+| `0x68` set | `XFNW = Arg2`, **24 bits: index, temperature, duty** | `XFNW, 24` |
+| `0x68` get | `XFNR = Arg2`, 100 ms, return `XFN1` | `XFNR, 8`, `XFN1, 16` |
+| `0x57` | `GFAN = 0`, `CRAF = Arg2` — GCC's **quiet mode** | `CRAF, 1`, read/write |
+| `0x66` | `FLVL = Arg2`, the current fan step | ✓ |
+| `0x67` | `TENF = Arg2` | ✓ |
+| `0x6A` | `ADJF = Arg2` | ✓ |
+| `0x6B` | `FAN1 = Arg2`, CPU fixed duty | ✓ |
+| `0x47` | `GDTY = Arg2`, `FAN2 = Arg2` | ✓ |
+| `0x71` | `GFAN = 0`, `FANB = Arg2` | ✓ |
+| `0x70` | `TFAN = 0`, `GFAN = 1`, `FAN1 = FAN2 = Arg2` | ✓ |
+
+**The packing is the valuable part.** `XFNW` is index / temperature / duty, so
+`data << 8 | index` packs two values into a three-field register. Still
+unvalidated — but it is a stated layout to test rather than a guess to sweep.
+
+**The second finding is that fan mode is four independent bits, and GCC sets
+all four on every switch.** `CRAF` (`0x57`), `FANB` (`0x71`), `TENF` (`0x67`),
+`ADJF` (`0x6A`) — on CWH all four live in one EC byte. Their recorded recipes:
+
+| GCC mode | `0x6A` ADJF | `0x67` TENF | `0x71` FANB | `0x57` CRAF | also |
+|---|---|---|---|---|---|
+| Silent | 0 | 0 | 0 | **1** | |
+| Balance | 0 | 0 | 0 | 0 | |
+| Performance | 0 | 0 | **1** | 0 | |
+| Max | **1** | **1** | 0 | 0 | `0x6B`=229, `0x47`=229 |
+| Custom | 0 | **1** | 0 | 0 | then **8 × `0x68`** |
+
+Four consequences for Step 4:
+
+- **`CRAF` had never been mentioned in this file and has never been tried.** It
+  is present and read/write on our firmware.
+- **The rejected `0x46`/`0x47` test wrote the wrong CPU register.** GCC sets CPU
+  duty with `0x6B` → `FAN1`, never `0x46` → `FDTY`, which independently
+  confirms the conclusion above that `FDTY` is the EC's output.
+- **Max mode sets `TENF` *and* `ADJF` together**, where `fan_turbo` latches duty
+  plus `ADJF` alone. And GCC's Max duty is **229** — exactly `FAN_DUTY_MAX`,
+  arrived at independently.
+- **Custom mode sends 8 curve points, not 15.** "15-point" is used in this file
+  without a source; treat the count as unknown until the read-back enumerates
+  it. The firmware may hold 15 slots while GCC writes 8.
+
+**Also worth knowing, outside Step 4:**
+
+- `0x51` is `SetNvPowerConfig`: `0` sets `NPCF.ACBT = 0`, `1` restores
+  `ACBT = LCBT`, both with `Notify (NPCF, 0xC0)`. So `gpu_boost` sits on the
+  **same NPCF path** already closed as firmware-blocked, which tightens that
+  conclusion rather than reopening it. Reported, not verified here.
+- Their `0xED` NPCF tables (`ATPP`/`ACBT`/`AMAT` in ⅛ W units, mode 2 → 85 W)
+  corroborate the decoded chain `0xED` → NPCF → `Notify 0xC0` → `nvidia-powerd`
+  exactly. The **values are RTX 5070 SKU-class guesses and untested**; this unit
+  is a 5050. Do not import them.
+- `SKUN()` reads **EC command `0xD8`** and returns the GPU SKU class. Readable,
+  and it would settle which NPCF table applies.
+- **Nothing on RGB.** No ENE, no usage page `0xFF00`, no hidraw, no report
+  `0x0B`. Step 6b gains nothing from it.
+- Its CPU power section is Intel RAPL via MSR `0x610`, and CPU power is out of
+  scope here regardless.
 
 **Test write methods through a debug node, not through hwmon.** ✅ **Done** —
 `debug_method_write` takes `"method arg"`, performs the WMBD write on store and
