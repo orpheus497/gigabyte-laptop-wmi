@@ -2080,9 +2080,11 @@ Four consequences for Step 4:
 - **Max mode sets `TENF` *and* `ADJF` together**, where `fan_turbo` latches duty
   plus `ADJF` alone. And GCC's Max duty is **229** — exactly `FAN_DUTY_MAX`,
   arrived at independently.
-- **Custom mode sends 8 curve points, not 15.** "15-point" is used in this file
-  without a source; treat the count as unknown until the read-back enumerates
-  it. The firmware may hold 15 slots while GCC writes 8.
+- **Custom mode sends 8 curve points, not 15.** "15-point" had been used in this
+  file without a source. The enumeration settled the count question in the only
+  way it could: **all 16 indices `0`–`15` read back as implemented and empty**,
+  so the read side accepts at least 16 indices and the firmware populates none
+  of them. The count is academic now that the mechanism is closed.
 
 **Also worth knowing, outside Step 4:**
 
