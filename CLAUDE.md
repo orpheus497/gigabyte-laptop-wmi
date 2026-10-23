@@ -1627,6 +1627,45 @@ observed. Do not spend another reboot on this unless a 0 reappears; if it does,
 record what kind of power transition preceded it, because that is the variable
 nobody captured.
 
+### The EC has a *restart* hysteresis, not just a ceiling — 23 Oct 2026
+
+Observed as an apparent fault and it is not one. With `charge_mode 1` and
+`charge_limit 80`, the battery sat at **76 %** on AC and would not climb:
+
+```
+ACAD/online = 1        status = Charging      current_now = 0
+capacity    = 76       charge_mode = 1        charge_limit = 80
+```
+
+**`status` says `Charging` while `current_now` is 0**, which is the same
+disagreement recorded under the `HONOURED` verdict — except there it was seen
+*at* the ceiling and this is four points *below* it. So the EC does not merely
+stop at the ceiling; it also refuses to resume until the charge falls further.
+
+The evidence for the pair is already in this file: upower's hwdb entry for this
+DMI match is `CHARGE_LIMIT=75,80`, a **start/stop** pair. 76 % sits inside that
+75–80 dead band, so the EC had charged to 80, the battery drifted down on use,
+and resuming was correctly withheld. Standard top-of-charge protection.
+
+Three consequences:
+
+- **`current_now` is the only reliable indicator of whether charge is flowing**,
+  and that now holds across the whole band, not just at the ceiling. `status`
+  reads `Charging` throughout. Charging in earnest measures about **3.4 A**
+  (`current_now` ≈ `3380000`), confirmed again here.
+- **The driver exposes no start threshold and cannot.** The firmware has no
+  field for one — upower skips that write when the file is absent — so the 75 is
+  the EC's own behaviour, not something this driver sets or can change.
+- **Disabling the mode clears the band.** Writing `100` to
+  `charge_control_end_threshold` set `charge_limit 100` and `charge_mode 0` in
+  one transaction, and the battery charged from 76 straight past 80 — observed at
+  83 % and 3.38 A. The ceiling is what the hysteresis guards; with it off,
+  ordinary charging resumes immediately.
+
+**So "stuck below the ceiling on AC" is expected, not a bug.** Check
+`charge_mode` first: on the occasion above it still read `1` because an attempt
+to disable it had not landed.
+
 ### Keyboard backlight: verified end to end, 22 Oct 2026
 
 Installed through DKMS, signed, `installed == loaded`. The node appears with the
