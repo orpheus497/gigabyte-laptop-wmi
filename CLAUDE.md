@@ -1772,6 +1772,27 @@ It reacts to the **key only**, because the driver calls `sysfs_notify()` only
 from the key path. A sysfs write to `fan_preset` or `fan_mode` raises nothing,
 which is correct: the caller of a write already knows what it did.
 
+**The `.path` unit has not been shown to restart it after a module reload, and
+USAGE.md used to claim it did.** Corrected 23 Oct 2026 from the journal: across
+six boots, every start of the service sits immediately after a `-- Boot --`
+marker and none coincides with the mid-session `rmmod`/`modprobe` that
+`scripts/install-dkms.sh` performs. The service also shows no stop across those
+windows, so it either survived with a stale descriptor or sat dead without
+systemd noticing.
+
+`PathExists=` watches via inotify and inotify on `/sys` is not contractually
+reliable, so this is the expected behaviour rather than a surprise. **I asserted
+the opposite earlier in this session on bad evidence** — ten logged starts,
+every one of them a login, counted as proof of re-firing. Check the boot markers
+in `journalctl --user -u <unit>` before reading a start as a reload.
+
+The remedy, if it matters, is a udev rule with `SYSTEMD_USER_WANTS` — recorded
+in USAGE.md and deliberately not shipped, because `SYSTEMD_USER_WANTS` does not
+replay for an already-present device (so the `.path` unit is still needed for
+login) and **nobody has measured whether the watcher dies on a reload at all**.
+Reload the module with the service running and watch, before adding a second
+activation path.
+
 ### `charge_control_end_threshold`: verified end to end, 22 Oct 2026
 
 The standard ABI now exists and the whole chain works.

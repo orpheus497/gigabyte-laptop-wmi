@@ -158,7 +158,19 @@ FLAT=0
 while (( SECONDS - START < TIMEOUT )); do
 	CAP=$(cat "$BAT/capacity")
 	ST=$(cat "$BAT/status")
-	CUR=$(cat "$BAT/current_now" 2>/dev/null || echo 0)
+	# Absolute value, and remember whether the reading is real at all. A
+	# battery that does not expose current_now, or that signs it negative
+	# while charging, would otherwise satisfy "CUR < HELD_UA" on the first
+	# sample at the ceiling and report HONOURED while still charging --
+	# with the IGNORED branch then unreachable, because the loop has
+	# already broken out.
+	if CUR=$(cat "$BAT/current_now" 2>/dev/null); then
+		HAVE_CUR=1
+		CUR=${CUR#-}
+	else
+		HAVE_CUR=0
+		CUR=0
+	fi
 	printf '   %4ds  %3s%%  %-12s %5s mA\n' \
 		"$((SECONDS - START))" "$CAP" "$ST" "$((CUR/1000))"
 
@@ -181,7 +193,7 @@ while (( SECONDS - START < TIMEOUT )); do
 	# actually changes is the current -- about 3.4 A charging, near zero when
 	# held -- and the capacity stops rising.
 	if (( CAP >= CEILING - 1 )); then
-		if [ "$ST" != "Charging" ] || (( CUR < HELD_UA )); then
+		if [ "$ST" != "Charging" ] || { (( HAVE_CUR )) && (( CUR < HELD_UA )); }; then
 			VERDICT="HONOURED: held at ${CAP}% with a ${CEILING}% ceiling (status ${ST}, $((CUR/1000)) mA)"
 			break
 		fi

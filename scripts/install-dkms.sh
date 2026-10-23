@@ -43,6 +43,38 @@ if [ "$(id -u)" -ne 0 ]; then
 	exit 1
 fi
 
+# Do not delete files a package still owns: rpm and dpkg would keep listing
+# them and the next upgrade of that package would put them back. Ask the
+# package manager first and hand the removal to it.
+#
+# This runs before anything is touched, and that ordering is the point. Placed
+# later it was useless: module_unload had already dropped the old module and
+# remove_dkms_version had already done `rm -rf /usr/src/aorus-laptop-$ver` --
+# a package-owned tree -- so the machine was modified before the check could
+# refuse. /usr/src/aorus-laptop-* is in the list for the same reason: it is
+# what a package actually installs, and the first version of this check did not
+# test it.
+owner=
+for f in /var/lib/dkms/aorus-laptop /etc/modules-load.d/aorus-laptop.conf \
+         /usr/src/aorus-laptop-*; do
+	[ -e "$f" ] || continue
+	if command -v rpm >/dev/null 2>&1; then
+		owner=$(rpm -qf "$f" 2>/dev/null) && break
+	fi
+	if command -v dpkg >/dev/null 2>&1; then
+		owner=$(dpkg -S "$f" 2>/dev/null | cut -d: -f1) && [ -n "$owner" ] && break
+	fi
+	owner=
+done
+
+if [ -n "$owner" ]; then
+	echo "The pre-rename files are still owned by a package: $owner" >&2
+	echo "Remove it through the package manager rather than deleting its" >&2
+	echo "files, then run this again:" >&2
+	echo "   sudo dnf remove $owner        # or: sudo apt remove $owner" >&2
+	exit 1
+fi
+
 # /proc/modules is the authoritative list of resident modules. Read it with no
 # pipeline: `lsmod | grep -q` looks right but fails under pipefail, because
 # grep -q exits on the first match and lsmod then dies of SIGPIPE.
@@ -115,29 +147,6 @@ while read -r ver; do
 	echo "   removing aorus-laptop/$ver"
 	remove_dkms_version aorus-laptop "$ver"
 done < <(dkms status aorus-laptop 2>/dev/null | sed -n "s|^aorus-laptop/\([^,:]*\).*|\1|p" | sort -u)
-# Do not delete files a package still owns: rpm and dpkg would keep listing
-# them and the next upgrade of that package would put them back. Ask the
-# package manager first and hand the removal to it.
-owner=
-for f in /var/lib/dkms/aorus-laptop /etc/modules-load.d/aorus-laptop.conf; do
-	[ -e "$f" ] || continue
-	if command -v rpm >/dev/null 2>&1; then
-		owner=$(rpm -qf "$f" 2>/dev/null) && break
-	fi
-	if command -v dpkg >/dev/null 2>&1; then
-		owner=$(dpkg -S "$f" 2>/dev/null | cut -d: -f1) && [ -n "$owner" ] && break
-	fi
-	owner=
-done
-
-if [ -n "$owner" ]; then
-	echo "The pre-rename files are still owned by a package: $owner" >&2
-	echo "Remove it through the package manager rather than deleting its" >&2
-	echo "files, then run this again:" >&2
-	echo "   sudo dnf remove $owner        # or: sudo apt remove $owner" >&2
-	exit 1
-fi
-
 rm -rf /var/lib/dkms/aorus-laptop
 rm -f /etc/modules-load.d/aorus-laptop.conf
 

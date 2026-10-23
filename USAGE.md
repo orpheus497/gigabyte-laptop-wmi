@@ -99,8 +99,37 @@ systemctl --user enable --now gigabyte-fan-preset-notify.path
 ```
 
 **Enable the `.path` unit, not the service.** The path unit starts the watcher
-when the driver's attribute appears, and starts it again after a module reload —
-the service alone would exit when the driver went away and never come back.
+when the driver's attribute appears, which the service alone would not do at
+login.
+
+**It is not established that it restarts the watcher after a module reload.**
+An earlier version of this file claimed it does. The journal does not support
+that: across six boots every single start of the service sits immediately after
+a boot marker, and none coincides with the mid-session `rmmod`/`modprobe` that
+`scripts/install-dkms.sh` performs. `PathExists=` relies on inotify, and
+inotify on `/sys` is not contractually reliable, so this is the expected
+failure rather than a surprise.
+
+If the watcher stops reacting to the Mode key after a driver reinstall, restart
+it by hand:
+
+```sh
+systemctl --user start gigabyte-fan-preset-notify.service
+```
+
+A udev rule would make it automatic, and is the documented remedy if this turns
+out to matter:
+
+```udev
+SUBSYSTEM=="platform", KERNEL=="gigabyte_laptop", TAG+="systemd", \
+  ENV{SYSTEMD_USER_WANTS}+="gigabyte-fan-preset-notify.service"
+```
+
+It is deliberately **not** shipped yet: `SYSTEMD_USER_WANTS` does not replay for
+a device that is already present, so the `.path` unit is still needed for the
+login case, and whether the watcher actually dies on a reload — rather than
+surviving with a stale descriptor — has not been measured. Measure before adding
+a second activation path.
 
 It needs no privileges, allocates nothing, and uses 1.3 MB of memory sitting
 blocked in `poll()` at zero CPU.

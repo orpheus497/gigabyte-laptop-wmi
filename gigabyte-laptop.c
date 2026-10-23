@@ -2806,7 +2806,17 @@ static int __init gigabyte_laptop_init(void)
 			gigabyte_laptop_kbd_brightness_set;
 		gigabyte->kbd_led.brightness_get =
 			gigabyte_laptop_kbd_brightness_get;
-		gigabyte->kbd_led.flags = LED_BRIGHT_HW_CHANGED;
+		/*
+		 * RETAIN_AT_SHUTDOWN because led_classdev_unregister() otherwise
+		 * writes LED_OFF on the way out, and this registration is
+		 * devm-managed -- so every rmmod, DKMS upgrade and package
+		 * reinstall would turn a lit keyboard off. Probe deliberately seeds
+		 * the brightness from hardware so that *loading* the module leaves
+		 * a lit keyboard alone; without this flag the unload path undid
+		 * exactly that.
+		 */
+		gigabyte->kbd_led.flags = LED_BRIGHT_HW_CHANGED |
+					LED_RETAIN_AT_SHUTDOWN;
 
 		result = devm_led_classdev_register(&gigabyte->pdev->dev,
 						&gigabyte->kbd_led);

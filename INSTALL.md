@@ -82,7 +82,7 @@ remove.
 Simply run the following commands:
 ```
 make
-sudo modprobe wmi sparse-keymap
+sudo modprobe -a wmi sparse-keymap
 sudo insmod gigabyte-laptop.ko
 ```
 
