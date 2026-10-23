@@ -10,7 +10,7 @@
 %global debug_package %{nil}
 
 # name should have a -kmod suffix
-Name:           aorus-laptop-kmod
+Name:           gigabyte-laptop-kmod
 
 Version:        0.2.0
 Release:        2%{?dist}
@@ -33,8 +33,24 @@ BuildRequires:  %{_bindir}/kmodtool
 
 %{!?kernels:BuildRequires: buildsys-build-rpmfusion-kerneldevpkgs-%{?buildforkernels:%{buildforkernels}}%{!?buildforkernels:current}-%{_target_cpu} }
 
-# kmodtool does its magic here
-%{expand:%(kmodtool --target %{_target_cpu} --repo rpmfusion --kmodname %{name} %{?buildforkernels:--%{buildforkernels}} %{?kernels:--for-kernels "%{?kernels}"} 2>/dev/null) }
+# kmodtool does its magic here.
+#
+# The driver was renamed from aorus-laptop, and --obsolete-name/--obsolete-version
+# are how the generated subpackages declare that. kmodtool emits, for both the
+# akmod and the kmod packages:
+#     Provides:  akmod-aorus-laptop = <ver>
+#     Obsoletes: akmod-aorus-laptop < <ver>
+# so an upgrade replaces the old akmod rather than leaving it installed
+# alongside. Both options are required together or kmodtool errors out.
+#
+# Note the options are absent from `kmodtool --help` in 1.2.1 but implemented --
+# grep the script, do not trust the usage text.
+#
+# The version bound has to clear the old package's release, not just its
+# version: aorus-laptop was 0.2.0-1 and this is 0.2.0, so %%{version} alone
+# would exclude the very package it must replace. %%{version}-%%{release}
+# covers it, which is the same reasoning as the Obsoletes in the other specs.
+%{expand:%(kmodtool --target %{_target_cpu} --repo rpmfusion --kmodname %{name} --obsolete-name aorus-laptop --obsolete-version %{version}-%{release} %{?buildforkernels:--%{buildforkernels}} %{?kernels:--for-kernels "%{?kernels}"} 2>/dev/null) }
 
 %description
 Kmod package for Gigabyte laptop kernel module
@@ -44,7 +60,7 @@ Kmod package for Gigabyte laptop kernel module
 %{?kmodtool_check}
 
 # print kmodtool output for debugging purposes:
-kmodtool  --target %{_target_cpu}  --repo rpmfusion --kmodname %{name} %{?buildforkernels:--%{buildforkernels}} %{?kernels:--for-kernels "%{?kernels}"} 2>/dev/null
+kmodtool  --target %{_target_cpu}  --repo rpmfusion --kmodname %{name} --obsolete-name aorus-laptop --obsolete-version %{version}-%{release} %{?buildforkernels:--%{buildforkernels}} %{?kernels:--for-kernels "%{?kernels}"} 2>/dev/null
 
 %setup -q -c -T -a 0
 
@@ -53,7 +69,7 @@ kmodtool  --target %{_target_cpu}  --repo rpmfusion --kmodname %{name} %{?buildf
 # #patch0 -p1 -b .suffix
 # popd
 mkdir %{name}-%{version}
-mv aorus-laptop.c %{name}-%{version}
+mv gigabyte-laptop.c %{name}-%{version}
 mv Makefile %{name}-%{version}
 
 for kernel_version in %{?kernel_versions} ; do
@@ -73,7 +89,7 @@ rm -rf ${RPM_BUILD_ROOT}
 for kernel_version in %{?kernel_versions}; do
     # make install DESTDIR=${RPM_BUILD_ROOT} KMODPATH=%{kmodinstdir_prefix}/${kernel_version%%___*}/%{kmodinstdir_postfix}
     mkdir -p  $RPM_BUILD_ROOT/%{kmodinstdir_prefix}/${kernel_version%%___*}/%{kmodinstdir_postfix}/
-    install -D -m 755 _kmod_build_${kernel_version%%___*}/aorus-laptop.ko  ${RPM_BUILD_ROOT}%{kmodinstdir_prefix}/${kernel_version%%___*}/%{kmodinstdir_postfix}/aorus-laptop.ko
+    install -D -m 755 _kmod_build_${kernel_version%%___*}/gigabyte-laptop.ko  ${RPM_BUILD_ROOT}%{kmodinstdir_prefix}/${kernel_version%%___*}/%{kmodinstdir_postfix}/gigabyte-laptop.ko
 done
 %{?akmod_install}
 
@@ -83,5 +99,8 @@ rm -rf $RPM_BUILD_ROOT
 
 
 %changelog
+* Thu Oct 22 2026 Albert Tang <tangalbert919@yahoo.com> - 0.2.0-2
+- Rename the driver from aorus-laptop to gigabyte-laptop
+
 * Fri Nov 1 2024 Albert Tang <tangalbert919@yahoo.com> - 0.1.0
 - Initial release for RPM-based Linux distros
