@@ -1846,10 +1846,16 @@ Three things follow, and they settle every open question on this unit:
   (`ActiveEnterTimestamp` 09:15:48, `Result=success`) across the reload. That
   independently confirms the inotify-on-`/sys` reasoning above, by observation
   rather than by inference from boot markers.
-- **The review finding asking for a udev rule is VALID**, and the premise that
-  held it back is now measured. `SYSTEMD_USER_WANTS` still does not replay for
-  an already-present device, so the `.path` unit is still needed for login —
-  the rule is a *second* activation path, not a replacement.
+- **The udev rule the review finding asked for would NOT have fixed this**, and
+  I said it would before checking. `SYSTEMD_USER_WANTS=` "adds dependencies of
+  type `Wants=`" (`systemd.device(5)`), a `Wants=` enqueues a **start**, and a
+  start against an already-active unit is a no-op — the identical no-op that
+  defeats `PathExists=`. Verified rather than reasoned: `systemctl --user start`
+  against the running watcher returned 0 and left the PID at 6979.
+
+  So the finding correctly identified a real bug and proposed a remedy for the
+  wrong link in the chain. **Do not add the rule.** It would be inert code
+  carrying an implication that recovery is handled.
 - **`systemctl --user restart` is the right recovery command**, not `start`,
   which is exactly what the `e33932d` fix changed in USAGE.md. A `start` against
   an already-`active` unit is a no-op, so it would have left the dead descriptor
@@ -1872,6 +1878,44 @@ until the watcher is restarted, and nothing on screen says so. Say that before
 asking someone to run it. The reload also resets `fan_preset` to `auto`, since
 the ring is driver state; `charge_mode`/`charge_limit` survive because they live
 in the EC.
+
+### The fix: the watcher re-opens itself, and no unit does it for it
+
+**The root cause was one argument.** `poll(&pfd, 1, -1)` waited forever, so the
+loss detection sitting right behind it never ran. The program's logic was
+already correct — a failed `read_preset()` means the node is gone — it just sat
+behind a `poll()` that can never return once the node is orphaned. Nothing is
+delivered, so nothing wakes, so nothing is checked.
+
+`poll()` now takes `POLL_INTERVAL_MS` (5 s), and each idle wake probes the
+descriptor with a read. **The read is the only usable probe:** kernfs fails a
+read on a removed node, while the fd, the path, `poll()` and the unit state all
+keep looking healthy. An inode comparison also works and is the right *manual*
+diagnostic, but it is weaker in code — inode numbers can be reused, and a reused
+number would read as healthy when the fd is still orphaned.
+
+**It re-opens rather than exits, and that is the whole point.** Exiting hands
+recovery to the service manager, which cannot do it for the reason above, and
+there is a race even if it could: the reload window measured 2 s (09:32:05 to
+09:32:07), shorter than any sane timeout, so the trigger fires while the old
+process is still active and is swallowed. Re-opening needs no activation path,
+no udev rule, no root and no packaging, and survives any number of reloads.
+
+Startup behaviour is deliberately unchanged: a failed open at startup is still
+fatal, because the `.path` unit only starts the watcher once the attribute
+exists, so an unopenable attribute then means something is wrong rather than in
+flux. Only a mid-life loss self-heals.
+
+**The idle cost is unchanged**, which was the one regression risk: 0 CPU ticks
+across 33 s and roughly six timeout wakes, `wchan` = `poll_schedule_timeout`.
+The "blocked in `poll()` the whole time" property survives; it is now a timed
+wait rather than an infinite one.
+
+Both unit files documented the old, non-existent chain — the `.path` comment
+claimed it restarts the service on a later module load "because the service
+exits when the driver goes away", and the `.service.in` comment justified
+omitting `Restart=` on the same false premise. Both corrected to say what
+actually happens and why no unit dependency can help.
 
 ### `charge_control_end_threshold`: verified end to end, 22 Oct 2026
 

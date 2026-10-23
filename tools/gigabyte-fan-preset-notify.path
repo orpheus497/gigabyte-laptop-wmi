@@ -3,9 +3,14 @@ Description=Watch for the Gigabyte laptop fan preset attribute
 PartOf=graphical-session.target
 
 [Path]
-# Starts the service when the driver appears, and -- because the service exits
-# when the driver goes away -- starts it again on a later module load. This is
-# what makes a mid-session reinstall work without a manual start.
+# Starts the service the first time the attribute exists -- at login, or when
+# the driver is installed mid-session with no watcher yet running.
+#
+# It deliberately does NOT handle a module reload, and cannot: the trigger
+# enqueues a *start*, and a start against a still-active unit is a no-op.
+# Measured 24 Oct 2026 -- the watcher survives a reload holding an orphaned
+# descriptor, so it is active throughout and nothing here fires. The watcher
+# detects that itself and re-opens; see the liveness check in the .c file.
 PathExists=/sys/devices/platform/gigabyte_laptop/fan_preset
 
 [Install]

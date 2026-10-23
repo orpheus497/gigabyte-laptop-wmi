@@ -8,9 +8,11 @@ Description=Notify on Gigabyte laptop fan preset changes
 [Service]
 Type=simple
 ExecStart=@BINDIR@/gigabyte-fan-preset-notify
-# No Restart=. The program exits non-zero when the attribute disappears, and
-# the .path unit re-arms and starts it again when the driver comes back. A
-# restart loop here would just poll for a device that is not there.
+# No Restart=, and none is needed. The program recovers from a driver reload by
+# re-opening the attribute itself, because no unit dependency can do it for it:
+# both PathExists= and a udev SYSTEMD_USER_WANTS= enqueue a start, and a start
+# against a still-active unit is a no-op. It exits non-zero only for a failure
+# at startup or a broken poll(), neither of which a restart loop would help.
 
 NoNewPrivileges=yes
 ProtectSystem=strict

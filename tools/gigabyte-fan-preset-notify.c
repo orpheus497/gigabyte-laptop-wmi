@@ -27,6 +27,15 @@
 #define ATTR "/sys/devices/platform/gigabyte_laptop/fan_preset"
 
 /*
+ * poll() must not wait forever. A module reload orphans the kernfs node behind
+ * an open fd: no event is ever delivered again, so an infinite wait never
+ * returns and the loss below is never noticed. Waking periodically is what
+ * turns that silent deafness into something detectable. The interval only
+ * bounds how long toasts stay missing after a reinstall, so seconds are fine.
+ */
+#define POLL_INTERVAL_MS 5000
+
+/*
  * The notification text comes from this table and never from the file. A value
  * read out of sysfs is only ever used to pick an index, so no kernel-supplied
  * string reaches execlp() -- there is nothing to quote, escape or truncate.
@@ -67,6 +76,30 @@ static int read_preset(int fd, char *buf, size_t size)
 	return 0;
 }
 
+/*
+ * Open the attribute and consume its event counter, which is what makes a
+ * subsequent poll() block instead of returning immediately. Shared by startup
+ * and by recovery after a module reload, because both need the same arming
+ * read and getting it wrong spins at 100% CPU.
+ */
+static int arm(int *fd, char *buf, size_t size)
+{
+	int new_fd = open(ATTR, O_RDONLY);
+
+	if (new_fd < 0)
+		return -1;
+
+	if (read_preset(new_fd, buf, size)) {
+		close(new_fd);
+		return -1;
+	}
+
+	if (*fd >= 0)
+		close(*fd);
+	*fd = new_fd;
+	return 0;
+}
+
 static void notify(const char *text)
 {
 	pid_t pid = fork();
@@ -97,21 +130,19 @@ int main(void)
 	/* A notification's exit status is of no interest, so reap by ignoring. */
 	signal(SIGCHLD, SIG_IGN);
 
-	fd = open(ATTR, O_RDONLY);
-	if (fd < 0) {
-		perror(ATTR);
-		return 1;
-	}
-
 	/*
-	 * This first read is what arms the wait, and it is not optional:
-	 * until the attribute's event counter has been consumed, poll()
-	 * returns immediately and would spin at 100% CPU. The value it
-	 * returns is the current state rather than a change, so it is
+	 * The arming read is not optional: until the attribute's event counter
+	 * has been consumed, poll() returns immediately and would spin at 100%
+	 * CPU. What it returns is current state rather than a change, so it is
 	 * recorded and not announced.
+	 *
+	 * Failing here is fatal, unlike a loss mid-life. The .path unit starts
+	 * this only once the attribute exists, so an attribute that cannot be
+	 * opened at startup means something is wrong rather than in flux.
 	 */
-	if (read_preset(fd, buf, sizeof(buf))) {
-		perror("read");
+	fd = -1;
+	if (arm(&fd, buf, sizeof(buf))) {
+		perror(ATTR);
 		return 1;
 	}
 	idx = lookup(buf);
@@ -120,21 +151,50 @@ int main(void)
 	pfd.events = POLLPRI | POLLERR;
 
 	for (;;) {
-		if (poll(&pfd, 1, -1) < 0) {
+		int ret = poll(&pfd, 1, POLL_INTERVAL_MS);
+
+		if (ret < 0) {
 			perror("poll");
 			return 1;
 		}
 
 		/*
-		 * POLLERR accompanies every POLLPRI on a sysfs attribute, so it
-		 * is not an error on its own. A failed read is: it means the
-		 * driver went away, and the service manager should decide what
-		 * happens next rather than this looping on a dead fd.
+		 * Nothing happened, so this is the liveness check rather than an
+		 * event. A read is the probe because it is the only thing that
+		 * distinguishes a live node from an orphaned one: kernfs fails a
+		 * read on a removed node, while the fd, the path and poll() all
+		 * keep looking healthy. Recovering means re-opening -- the new
+		 * node is a different inode, so the old fd can never be revived.
+		 *
+		 * Re-opening here rather than exiting is deliberate. Exiting
+		 * would hand recovery to the .path unit, which cannot do it: a
+		 * Wants= or PathExists= trigger enqueues a *start*, and a start
+		 * against a still-active unit is a no-op, so the reload window
+		 * is lost before this process ever notices. Self-healing needs
+		 * no second activation path and no udev rule.
 		 */
-		if (read_preset(fd, buf, sizeof(buf))) {
-			fprintf(stderr, "%s: gone, exiting\n", ATTR);
-			return 1;
+		if (ret == 0) {
+			if (!read_preset(fd, buf, sizeof(buf)))
+				continue;
+
+			if (arm(&fd, buf, sizeof(buf)))
+				continue;
+
+			pfd.fd = fd;
+			idx = lookup(buf);
+			fprintf(stderr, "%s: re-opened after a driver reload\n",
+				ATTR);
+			continue;
 		}
+
+		/*
+		 * POLLERR accompanies every POLLPRI on a sysfs attribute, so it
+		 * is not an error on its own. A failed read here means the node
+		 * went away between the wake and the read, which the next
+		 * liveness check will recover from.
+		 */
+		if (read_preset(fd, buf, sizeof(buf)))
+			continue;
 
 		idx = lookup(buf);
 		if (idx < 0) {

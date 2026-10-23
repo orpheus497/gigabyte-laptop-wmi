@@ -102,38 +102,41 @@ systemctl --user enable --now gigabyte-fan-preset-notify.path
 when the driver's attribute appears, which the service alone would not do at
 login.
 
-**It is not established that it restarts the watcher after a module reload.**
-An earlier version of this file claimed it does. The journal does not support
-that: across six boots every single start of the service sits immediately after
-a boot marker, and none coincides with the mid-session `rmmod`/`modprobe` that
-`scripts/install-dkms.sh` performs. `PathExists=` relies on inotify, and
-inotify on `/sys` is not contractually reliable, so this is the expected
-failure rather than a surprise.
+**It does not restart the watcher after a module reload, and no unit
+dependency can.** Measured 24 Oct 2026: the watcher survives a reload holding
+an orphaned file descriptor. `systemctl --user is-active` reads `active`
+throughout, `NRestarts` stays `0`, and every Mode key press is missed. The
+driver side is unaffected — it logs each press — so only the toasts go quiet,
+with nothing reporting it.
 
-If the watcher stops reacting to the Mode key after a driver reinstall, restart
-it by hand. **`restart`, not `start`** — if the watcher survived the reload with
-a stale descriptor the unit is still active, and `start` would be a no-op while
-notifications stayed broken; `restart` also starts a stopped unit, so it is
-correct either way, which matters because which of the two happens is exactly
-what has not been measured:
+The reason no unit can fix it is the same for both candidates. `PathExists=`
+and a udev `SYSTEMD_USER_WANTS=` both enqueue a **start** job, and a start
+against an already-active unit is a no-op. Verified directly: issuing
+`systemctl --user start` against the running watcher returned 0 and left the
+PID unchanged.
+
+**So the watcher recovers itself**, with a periodic liveness check: `poll()`
+takes a finite timeout, and on each idle wake a read probes the descriptor.
+kernfs fails a read on a removed node while the fd, the path and `poll()` all
+still look healthy, so the read is the only thing that detects it. On failure
+the watcher re-opens the attribute and re-arms. Toasts resume within the poll
+interval, with no second activation path and no udev rule.
+
+**Diagnose a suspected stale descriptor by inode**, never by unit state, which
+reads `active` either way:
+
+```sh
+PID=$(systemctl --user show -p MainPID --value gigabyte-fan-preset-notify.service)
+stat -c %i /sys/devices/platform/gigabyte_laptop/fan_preset   # the live node
+stat -L -c %i /proc/$PID/fd/3                                 # what it holds
+```
+
+Equal is healthy. If they differ on a build that predates the self-healing
+watcher, recover with `restart` — **not `start`**, which is the no-op above:
 
 ```sh
 systemctl --user restart gigabyte-fan-preset-notify.service
 ```
-
-A udev rule would make it automatic, and is the documented remedy if this turns
-out to matter:
-
-```udev
-SUBSYSTEM=="platform", KERNEL=="gigabyte_laptop", TAG+="systemd", \
-  ENV{SYSTEMD_USER_WANTS}+="gigabyte-fan-preset-notify.service"
-```
-
-It is deliberately **not** shipped yet: `SYSTEMD_USER_WANTS` does not replay for
-a device that is already present, so the `.path` unit is still needed for the
-login case, and whether the watcher actually dies on a reload — rather than
-surviving with a stale descriptor — has not been measured. Measure before adding
-a second activation path.
 
 It needs no privileges, allocates nothing, and uses 1.3 MB of memory sitting
 blocked in `poll()` at zero CPU.
