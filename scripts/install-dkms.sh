@@ -54,9 +54,24 @@ fi
 # refuse. /usr/src/aorus-laptop-* is in the list for the same reason: it is
 # what a package actually installs, and the first version of this check did not
 # test it.
+#
+# The CURRENT name is gated too, and for the same reason rather than for
+# symmetry: "Removing any previous registration" runs remove_dkms_version
+# "$NAME" and then `rm -rf /var/lib/dkms/$NAME`, so a packaged
+# gigabyte-laptop-dkms would have its source tree deleted and replaced with the
+# smaller set this script installs, leaving rpm or dpkg listing files that no
+# longer match. Gating it means the script refuses while that package is
+# installed, which is the right answer: remove it through the package manager
+# and then use the script, or keep using the package.
+#
+# /etc/modules-load.d/gigabyte-laptop.conf is deliberately NOT gated. The script
+# overwrites it with identical content rather than deleting it, so it does not
+# strand the package -- except under --no-autoload, which removes it; that is an
+# explicit request and is left to the caller.
 owner=
 for f in /var/lib/dkms/aorus-laptop /etc/modules-load.d/aorus-laptop.conf \
-         /usr/src/aorus-laptop-*; do
+         /usr/src/aorus-laptop-* \
+         /var/lib/dkms/gigabyte-laptop /usr/src/gigabyte-laptop-*; do
 	[ -e "$f" ] || continue
 	if command -v rpm >/dev/null 2>&1; then
 		owner=$(rpm -qf "$f" 2>/dev/null) && break
@@ -68,7 +83,7 @@ for f in /var/lib/dkms/aorus-laptop /etc/modules-load.d/aorus-laptop.conf \
 done
 
 if [ -n "$owner" ]; then
-	echo "The pre-rename files are still owned by a package: $owner" >&2
+	echo "DKMS files here are still owned by a package: $owner" >&2
 	echo "Remove it through the package manager rather than deleting its" >&2
 	echo "files, then run this again:" >&2
 	echo "   sudo dnf remove $owner        # or: sudo apt remove $owner" >&2

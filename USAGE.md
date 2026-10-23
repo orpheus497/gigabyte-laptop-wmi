@@ -111,10 +111,14 @@ inotify on `/sys` is not contractually reliable, so this is the expected
 failure rather than a surprise.
 
 If the watcher stops reacting to the Mode key after a driver reinstall, restart
-it by hand:
+it by hand. **`restart`, not `start`** — if the watcher survived the reload with
+a stale descriptor the unit is still active, and `start` would be a no-op while
+notifications stayed broken; `restart` also starts a stopped unit, so it is
+correct either way, which matters because which of the two happens is exactly
+what has not been measured:
 
 ```sh
-systemctl --user start gigabyte-fan-preset-notify.service
+systemctl --user restart gigabyte-fan-preset-notify.service
 ```
 
 A udev rule would make it automatic, and is the documented remedy if this turns
