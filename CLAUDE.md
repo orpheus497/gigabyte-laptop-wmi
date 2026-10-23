@@ -1786,12 +1786,71 @@ the opposite earlier in this session on bad evidence** — ten logged starts,
 every one of them a login, counted as proof of re-firing. Check the boot markers
 in `journalctl --user -u <unit>` before reading a start as a reload.
 
-The remedy, if it matters, is a udev rule with `SYSTEMD_USER_WANTS` — recorded
-in USAGE.md and deliberately not shipped, because `SYSTEMD_USER_WANTS` does not
-replay for an already-present device (so the `.path` unit is still needed for
-login) and **nobody has measured whether the watcher dies on a reload at all**.
-Reload the module with the service running and watch, before adding a second
-activation path.
+### Measured 24 Oct 2026: the watcher survives a reload with a dead descriptor
+
+The reload test that the paragraph above asked for has now been run, and it
+returned the **worst of the three possible outcomes**: the watcher neither dies
+nor keeps working. It survives, systemd reports it healthy, and it never sees
+another event.
+
+```
+watcher PID 2332   started 09:15:48   NRestarts=0     <- the pre-reload process
+systemctl --user is-active                -> active   <- systemd sees nothing wrong
+watcher fd 3   inode = 43039
+live fan_preset inode = 63096                         <- a different file
+```
+
+The kernel side was never affected. Six Fn+F7 presses after the reload were all
+registered by the driver, and all six were missed by the watcher:
+
+```
+09:32:05  Stopping Gigabyte laptop WMI driver
+09:32:07  Gigabyte laptop WMI driver started
+09:32:07  Mode key: fan preset silent
+09:32:09  Mode key: fan preset normal
+09:32:13  Mode key: fan preset gaming
+09:32:14  Mode key: fan preset auto
+```
+
+**Why it looks healthy.** `poll()` on a kernfs node whose module has gone does
+not return `POLLERR` and does not fail — it simply never becomes ready again.
+The program's own error handling is sound and never fires, because there is no
+error: `read()` is never reached. So the exit-non-zero-on-read-failure design
+recorded above protects against the driver being *absent*, not against the
+attribute being *replaced*.
+
+Three things follow, and they settle every open question on this unit:
+
+- **The `.path` unit does not recover it.** It stayed at its login timestamp
+  (`ActiveEnterTimestamp` 09:15:48, `Result=success`) across the reload. That
+  independently confirms the inotify-on-`/sys` reasoning above, by observation
+  rather than by inference from boot markers.
+- **The review finding asking for a udev rule is VALID**, and the premise that
+  held it back is now measured. `SYSTEMD_USER_WANTS` still does not replay for
+  an already-present device, so the `.path` unit is still needed for login —
+  the rule is a *second* activation path, not a replacement.
+- **`systemctl --user restart` is the right recovery command**, not `start`,
+  which is exactly what the `e33932d` fix changed in USAGE.md. A `start` against
+  an already-`active` unit is a no-op, so it would have left the dead descriptor
+  in place. That finding was right for precisely this reason.
+
+**Diagnose it by inode, not by unit state.** Unit state is useless here; it
+reads `active` either way. The one-line check:
+
+```sh
+PID=$(systemctl --user show -p MainPID --value gigabyte-fan-preset-notify.service)
+stat -c %i /sys/devices/platform/gigabyte_laptop/fan_preset   # live
+stat -L -c %i /proc/$PID/fd/3                                 # what the watcher holds
+```
+
+Equal means healthy. Different means notifications are silently dead and the
+service needs a `restart`.
+
+**Note for anyone running the test:** reloading the module breaks the toasts
+until the watcher is restarted, and nothing on screen says so. Say that before
+asking someone to run it. The reload also resets `fan_preset` to `auto`, since
+the ring is driver state; `charge_mode`/`charge_limit` survive because they live
+in the EC.
 
 ### `charge_control_end_threshold`: verified end to end, 22 Oct 2026
 
