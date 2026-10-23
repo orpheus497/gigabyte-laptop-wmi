@@ -605,7 +605,25 @@ defect, not a review.
 | Branch | Purpose |
 |---|---|
 | `master` | Pristine upstream tracking. **Never commit here.** |
-| `a16-5th` | Integration branch. All work lands here. |
+| `a16-5th-gmate` | **Integration branch. All work lands here.** |
+| `a16-5th` | Retired 24 Oct 2026. Local only; deleted on the fork. |
+
+**The integration branch changed on 24 Oct 2026, and the old name is a trap.**
+PR #3 squash-merged the whole of `a16-5th` onto `a16-5th-gmate` as `8dad4e1`,
+and the remote `a16-5th` was then deleted. So `a16-5th-gmate` carries every
+change and is where work goes; the local `a16-5th` still sits at `e33932d` with
+the same content but is no longer pushed or tracked.
+
+Two consequences worth knowing:
+
+- **The history is now three commits on upstream's baseline**, not sixty-one:
+  `4b817ea` → `8dad4e1` (the squash) → whatever follows. That is a better base
+  for extracting an upstream patch series than the integration history was,
+  which is the point of having done it.
+- **`git checkout a16-5th` looks right and is wrong.** Its tracking ref is gone
+  (`"upstream is gone"` on checkout), so a commit landing there goes nowhere.
+  Check `git rev-parse --abbrev-ref HEAD` before committing; this mistake has
+  already been made once, immediately after the merge.
 
 Remotes, all three present:
 
@@ -620,7 +638,10 @@ Note the naming: `upstream` is the *project*, not `origin`. A habitual
 fork, not the project. Upstream updates come from
 `git fetch upstream && git log upstream/master`.
 
-`master` still sits at upstream's `4b817ea`, untouched.
+`master` still sits at upstream's `4b817ea`, untouched — verified after the
+PR #3 merge on both the local and the fork copy. The never-merge rule covers
+`master` only, and PR #3's base was the scratch branch, which is why merging it
+was safe.
 
 ### How reviews work on this fork (and PR #1, the first review surface)
 
