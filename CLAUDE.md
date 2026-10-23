@@ -893,12 +893,27 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   `WMBD 0x63` writes, not a timestamp. It read `0 1 5 5 2` here. Useful rather
   than harmful: this node *is* the pre-write CMOS snapshot that Step 6 needs, so
   that requirement is already satisfied by `cat power_on_time`.
-- **`eeepc_wmi` steals our event GUID.** `/lib/modules/$(uname -r)/modules.alias`
-  contains `alias wmi:ABBC0F72-8EA1-11D1-00A0-C90629100000 eeepc_wmi`. udev
-  coldplugs the WMI event device, matches `eeepc_wmi`, which pulls in `asus_wmi`
-  and logs `ASUS Management GUID not found`. ASUS's Eee PC interface and
-  Gigabyte's AMW0 share the same AMI-derived GUID block. This must be
-  blacklisted before working on the GiMate button.
+- ~~**`eeepc_wmi` steals our event GUID.**~~ **Blacklisted, and verified
+  24 Oct 2026.** `/lib/modules/$(uname -r)/modules.alias` still contains
+  `alias wmi:ABBC0F72-8EA1-11D1-00A0-C90629100000 eeepc_wmi`, so the collision
+  is real and permanent: udev coldplugs the WMI event device, matches
+  `eeepc_wmi`, which pulls in `asus_wmi` and logs `ASUS Management GUID not
+  found`. ASUS's Eee PC interface and Gigabyte's AMW0 share the same
+  AMI-derived GUID block.
+
+  `/etc/modprobe.d/gigabyte-a16.conf` now holds `blacklist eeepc_wmi` and
+  `blacklist asus_wmi`, neither module is resident, and the device is ours:
+
+  ```
+  /sys/bus/wmi/devices/ABBC0F72-…-3/driver -> /sys/bus/wmi/drivers/gigabyte-laptop-events
+  ```
+
+  **This was listed as pending Stage 3 hygiene and is in fact complete** — it
+  was done back when the hotkey handler was being debugged, because ownership
+  of the GUID is what made the absent `GBT0005` notifies a real negative rather
+  than a lost race. It is **machine state, not repo state**: nothing in the
+  driver or the packaging installs that file, so a fresh machine needs it
+  written by hand. Worth shipping with the packaging if this ever goes wider.
 - ~~**Kernel cmdline leftovers, and `acpi_osi=Linux` is now implicated.**~~
   **Removed, and the `acpi_osi` theory was disproven.**
   `acpi_osi=Linux acpi_enforce_resources=lax` were both leftovers from the
