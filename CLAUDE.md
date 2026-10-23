@@ -1539,7 +1539,7 @@ kind of thing only a second reader catches:
   harmless if redundant and necessary if not, so it is called. That is a
   judgement, not a verified fact.
 
-### Open: `BCPC` reads 0 after a reboot, and nothing restores it
+### Settled: `BCPC` *does* persist across a reboot — and the original 0 is unexplained
 
 Observed 22 Oct 2026, and **not yet explained.** `charge_limit` reads `0` where
 the recorded factory baseline was `100`:
@@ -1593,21 +1593,39 @@ returned `0x0 (0) [implemented]` for both `0x65` and `0x64`, so these are
 genuine firmware reads and `charge_limit` reports the truth: `BCPC` really is 0
 and `BCPS` really is 0.
 
-**What remains is one clean persistence test**, and it needs a reboot, so run it
-on the next one rather than making a trip for it. Set the ceiling and leave the
-mode **off**, so a non-persisting `BCPC` cannot strand the machine on a 0 %
-ceiling:
+**The test ran on 23 Oct 2026 and the hypothesis is disproven.** `charge_limit`
+was set to 80 with the mode off, the machine rebooted — a real one, the previous
+boot had run 11 h 27 m — and the sentinel read came back:
 
-```sh
-echo 80 | sudo tee $S/charge_limit        # mode stays 0; the EC ignores BCPC
-# ... reboot ...
-echo '0x65 0x5A' | sudo tee $S/debug_method && sudo cat $S/debug_method
-# 0x50 (80) -> BCPC persists, nothing more to do
-# 0x0  (0)  -> BCPC does NOT persist: a ceiling needs re-applying at boot
+```
+method 0x65 arg 0x5a -> 0x50 (80) [implemented]
 ```
 
-A `0` there makes it a finding rather than a hypothesis, and the fix is a
-boot-time re-apply (a systemd unit or a udev rule), not a driver change.
+**`BCPC` survives a reboot.** `echo 1 > charge_mode` then succeeded, which is
+the guard's success path: it read 80, found it sane, and let the write through.
+So **no boot-time re-apply is needed**, and there is no systemd unit or udev
+rule to write.
+
+**What is now unexplained is the original 100 → 0.** No code path in this driver
+can write 0 to `BCPC`: `charge_limit_store()` refuses anything below 60, and the
+battery extension writes 100 or 1–99. So something outside the driver cleared
+it, and a plain reboot is now ruled out as the cause.
+
+The remaining candidate is **a colder power transition than a reboot** — a full
+shutdown, a power-loss event, or the EC firmware resetting — none of which this
+reboot exercised. The 22 Oct session that preceded the observation included
+several reboots, a lost MOK enrolment and a GPU driver mess, so a hard power-off
+in there is plausible and unrecorded.
+
+**Both observations stand and neither should be over-read.** `BCPC` was once
+seen at 0 with no driver path that could have put it there, and `BCPC` once
+survived a reboot intact. Those are compatible: the field persists across the
+transition that was tested and something else cleared it on an occasion that was
+not. **The guard is what makes that acceptable** — it covers precisely the case
+of firmware state the driver did not write, which is the one thing actually
+observed. Do not spend another reboot on this unless a 0 reappears; if it does,
+record what kind of power transition preceded it, because that is the variable
+nobody captured.
 
 ### Keyboard backlight: verified end to end, 22 Oct 2026
 
@@ -1824,11 +1842,13 @@ remains open.
 `CRAF` reads `1` whenever `fan_mode` is 1, so the driver has been driving it as
 silent mode all along; the CWH analysis named a field this file had left
 anonymous, it did not find a new control.
-- **Whether `BCPC` survives a power cycle.** The guard is in regardless, so
-  this is no longer a safety question — it decides only whether a charge
-  ceiling needs re-applying at boot. Set `charge_limit 80` with the mode off,
-  reboot, read `0x65`; see "Open: `BCPC` reads 0 after a reboot". The next
-  reinstall reboot answers it for free.
+~~**Whether `BCPC` survives a power cycle.**~~ **Answered 23 Oct 2026 — it
+does.** 80 survived a reboot, so no boot-time re-apply is needed. What the
+original 0 came from is still unknown, and is not worth another reboot; see
+"Settled: `BCPC` *does* persist across a reboot".
+
+**Nothing is open here any more.** Phase 3 has one remaining row, 6b, and it is
+a separate research project.
 
 ## Decided: upstreaming comes last
 
