@@ -1871,6 +1871,32 @@ page-gated, so it will not see this device. Its `GigabyteAorusLaptopController`
 is USB-only on page `0xFF01` with an 8-byte report `0x08`. `opengigabyte`
 supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 
+### Two review findings declined, with reasons — 23 Oct 2026
+
+Recorded so they are not re-raised and re-investigated:
+
+- **"Hide hwmon `temp3` when `gaming_family` is set."** Declined. `temp3` does
+  read `+0.0 °C` here, and the firmware reason is known — `ec_read(0x62)` lands
+  on an undeclared `ERAM` offset. But `gaming_family` covers **every**
+  `GIGABYTE GAMING` model, and the evidence is one machine. Hiding a channel
+  family-wide from a `GA65TH` observation is the same over-generalisation this
+  file warns about for method IDs. The finding itself asks to "confirm the
+  Gaming generations share the relevant ERAM layout first", which is exactly
+  what cannot be confirmed here. A temperature reading 0 is cosmetic, hwmon
+  consumers handle it, and the change would diverge from upstream for a
+  non-bug in code headed upstream. Revisit only with a second machine's dump.
+
+- **"Test the DNF upgrade transaction for `akmod-aorus-laptop`."** Declined as
+  written, and partly acted on. The transaction cannot be tested here: no
+  `aorus-laptop` package is installed or reachable, and `dnf` experiments on
+  this machine are off the table after the NVIDIA packaging incident. What
+  *was* actionable — "move the required removal step into user-facing upgrade
+  instructions instead of leaving it only in the spec comment" — is done, in
+  `INSTALL.md`. The underlying limitation is real and unchanged: `kmodtool`
+  generates the kmod and akmod subpackages itself and offers no hook for
+  `Obsoletes`, so only `gigabyte-laptop-kmod-common` can obsolete its
+  predecessor.
+
 ## Open decisions
 
 ~~**Whether to try the indexed fan curve.**~~ **Answered on hardware,

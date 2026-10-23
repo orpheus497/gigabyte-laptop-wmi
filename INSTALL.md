@@ -35,21 +35,44 @@ registration and installs the `/etc/modules-load.d` entry:
 sudo bash scripts/install-dkms.sh          # or --no-autoload to skip boot loading
 ```
 
-To build a tarball by hand instead:
+To build a tarball by hand instead. **The substitution has to happen before
+`tar` runs**, so stage the files rather than archiving the checkout directly:
 ```
-tar -czf driver.tar.gz Makefile gigabyte-laptop.c dkms.conf gigabyte-laptop.conf
+VER=0.2.0
+d=$(mktemp -d)
+cp Makefile gigabyte-laptop.c gigabyte-laptop.conf "$d/"
+sed "s/@PKGVER@/$VER/" dkms.conf > "$d/dkms.conf"
+tar -czf driver.tar.gz -C "$d" .
+rm -rf "$d"
 ```
 
 `dkms.conf` ships `PACKAGE_VERSION="@PKGVER@"` as a placeholder for the
-packaging to substitute, so **replace it with the real version before creating
-the tarball**. Loading the tarball as it stands registers a module literally
-versioned `@PKGVER@`, and the `dkms install` that follows then fails with
-"Could not find module source directory".
+packaging to substitute. Archiving it unsubstituted registers a module
+literally versioned `@PKGVER@`, and the `dkms install` that follows then fails
+with "Could not find module source directory". Staging into a temporary
+directory also keeps `sed` off the tracked `dkms.conf`.
 
 `gigabyte-laptop.conf` is the `/etc/modules-load.d` entry referred to above.
 DKMS does not install it for you, so include it in the archive and copy it into
 place by hand if you want boot loading. `scripts/install-dkms.sh` does it for
 you unless you pass `--no-autoload`.
+
+### Upgrading from the old `aorus-laptop` name
+
+The driver was renamed, and the RPM packaging can only obsolete part of the old
+set: `kmodtool` generates the kmod and akmod subpackages itself and gives no
+hook for adding `Obsoletes` to them, so `akmod-gigabyte-laptop` cannot declare
+that it replaces `akmod-aorus-laptop`. Only `gigabyte-laptop-kmod-common`
+obsoletes its predecessor.
+
+**So remove the old akmod by hand before or during the upgrade:**
+```
+sudo dnf remove akmod-aorus-laptop aorus-laptop-kmod-common
+```
+
+`scripts/install-dkms.sh` handles the DKMS side of the rename itself, but it
+will stop rather than delete files a package still owns, and tell you which
+package to remove.
 
 ### Method 2: Manually
 

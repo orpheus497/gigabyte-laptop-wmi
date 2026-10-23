@@ -1293,13 +1293,26 @@ static int gigabyte_laptop_add_battery(struct power_supply *battery,
 	struct gigabyte_laptop_wmi *gigabyte =
 		container_of(hook, struct gigabyte_laptop_wmi, battery_hook);
 
+	int ret;
+
 	if (gigabyte->battery)
 		return 0;
 
-	gigabyte->battery = battery;
-	return power_supply_register_extension(battery,
+	/*
+	 * Record the battery only once registration has succeeded. Setting it
+	 * first made a failed registration look like a successful one twice
+	 * over: the hook could not retry on a later battery because the
+	 * non-NULL pointer short-circuits above, and remove_battery would then
+	 * unregister an extension that was never registered.
+	 */
+	ret = power_supply_register_extension(battery,
 					&gigabyte_laptop_battery_ext,
 					&gigabyte->pdev->dev, gigabyte);
+	if (ret)
+		return ret;
+
+	gigabyte->battery = battery;
+	return 0;
 }
 
 static int gigabyte_laptop_remove_battery(struct power_supply *battery,

@@ -79,8 +79,11 @@ remove_dkms_version() {
 	# thinks rather than trusting the exit code: if the version is gone from
 	# its view, cleanup is safe and aborting the installer would only wedge
 	# it. No pipeline here, for the pipefail reason noted above.
-	still=$(dkms status "$name/$ver" 2>/dev/null || true)
-	if [ -z "$still" ]; then
+	# Check the exit status separately. `$(... || true)` makes a *failed*
+	# query indistinguishable from one that succeeded and found nothing, and
+	# deleting trees on that basis would destroy a registration dkms simply
+	# could not report on.
+	if still=$(dkms status "$name/$ver" 2>/dev/null) && [ -z "$still" ]; then
 		rm -rf "/var/lib/dkms/$name/$ver" "/usr/src/$name-$ver"
 		return 0
 	fi
@@ -112,6 +115,29 @@ while read -r ver; do
 	echo "   removing aorus-laptop/$ver"
 	remove_dkms_version aorus-laptop "$ver"
 done < <(dkms status aorus-laptop 2>/dev/null | sed -n "s|^aorus-laptop/\([^,:]*\).*|\1|p" | sort -u)
+# Do not delete files a package still owns: rpm and dpkg would keep listing
+# them and the next upgrade of that package would put them back. Ask the
+# package manager first and hand the removal to it.
+owner=
+for f in /var/lib/dkms/aorus-laptop /etc/modules-load.d/aorus-laptop.conf; do
+	[ -e "$f" ] || continue
+	if command -v rpm >/dev/null 2>&1; then
+		owner=$(rpm -qf "$f" 2>/dev/null) && break
+	fi
+	if command -v dpkg >/dev/null 2>&1; then
+		owner=$(dpkg -S "$f" 2>/dev/null | cut -d: -f1) && [ -n "$owner" ] && break
+	fi
+	owner=
+done
+
+if [ -n "$owner" ]; then
+	echo "The pre-rename files are still owned by a package: $owner" >&2
+	echo "Remove it through the package manager rather than deleting its" >&2
+	echo "files, then run this again:" >&2
+	echo "   sudo dnf remove $owner        # or: sudo apt remove $owner" >&2
+	exit 1
+fi
+
 rm -rf /var/lib/dkms/aorus-laptop
 rm -f /etc/modules-load.d/aorus-laptop.conf
 

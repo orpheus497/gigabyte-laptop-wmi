@@ -447,7 +447,7 @@ prints the result:
 ```sh
 echo '0xE7' | sudo tee /sys/devices/platform/gigabyte_laptop/debug_method
 sudo cat /sys/devices/platform/gigabyte_laptop/debug_method
-# method 0xe7 arg 0x0 -> 0x0 (0)
+# method 0xe7 arg 0x0 -> 0x0 (0) [implemented]
 ```
 
 The argument matters when checking whether a method exists at all. The firmware
@@ -458,8 +458,15 @@ tells the two apart, and the node says so when the result matches:
 ```sh
 echo '0xED 0x5A' | sudo tee /sys/devices/platform/gigabyte_laptop/debug_method
 sudo cat /sys/devices/platform/gigabyte_laptop/debug_method
-# method 0xed arg 0x5a -> 0x5a (90) [echoed argument: method not implemented]
+# method 0xed arg 0x5a -> 0x5a (90) [not implemented: reply was not an integer] [argument echoed back]
 ```
+
+The bracketed marker is the conclusive half: a reply that is not an integer is
+the firmware's `Default { Return (Arg2) }` catch-all, which means no case for
+that ID. The echo note is corroboration, since a sentinel can collide with a
+real value. **If you parse this node, match `[implemented]` with its
+brackets** — the negative string contains the word as a substring, so a bare
+`grep implemented` passes both cases.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/debug_method`
 

@@ -116,7 +116,17 @@ restore() {
 	# the mode latches whatever the ceiling already holds, so the ceiling
 	# has to be right before the enable bit goes up. Writing a fixed 0/100
 	# here instead would silently discard a ceiling the user already had.
-	echo "$BASE_LIMIT_N" > "$P/charge_limit" 2>/dev/null
+	#
+	# charge_limit refuses anything below 60, and BCPC has been observed
+	# reading 0 on this hardware -- so a faithful restore of a sub-60
+	# baseline cannot go through the node. Fall back to the raw WMBD write,
+	# which has no such floor. The mode still goes through its own node
+	# afterwards, so the driver's cache stays truthful.
+	if ! echo "$BASE_LIMIT_N" > "$P/charge_limit" 2>/dev/null; then
+		echo "   charge_limit refused ${BASE_LIMIT_N} (below its 60 floor); restoring BCPC through debug_method_write"
+		echo "0x65 $BASE_LIMIT_N" > "$P/debug_method_write" 2>/dev/null ||
+			echo "   WARNING: could not restore BCPC to ${BASE_LIMIT_N}" >&2
+	fi
 	echo "$BASE_MODE_BIT" > "$P/charge_mode" 2>/dev/null
 	echo "   0x64 BCPS : $(raw 0x64)"
 	echo "   0x65 BCPC : $(raw 0x65)"
