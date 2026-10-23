@@ -1572,6 +1572,22 @@ That makes the open question below **fail safe instead of fail silent** — if
 clear message instead of latching a 0 % ceiling. It does not answer the
 question, and the answer still decides whether a boot-time re-apply is needed.
 
+**The refusal path cannot be reached through sysfs, and that is by design
+rather than an oversight.** `charge_limit_store()`'s pre-existing
+`60 <= limit <= 100` check rejects a 0 write outright — `echo 0 > charge_limit`
+returns `-EINVAL` and logs `Invalid charge limit` — so the 0-ceiling state is
+unreachable from userspace. The guard therefore exists for exactly one case:
+**firmware state the driver did not write**, which is the observed hazard. An
+attempt to demonstrate it by writing 0 through the node will fail at the range
+check and never reach the guard; the message to look for is
+`Refusing charge mode with a N% ceiling`, distinct from the range check's.
+
+Which means **the persistence test doubles as the guard's test.** If `BCPC`
+comes back 0 after a power cycle, `echo 1 > charge_mode` is refused, and that
+is the guard firing where it was aimed. The success path is testable any time:
+set a sane `charge_limit`, enable the mode, and the live `BCPC` read inside the
+guard is what lets it through.
+
 **The "node is lying" branch is eliminated.** A sentinel read on 23 Oct 2026
 returned `0x0 (0) [implemented]` for both `0x65` and `0x64`, so these are
 genuine firmware reads and `charge_limit` reports the truth: `BCPC` really is 0
