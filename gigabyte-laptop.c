@@ -1002,9 +1002,38 @@ static ssize_t charge_mode_show(struct device *dev, struct device_attribute *att
  *
  * Call with charge_lock held.
  */
+/*
+ * Enabling the mode latches whatever ceiling BCPC already holds, so a mode with
+ * no usable ceiling is the one combination to refuse. BCPC has been seen reading
+ * 0 after a power cycle, and enabling on top of that asks the EC to stop
+ * charging at 0 % -- "never charge" is a plausible reading and nothing here can
+ * rule it out.
+ *
+ * The floor is 1, not the charge_limit node's own 60: that floor keeps a sysfs
+ * write inside the field width, while the battery ABI deliberately allows the
+ * full 1-99 range and shares this path.
+ *
+ * The field is read rather than trusted from the cache, because the caller may
+ * not have touched charge_limit since boot and this is the one place where
+ * being wrong is expensive.
+ */
 static int set_charge_mode(struct gigabyte_laptop_wmi *gigabyte, u32 mode)
 {
-	int ret, output;
+	int ret, output, limit;
+
+	if (mode) {
+		limit = gigabyte->charge_limit;
+		if (!gigabyte_laptop_get_devstate(CHARGING_LIMIT, &output))
+			limit = output;
+
+		if (limit <= 0 || limit > 100) {
+			pr_err("Refusing charge mode with a %d%% ceiling, write charge_limit first\n",
+					limit);
+			return -EINVAL;
+		}
+
+		gigabyte->charge_limit = limit;
+	}
 
 	ret = gigabyte_laptop_set_devstate(CHARGING_MODE, mode << 2, &output);
 	if (ret)

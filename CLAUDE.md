@@ -1557,20 +1557,41 @@ to be re-applied at boot, as on many laptops. That is **one data point** and
 must not be written up as a finding until it is reproduced from a known starting
 value.
 
-**There is a real hazard either way.** `charge_mode_store()` does not check that
-the limit is sane, so `echo 1 > charge_mode` with `BCPC` at 0 enables the mode
-with a 0 % ceiling, and what the EC does with that is unknown — plausibly
-refusing to charge at all. The battery extension guards its *reporting*
-(`charge_limit <= 0` reports 100); nothing guards the *write*. A guard is worth
-adding once the persistence question is answered, because the right guard
-depends on the answer.
+~~**There is a real hazard either way.**~~ **Guarded, 23 Oct 2026.**
+`set_charge_mode()` now refuses to enable the mode while the ceiling is 0 or
+out of range, and logs why. The guard sits in `set_charge_mode()` rather than
+`charge_mode_store()` so it covers the battery ABI too, and its floor is **1,
+not 60**: the node's own 60 keeps a sysfs write inside the field width, while
+the battery path deliberately allows the full 1–99 range and shares this code.
+It reads `BCPC` rather than trusting the cache, because a caller may not have
+touched `charge_limit` since boot and this is the one place where being wrong
+is expensive.
 
-One read settles it, and now also reports whether the method is implemented:
+That makes the open question below **fail safe instead of fail silent** — if
+`BCPC` does not persist, enabling the mode after a reboot now errors with a
+clear message instead of latching a 0 % ceiling. It does not answer the
+question, and the answer still decides whether a boot-time re-apply is needed.
+
+**The "node is lying" branch is eliminated.** A sentinel read on 23 Oct 2026
+returned `0x0 (0) [implemented]` for both `0x65` and `0x64`, so these are
+genuine firmware reads and `charge_limit` reports the truth: `BCPC` really is 0
+and `BCPS` really is 0.
+
+**What remains is one clean persistence test**, and it needs a reboot, so run it
+on the next one rather than making a trip for it. Set the ceiling and leave the
+mode **off**, so a non-persisting `BCPC` cannot strand the machine on a 0 %
+ceiling:
 
 ```sh
+echo 80 | sudo tee $S/charge_limit        # mode stays 0; the EC ignores BCPC
+# ... reboot ...
 echo '0x65 0x5A' | sudo tee $S/debug_method && sudo cat $S/debug_method
-# 0x5a -> not implemented;  0x0 -> BCPC really is 0;  0x64 -> the node is lying
+# 0x50 (80) -> BCPC persists, nothing more to do
+# 0x0  (0)  -> BCPC does NOT persist: a ceiling needs re-applying at boot
 ```
+
+A `0` there makes it a finding rather than a hypothesis, and the fix is a
+boot-time re-apply (a systemd unit or a udev rule), not a driver change.
 
 ### Keyboard backlight: verified end to end, 22 Oct 2026
 
@@ -1787,10 +1808,11 @@ remains open.
 `CRAF` reads `1` whenever `fan_mode` is 1, so the driver has been driving it as
 silent mode all along; the CWH analysis named a field this file had left
 anonymous, it did not find a new control.
-- **Whether `BCPC` survives a power cycle**, which decides both whether a
-  charge ceiling needs re-applying at boot and what guard
-  `charge_mode_store()` should carry. One `debug_method` read settles it; see
-  "Open: `BCPC` reads 0 after a reboot".
+- **Whether `BCPC` survives a power cycle.** The guard is in regardless, so
+  this is no longer a safety question — it decides only whether a charge
+  ceiling needs re-applying at boot. Set `charge_limit 80` with the mode off,
+  reboot, read `0x65`; see "Open: `BCPC` reads 0 after a reboot". The next
+  reinstall reboot answers it for free.
 
 ## Decided: upstreaming comes last
 

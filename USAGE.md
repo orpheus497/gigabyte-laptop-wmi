@@ -152,6 +152,12 @@ Aero/AORUS laptops support two charging modes: Normal (0) and custom (1). The cu
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/charge_mode`
 
+**Write the limit before the mode.** Enabling custom charging latches whatever
+ceiling the EC already holds, so the driver refuses to enable it while that
+ceiling is 0 or out of range, and says so in the kernel log. On at least one
+machine the ceiling has read back as 0 after a power cycle, and enabling on top
+of that would ask the EC to stop charging at 0 %.
+
 ## Charging limit
 
 Aero/AORUS laptops support a charging limit. Charging mode must be set to custom for it to take effect. It will only accept numbers between 60 and 100.
