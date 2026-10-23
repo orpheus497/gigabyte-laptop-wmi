@@ -960,7 +960,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~1b~~ | ~~Extend `debug_method` to take an argument~~ **done** | low |
 | ~~2~~ | ~~Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel~~ **done** — all three confirmed; GPU TGP closed as firmware-blocked | medium |
 | ~~3~~ | ~~`platform_profile` handler~~ **done** — over fan policy, not GPU power | low |
-| 4 | Writable `pwm1`/`pwm2` — **three mechanisms tried and rejected**, read scaling kept. One lead left (the 15-point curve). **The only functional gap.** | medium |
+| ~~4~~ | ~~Writable `pwm1`/`pwm2`~~ **closed 23 Oct 2026 — unreachable on this EC.** Four mechanisms tried and rejected, the last one verifiably inert. Read scaling kept. See "Step 4 is closed" | medium |
 | ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** — both keys scan in and are bound in KDE | low |
 | ~~6a~~ | ~~`0xF6`/`KBLL` keyboard brightness~~ **done** — LED class device, `max_brightness` 1 measured from the EC's own events | low |
 | 6b | RGB **colour** over `/dev/hidraw2` — not started, no precedent on this hardware. Open-ended research, not a blocker | high |
@@ -1017,8 +1017,9 @@ Two behaviours worth knowing, both normal:
 
 Step 2 gated everything GPU-related and is **settled**: all three methods
 validated, and GPU TGP closed as firmware-blocked, so nothing further sits behind
-that gate. Step 6b is open-ended research; treat it as a separate project
-rather than a blocker.
+that gate. With Step 4 closed too, **Step 6b is the only work left** — and it
+is open-ended research, so treat it as a separate project rather than a
+blocker.
 
 **GiMate diagnosis order** (stop `input-remapper` first — it clones the keyboard
 into `input21`/`input22` and will confuse scancode capture):
@@ -1778,15 +1779,14 @@ supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 
 ## Open decisions
 
-- **Whether to try the indexed fan curve**, which is the only Step 4 lead left,
-  and it is now better armed than it was: a third-party CWH analysis names
-  `XFNW` as index/temperature/duty and records GCC's enabling sequence
-  (`ADJF`=0, `TENF`=1, `FANB`=0, `CRAF`=0, then the points). The write-side
-  debug node it needs already shipped as `debug_method_write`, and `WMBC 0x68`
-  reads a written point back. See the Step 4 section.
-- **Whether `CRAF` (`0x57`) does anything on this unit.** Present and
-  read/write in our firmware, named "quiet mode" by GCC, and never written here.
-  Cheap to test through `debug_method_write`.
+~~**Whether to try the indexed fan curve.**~~ **Answered on hardware,
+23 Oct 2026 — it is inert.** See "Step 4 is closed". Nothing about fan duty
+remains open.
+
+~~**Whether `CRAF` (`0x57`) does anything on this unit.**~~ **It already did.**
+`CRAF` reads `1` whenever `fan_mode` is 1, so the driver has been driving it as
+silent mode all along; the CWH analysis named a field this file had left
+anonymous, it did not find a new control.
 - **Whether `BCPC` survives a power cycle**, which decides both whether a
   charge ceiling needs re-applying at boot and what guard
   `charge_mode_store()` should carry. One `debug_method` read settles it; see
@@ -1908,7 +1908,10 @@ Field widths, for reference: `TFAN`, `GFAN`, `TENF`, `ADJF`, `CRAF` are
 **1 bit**;
 `FAN1`, `FAN2`, `FDTY`, `GDTY`, `FLVL` are **8**; `XFNW` is **24**.
 
-**The one lead left: the 15-point curve.** `fan_mode 3` plus `fan_curve_index`
+**The lead that was left — and it has since been tested and closed.** See
+"Step 4 is closed" above for the hardware result; this is the reasoning that
+made it worth trying, and the read-back it relied on. `fan_mode 3` plus
+`fan_curve_index`
 and `fan_curve_data` (`WMBD 0x68` → `XFNW`). It is the firmware's own
 proportional mechanism, which is the argument for it, and unlike every duty
 write **it can be verified**: `WMBC 0x68` writes a request index to `XFNR`,
@@ -1930,6 +1933,72 @@ with a commented-out alternative packing speed/temp/index, and `XFNW` is 24
 bits. The packing was **a guess**; a third-party analysis now names the three
 fields — see "A third-party CWH analysis names the `XFNW` fields" below — and
 the read-back is still the way to confirm it.
+
+### Step 4 is closed: the indexed curve is inert, and that was the last lead
+
+**Tested on hardware 23 Oct 2026.** The mode state matched GCC's Custom recipe
+exactly before anything was written — verified by reading all four flags, not
+assumed:
+
+```
+0x57 CRAF -> 0    0x71 FANB -> 0    0x67 TENF -> 1    0x6A ADJF -> 0
+```
+
+The curve was empty to begin with. All sixteen indices read `0`, and that is a
+real reading rather than the echo artefact: `WMBC 0x68` returned `0` for index
+`5`, `10` and `15` instead of echoing them back. **So the firmware ships no
+default curve** — which incidentally explains the old `0x46`/`0x47` result, where
+mode 3 gave a flat 1666 RPM. The EC was not overriding a duty with its curve; it
+had no curve to run.
+
+Then one point was written and read back:
+
+```
+fan_curve_index 0, fan_curve_data 0x3C28   (duty 0x3C=60%, temp 0x28=40C)
+WMBC 0x68 index 0            -> 0x0        ** nothing **
+WMBD 0x68 arg 0x3C2800       -> replied 0x3c2800
+WMBD 0x68 arg 0x3C2801       -> replied 0x3c2801     (1-based index too)
+WMBC 0x68 index 1            -> 0x0        ** nothing **
+```
+
+**`XFNW` holds exactly what was written. `XFN1` never populates.** The ACPI
+store lands in EC RAM and the embedded controller does nothing with it — the
+precise failure this file already warns about under "Method IDs we are not using
+yet": a WMBD case that writes a field and returns it proves the store landed and
+proves nothing about whether the EC acted on it.
+
+The curve was the one lead that looked *verifiable*, because `WMBC 0x68` can
+read a point back. But `XFN1` is itself an EC-populated field, so the
+verification channel is dead for the same reason the control channel is. The
+only mechanism that could have been confirmed is confirmed inert.
+
+**Four mechanisms, all rejected:**
+
+| Method | Why it fails |
+|---|---|
+| `0x6A` `ADJF` | one bit; cannot carry a duty |
+| `0x70` `FAN1`/`FAN2` | written and ignored; a 100 % target *stopped* both fans |
+| `0x46`/`0x47` `FDTY`/`GDTY` | `FDTY` is the EC's output, not an input |
+| `0x68` `XFNW` | store lands, EC inert, `XFN1` never populates |
+
+**The packing question is moot but was answered anyway**, and worth keeping: the
+field widths decompose as 24 = 8-bit index + 16-bit payload, `XFNR` is the 8-bit
+index and `XFN1` the 16-bit payload, which matches CWH's "index, temperature,
+duty" and matches what `fan_curve_data_store()` already builds. The packing this
+file called "a guess" was correct. It simply has nothing to drive.
+
+**So writable PWM is unreachable on this EC and the nodes stay read-only.** This
+also corroborates GigaMate's report that the indexed store is inert on an
+AERO X16 — now independently confirmed on `GA65TH`, on AMD.
+
+One residual uncertainty, stated rather than chased: GCC on CWH reportedly sends
+8 × `0x68` for its Custom mode, so either that generation's EC implements what
+ours does not, or GCC's sequence has a commit step the static analysis did not
+capture, or it is inert there too and nobody checked — the CWH write-up is
+explicit that **no value in it was ever sent to hardware**. Settling that needs a
+capture of GCC's real WMI traffic on a CWH, which is not work this project can
+do. Do not re-run the duty experiments without such a capture; four mechanisms
+and a dead verification channel is enough.
 
 ### A third-party CWH analysis names the `XFNW` fields
 
