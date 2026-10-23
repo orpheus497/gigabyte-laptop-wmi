@@ -14,6 +14,15 @@ ExecStart=@BINDIR@/gigabyte-fan-preset-notify
 # against a still-active unit is a no-op. It exits non-zero only for a failure
 # at startup or a broken poll(), neither of which a restart loop would help.
 
+# A watcher that should sit at zero CPU has no business using a measurable
+# amount, so cap it. This is a backstop against a bug, not tuning: an earlier
+# version of this program mishandled the POLLERR that kernfs returns without
+# blocking once the attribute is removed, and pegged a core until it was
+# stopped by hand. Capped, the same bug costs 5% of one core and shows up in
+# `systemctl --user status` as CPU time on a process that should have none.
+CPUAccounting=yes
+CPUQuota=5%
+
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only

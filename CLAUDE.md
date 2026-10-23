@@ -1896,18 +1896,42 @@ in the EC.
 
 ### The fix: the watcher re-opens itself, and no unit does it for it
 
-**The root cause was one argument.** `poll(&pfd, 1, -1)` waited forever, so the
-loss detection sitting right behind it never ran. The program's logic was
-already correct — a failed `read_preset()` means the node is gone — it just sat
-behind a `poll()` that can never return once the node is orphaned. Nothing is
-delivered, so nothing wakes, so nothing is checked.
+**Orphaned-kernfs semantics, measured rather than reasoned.** The behaviour
+depends on *where `poll()` is* when the node is removed, and that asymmetry is
+the whole bug. Measured on this kernel with a throwaway cgroup — cgroups are
+kernfs too, and a user can create and `rmdir` one under their own
+`user@1000.service` slice without root, which makes this testable without
+touching the driver:
 
-`poll()` now takes `POLL_INTERVAL_MS` (5 s), and each idle wake probes the
-descriptor with a read. **The read is the only usable probe:** kernfs fails a
-read on a removed node, while the fd, the path, `poll()` and the unit state all
-keep looking healthy. An inode comparison also works and is the right *manual*
-diagnostic, but it is weaker in code — inode numbers can be reused, and a reused
-number would read as healthy when the fd is still orphaned.
+```
+node live                     waited 2001ms  ret=0  revents=0x0000  read=21
+removed while poll in flight  waited 2001ms  ret=1  revents=0x000a  read=-1
+every poll after that         waited    0ms  ret=1  revents=0x000a  read=-1
+```
+
+`0x000a` is `POLLPRI | POLLERR`. Three facts follow, and all three are needed:
+
+- **Removal does not wake a poll already in progress.** It slept out its full
+  timeout. With `-1` that is forever, which *is* the original silent deafness:
+  `poll(&pfd, 1, -1)` meant the loss detection sitting on the next line never
+  ran. The program's logic was right all along; it sat behind a wait that
+  cannot finish.
+- **A poll entered after removal returns instantly**, and reports `POLLPRI`.
+  So the loss arrives as `ret > 0` — indistinguishable from a real keypress by
+  the poll result alone.
+- **Only the read distinguishes them.** kernfs refuses a read on a removed
+  node, while the fd, the path, `poll()`, `revents` and the unit state all keep
+  looking healthy.
+
+So the fix is two parts, and **having only the first is worse than having
+neither**. `poll()` takes `POLL_INTERVAL_MS` (5 s) to escape the first case,
+*and* the read probe runs on **every** wake rather than only on a timeout, to
+catch the second. A version that probed only on `ret == 0` treated the POLLERR
+storm as a stream of events and pegged a core — see below.
+
+An inode comparison is the right *manual* diagnostic but is weaker in code:
+inode numbers can be reused, and a reused number would read as healthy against
+a still-orphaned fd.
 
 **It re-opens rather than exits, and that is the whole point.** Exiting hands
 recovery to the service manager, which cannot do it for the reason above, and
@@ -1931,6 +1955,47 @@ claimed it restarts the service on a later module load "because the service
 exits when the driver goes away", and the `.service.in` comment justified
 omitting `Restart=` on the same false premise. Both corrected to say what
 actually happens and why no unit dependency can help.
+
+### The first attempt pegged a core, and the false pass is the lesson
+
+Shipped and installed before it was understood. The first patch added the
+timeout but probed only on `ret == 0`, so once the node was orphaned every
+`poll()` returned `POLLPRI|POLLERR` in 0 ms, the read failed, and the loop
+`continue`d — a full-core spin that ran until the service was stopped by hand:
+
+```
+PID 8200  elapsed 02:10  ticks 11444        (~88% of a core for its whole life)
+sampled 3s apart: 11449 -> 11748            (delta 299 == one core pegged)
+state Rs   wchan 0
+```
+
+**It shipped because the verification measured the wrong process.** The test
+resolved its PID with `pgrep -f '^\./gigabyte-fan-preset-notify$'`, which
+matched the harness's own shell, and reported a comfortable `0 ticks`. The same
+mistake with `$!` had already caught the shell wrapper one call earlier. The
+tell was in the output and went unread: a process one second old cannot have
+**25592** accumulated ticks.
+
+Three rules, all paid for:
+
+- **Sanity-check a baseline before trusting a delta.** Initial ticks on a
+  one-second-old process must be ~0. Any other number means the PID is wrong.
+- **Resolve a service's PID with `systemctl --user show -p MainPID`**, never
+  `pgrep -f` from inside the thing being measured. The PID 8200 figure above was
+  sound precisely because it came from systemd.
+- **Testing the healthy path proves nothing about the failure path.** The spin
+  lived entirely in the orphaned-node branch, which the passing test never
+  entered. The cgroup probe above exists because that branch needed a way to be
+  exercised without a module reload.
+
+**Guarded in the unit now**, because the fix being right is not a reason to
+leave the failure mode uncapped: `CPUAccounting=yes` and `CPUQuota=5%`. The
+same bug would then cost 5% of one core and show as CPU time on a process that
+should have none, instead of pegging a core silently.
+
+**Still untested by me:** the re-open succeeding against the real driver
+attribute, which needs a module reload and therefore a password. The mechanism
+is verified against kernfs; the last step is not.
 
 ### `charge_control_end_threshold`: verified end to end, 22 Oct 2026
 

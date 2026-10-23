@@ -27,13 +27,32 @@
 #define ATTR "/sys/devices/platform/gigabyte_laptop/fan_preset"
 
 /*
- * poll() must not wait forever. A module reload orphans the kernfs node behind
- * an open fd: no event is ever delivered again, so an infinite wait never
- * returns and the loss below is never noticed. Waking periodically is what
- * turns that silent deafness into something detectable. The interval only
- * bounds how long toasts stay missing after a reinstall, so seconds are fine.
+ * A module reload orphans the kernfs node behind an open fd, and it does so in
+ * two different ways depending on where poll() happens to be:
+ *
+ *   - already inside poll() when the node is removed -- it sleeps on a wait
+ *     queue that removal never wakes, so it waits for ever and the loss is
+ *     never noticed. Measured: the watcher stayed blocked at zero CPU with the
+ *     service reading active, missing every keypress.
+ *   - entering poll() after removal -- it cannot take an active reference, so
+ *     it returns POLLERR *immediately* instead of blocking.
+ *
+ * So both halves below are load-bearing. The timeout is what escapes the first
+ * case, and handling a failed read on an ordinary (ret > 0) wake is what
+ * handles the second. Getting only the first right converts a silent hang into
+ * a busy loop, which is exactly what happened.
  */
 #define POLL_INTERVAL_MS 5000
+
+/*
+ * How long to keep trying to re-open before giving up and letting the service
+ * manager decide. Long enough to cover a DKMS reinstall, and the handover is
+ * sound because by then the attribute is genuinely absent: the unit stops, so
+ * the .path unit's later start is a real start rather than the no-op it is
+ * against a still-active unit.
+ */
+#define RETRY_INTERVAL_S 2
+#define RETRY_LIMIT      30
 
 /*
  * The notification text comes from this table and never from the file. A value
@@ -159,26 +178,43 @@ int main(void)
 		}
 
 		/*
-		 * Nothing happened, so this is the liveness check rather than an
-		 * event. A read is the probe because it is the only thing that
-		 * distinguishes a live node from an orphaned one: kernfs fails a
-		 * read on a removed node, while the fd, the path and poll() all
-		 * keep looking healthy. Recovering means re-opening -- the new
-		 * node is a different inode, so the old fd can never be revived.
+		 * POLLERR accompanies every POLLPRI on a live sysfs attribute,
+		 * so it is not an error on its own and the poll result cannot be
+		 * used to tell a healthy node from a removed one. A failed read
+		 * can: kernfs refuses a read once the node is gone, while the
+		 * fd, the path, poll() and the unit state all still look fine.
 		 *
-		 * Re-opening here rather than exiting is deliberate. Exiting
-		 * would hand recovery to the .path unit, which cannot do it: a
-		 * Wants= or PathExists= trigger enqueues a *start*, and a start
-		 * against a still-active unit is a no-op, so the reload window
-		 * is lost before this process ever notices. Self-healing needs
-		 * no second activation path and no udev rule.
+		 * This has to be tested on every wake, timeout or not. A removed
+		 * node makes poll() return POLLERR without blocking, so the loss
+		 * arrives as ret > 0, and anything that loops without recovering
+		 * from it spins a core flat.
 		 */
-		if (ret == 0) {
-			if (!read_preset(fd, buf, sizeof(buf)))
-				continue;
+		if (read_preset(fd, buf, sizeof(buf))) {
+			int tries;
 
-			if (arm(&fd, buf, sizeof(buf)))
-				continue;
+			/*
+			 * Re-open rather than exit, because no unit dependency
+			 * can do this for us: PathExists= and a udev
+			 * SYSTEMD_USER_WANTS= both enqueue a start, and a start
+			 * against a still-active unit is a no-op. The measured
+			 * reload window was two seconds, so a trigger would
+			 * have fired and been swallowed long before now.
+			 */
+			for (tries = 0; tries < RETRY_LIMIT; tries++) {
+				if (!arm(&fd, buf, sizeof(buf)))
+					break;
+				/*
+				 * Mandatory, not polite: the dead fd makes
+				 * poll() return instantly, so a retry without
+				 * this is the busy loop described above.
+				 */
+				sleep(RETRY_INTERVAL_S);
+			}
+
+			if (tries == RETRY_LIMIT) {
+				fprintf(stderr, "%s: gone, exiting\n", ATTR);
+				return 1;
+			}
 
 			pfd.fd = fd;
 			idx = lookup(buf);
@@ -187,13 +223,8 @@ int main(void)
 			continue;
 		}
 
-		/*
-		 * POLLERR accompanies every POLLPRI on a sysfs attribute, so it
-		 * is not an error on its own. A failed read here means the node
-		 * went away between the wake and the read, which the next
-		 * liveness check will recover from.
-		 */
-		if (read_preset(fd, buf, sizeof(buf)))
+		/* A healthy node and no event: the wake was our own timeout. */
+		if (ret == 0)
 			continue;
 
 		idx = lookup(buf);
