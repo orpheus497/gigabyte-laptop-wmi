@@ -128,8 +128,14 @@ reads `active` either way:
 ```sh
 PID=$(systemctl --user show -p MainPID --value gigabyte-fan-preset-notify.service)
 stat -c %i /sys/devices/platform/gigabyte_laptop/fan_preset   # the live node
-stat -L -c %i /proc/$PID/fd/3                                 # what it holds
+for f in /proc/$PID/fd/*; do                                  # what it holds
+	case "$(readlink $f)" in *fan_preset*) stat -L -c %i "$f";; esac
+done
 ```
+
+**Match on the symlink target, not on `fd/3`.** Recovery opens the replacement
+before closing the old descriptor, so the number moves: 4 after one re-open, 5
+after two. Exactly one is ever open.
 
 Equal is healthy. If they differ on a build that predates the self-healing
 watcher, recover with `restart` — **not `start`**, which is the no-op above:

@@ -1993,9 +1993,42 @@ leave the failure mode uncapped: `CPUAccounting=yes` and `CPUQuota=5%`. The
 same bug would then cost 5% of one core and show as CPU time on a process that
 should have none, instead of pegging a core silently.
 
-**Still untested by me:** the re-open succeeding against the real driver
-attribute, which needs a module reload and therefore a password. The mechanism
-is verified against kernfs; the last step is not.
+### Verified end to end on hardware, 24 Oct 2026
+
+The last untested step -- the re-open succeeding against the real driver
+attribute -- is confirmed. A module reload with the watcher running produced:
+
+```
+Oct 24 10:04:23 gigabyte-fan-preset-notify[9104]:
+    /sys/devices/platform/gigabyte_laptop/fan_preset: re-opened after a driver reload
+```
+
+and the process healed in place rather than being restarted:
+
+```
+PID 9104 before and after    NRestarts=0    started 10:03:20 (pre-reload)
+held inode 63814 == live inode 63814
+open fds: 0 /dev/null, 1 + 2 journal sockets, 4 the attribute   <- no leak
+CPU ticks over 4s: 0        wchan poll_schedule_timeout
+CPUUsageNSec for the whole life: 84 ms, forks for notify-send included
+```
+
+**The descriptor number moves, and a diagnostic that hardcodes `fd/3` is wrong
+after the first re-open.** `arm()` opens the replacement before closing the old
+one, so the fd is 4 after one recovery, 5 after two. Exactly one is ever open --
+the listing above confirms it -- but match on the symlink target rather than the
+number:
+
+```sh
+PID=$(systemctl --user show -p MainPID --value gigabyte-fan-preset-notify.service)
+for f in /proc/$PID/fd/*; do
+	case "$(readlink $f)" in *fan_preset*) stat -L -c %i "$f";; esac
+done
+stat -c %i /sys/devices/platform/gigabyte_laptop/fan_preset   # must be equal
+```
+
+Caught while verifying this, by a check of mine that said `No such file or
+directory` for `fd/3` on a perfectly healthy process.
 
 ### `charge_control_end_threshold`: verified end to end, 22 Oct 2026
 
