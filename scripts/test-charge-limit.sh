@@ -127,10 +127,15 @@ restore() {
 		echo "0x65 $BASE_LIMIT_N" > "$P/debug_method_write" 2>/dev/null ||
 			echo "   WARNING: could not restore BCPC to ${BASE_LIMIT_N}" >&2
 	fi
-	echo "$BASE_MODE_BIT" > "$P/charge_mode" 2>/dev/null
+	echo "$BASE_MODE_BIT" > "$P/charge_mode" 2>/dev/null ||
+		echo "   WARNING: could not restore charge_mode to ${BASE_MODE_BIT}" >&2
 	echo "   0x64 BCPS : $(raw 0x64)"
 	echo "   0x65 BCPC : $(raw 0x65)"
-	echo "   (expected: BCPS $BASE_MODE_N, BCPC $BASE_LIMIT_N)"
+	# Expect the mode bit shifted back into place, not the raw baseline byte.
+	# charge_mode writes mode << 2 and BCPS = Arg2 zeroes bits 0, 1 and 3, so a
+	# baseline with any of those set cannot come back verbatim -- printing
+	# BASE_MODE_N would report a mismatch that is not one.
+	echo "   (expected: BCPS $(( BASE_MODE_BIT << 2 )), BCPC $BASE_LIMIT_N)"
 }
 trap restore EXIT
 

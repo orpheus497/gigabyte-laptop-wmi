@@ -1886,16 +1886,52 @@ Recorded so they are not re-raised and re-investigated:
   consumers handle it, and the change would diverge from upstream for a
   non-bug in code headed upstream. Revisit only with a second machine's dump.
 
-- **"Test the DNF upgrade transaction for `akmod-aorus-laptop`."** Declined as
-  written, and partly acted on. The transaction cannot be tested here: no
-  `aorus-laptop` package is installed or reachable, and `dnf` experiments on
-  this machine are off the table after the NVIDIA packaging incident. What
-  *was* actionable — "move the required removal step into user-facing upgrade
-  instructions instead of leaving it only in the spec comment" — is done, in
-  `INSTALL.md`. The underlying limitation is real and unchanged: `kmodtool`
-  generates the kmod and akmod subpackages itself and offers no hook for
-  `Obsoletes`, so only `gigabyte-laptop-kmod-common` can obsolete its
-  predecessor.
+- ~~**"Test the DNF upgrade transaction for `akmod-aorus-laptop`."**~~
+  **Superseded, and my stated reason was wrong.** I recorded here that
+  "`kmodtool` offers no hook for `Obsoletes`, so only
+  `gigabyte-laptop-kmod-common` can obsolete its predecessor". That is false,
+  and the spec's own comment said the same thing. See "`kmodtool` does have an
+  obsolete hook" below.
+
+### `kmodtool` does have an obsolete hook — `--help` does not list it
+
+`kmodtool` 1.2.1 implements **`--obsolete-name`** and **`--obsolete-version`**,
+and `kmodtool --help` does not mention either. The usage text lists only
+`--filterfile`, `--for-kernels`, `--kmodname`, `--noakmod`, `--repo` and
+`--target`, which is how two separate notes — the spec comment and a decline
+recorded in this file — came to assert that generated subpackages cannot carry
+`Obsoletes`.
+
+**Grep the script, do not trust its usage text.** `grep -i obsolete
+/usr/bin/kmodtool` shows the handling at lines 114, 170, 206, 265, 400 and the
+option parsing at 538 and 546. A dry run proves it:
+
+```
+$ kmodtool --target x86_64 --repo rpmfusion --kmodname gigabyte-laptop-kmod \
+           --obsolete-name aorus-laptop --obsolete-version 0.2.0-2 --akmod
+Provides:         akmod-aorus-laptop = 0.2.0-2
+Obsoletes:        akmod-aorus-laptop < 0.2.0-2
+Provides:         %{kmod_obsolete_name} = 0.2.0-2
+Obsoletes:        %{kmod_obsolete_name} < 0.2.0-2
+```
+
+Both kmodtool invocations in `gigabyte-laptop-kmod.spec` now pass them, and
+`rpmspec -P` confirms the expansion carries all four lines for the real
+`akmod-aorus-laptop` and `kmod-aorus-laptop` names.
+
+Two constraints found in the script and worth keeping:
+
+- **Both options are required together**, or kmodtool exits 2 with "you need to
+  provide both --obsolete-name and --obsolete-version" (line 606).
+- **The version bound must clear the old package's *release*.** `aorus-laptop`
+  was `0.2.0-1` and this is `0.2.0`, so `%{version}` alone would exclude the
+  very package it must replace. `%{version}-%{release}` gives `0.2.0-2.fc44`
+  and matches — the same reasoning that made `Release: 2` load-bearing for the
+  hand-written `Obsoletes` in the other two specs.
+
+So the rename is now handled end to end by the packaging, and the manual
+`dnf remove akmod-aorus-laptop` step is **no longer required**. `INSTALL.md`
+says so.
 
 ## Open decisions
 

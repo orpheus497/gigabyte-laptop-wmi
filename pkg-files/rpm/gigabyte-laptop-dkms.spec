@@ -13,6 +13,12 @@ URL:            https://github.com/tangalbert919/gigabyte-laptop-wmi
 # Needs a release whose tarball contains gigabyte-laptop.c. Releases published
 # before the rename carry aorus-laptop.c and will not build. CI does not use
 # this URL -- it builds the tarball from the checkout and passes --sources=.
+#
+# No version bump fixes this, because the rename is this fork's change and has
+# not been upstreamed: no release at the URL above contains the renamed file
+# yet. The Arch PKGBUILD carries the same caveat and selects the same release,
+# so the two stay consistent. Until a release ships the renamed source, build
+# from a checkout (CI's route, or scripts/install-dkms.sh).
 Source0:        https://github.com/tangalbert919/gigabyte-laptop-wmi/releases/download/%{version}/driver.tar.gz
 Source1:        gigabyte-laptop.conf
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)

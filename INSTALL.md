@@ -59,20 +59,21 @@ you unless you pass `--no-autoload`.
 
 ### Upgrading from the old `aorus-laptop` name
 
-The driver was renamed, and the RPM packaging can only obsolete part of the old
-set: `kmodtool` generates the kmod and akmod subpackages itself and gives no
-hook for adding `Obsoletes` to them, so `akmod-gigabyte-laptop` cannot declare
-that it replaces `akmod-aorus-laptop`. Only `gigabyte-laptop-kmod-common`
-obsoletes its predecessor.
+The driver was renamed, and **the RPM packaging handles the whole old set** —
+`gigabyte-laptop-kmod-common` and `gigabyte-laptop-dkms` obsolete their
+predecessors directly, and the generated kmod and akmod subpackages do too, via
+`kmodtool --obsolete-name`. So an ordinary upgrade replaces
+`akmod-aorus-laptop`, `kmod-aorus-laptop` and `aorus-laptop-kmod-common`
+without intervention.
 
-**So remove the old akmod by hand before or during the upgrade:**
+If you have a mixed state from before that was in place, the removal is:
 ```
 sudo dnf remove akmod-aorus-laptop aorus-laptop-kmod-common
 ```
 
-`scripts/install-dkms.sh` handles the DKMS side of the rename itself, but it
-will stop rather than delete files a package still owns, and tell you which
-package to remove.
+`scripts/install-dkms.sh` handles the DKMS side of the rename itself, and it
+will stop rather than delete files a package still owns, naming the package to
+remove.
 
 ### Method 2: Manually
 
