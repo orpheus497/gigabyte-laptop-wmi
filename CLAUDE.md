@@ -938,9 +938,36 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   ```
 
   So the key on disk is no longer in the firmware's enrolled list, and nothing
-  is pending. The cause was not determined — a firmware update, a Secure Boot
-  key reset or a trip through the MOK manager would all do it, and none can be
-  distinguished after the fact.
+  is pending. ~~The cause was not determined.~~ **Identified 24 Oct 2026:
+  removing the battery does it.** A RAM upgrade required pulling the battery,
+  and the enrolled list went from three keys that morning to one — Fedora's CA
+  alone — with nothing else changed in between. The 22 Oct occurrence is
+  therefore explained too: that session involved a cold power event nobody
+  recorded.
+
+  **The mechanism is a firmware NVRAM reset, not the CMOS battery holding the
+  keys.** MOK lives in UEFI variables in SPI flash, which survives power loss
+  on its own; what a battery pull appears to trigger on this machine is a
+  settings/NVRAM re-initialisation that takes `MokListRT` with it. The RTC is
+  reset in the same event, which is the corroborating tell and the easiest one
+  to spot: early-boot journal lines carry a stale date (`Oct 18` on a 24 Oct
+  boot) until NTP corrects the clock.
+
+  **It takes every enrolled MOK key, not just ours.** The akmods key went with
+  it on the same event — its CN is generated per machine, so read the real
+  subject off the cert rather than expecting a fixed name — and `nvidia` would
+  therefore not load either, with `nvidia-smi` reporting "couldn't communicate
+  with the NVIDIA driver". Re-enrol both in one request so the reboot dance
+  happens once:
+
+  ```sh
+  sudo ls -l /etc/pki/akmods/certs/        # root-only; confirm the filename
+  sudo mokutil --import /var/lib/dkms/mok.pub /etc/pki/akmods/certs/public_key.der
+  mokutil --list-new                       # expect BOTH before rebooting
+  ```
+
+  Choose a password typable on a US layout — the MOK Manager uses its own
+  keymap and you type it blind.
 
   **Diagnose in this order**, because every earlier step looks healthy:
   `dkms status` → the `.ko` exists → `modinfo -F signer` → **`mokutil
@@ -1841,6 +1868,53 @@ shutdown, a power-loss event, or the EC firmware resetting — none of which thi
 reboot exercised. The 22 Oct session that preceded the observation included
 several reboots, a lost MOK enrolment and a GPU driver mess, so a hard power-off
 in there is plausible and unrecorded.
+
+### Answered 24 Oct 2026: a battery pull clears `BCPC`
+
+**The variable nobody had captured is now captured.** A RAM upgrade required
+removing the battery, which is a power-loss event to the EC rather than a
+reboot, and it produced a clean same-day before/after with nothing else
+intervening:
+
+```
+24 Oct 09:40, before the battery was removed :  charge_mode 0   charge_limit 100
+24 Oct 13:1x, after it was refitted          :  charge_mode 0   charge_limit 0
+```
+
+So the hypothesis this section records as disproven-for-reboots is **correct for
+a colder transition**: `BCPC` survives a reboot and does *not* survive losing EC
+power. That closes the "unexplained 100 → 0" question — the 22 Oct occurrence
+followed a session with a cold power event, which is consistent and needs no
+other explanation.
+
+**What does *not* follow: a boot-time re-apply is still not needed.** The
+transition that clears it is one the user performs deliberately, with the
+machine open and the battery out, not something a normal shutdown does. The
+guard in `set_charge_mode()` is the right response and is exactly where it was
+aimed: it covers firmware state the driver did not write, which is precisely
+this. **Its refusal path is now reachable for the first time** — with `BCPC` at
+0, `echo 1 > charge_mode` should fail with `Refusing charge mode with a N%
+ceiling`, which no sysfs write could ever provoke because
+`charge_limit_store()` rejects 0 at the range check. Recovery is to write a sane
+ceiling first:
+
+```sh
+echo 80 | sudo tee charge_limit && echo 1 | sudo tee charge_mode
+```
+
+**The CMOS block is a separate question and this event does not answer it.**
+`power_on_time` read `0 0 0 0 0` both before and after, having gone from
+`0 1 5 5 2` to zeroes at some point between 22 and 24 Oct. So whatever cleared
+*that* was not this battery pull, and the "not stable across sessions"
+conclusion stands on its own evidence.
+
+**Everything else came back untouched**, which is worth recording because it
+bounds the damage: the module loaded with the same `srcversion`, 30 attributes,
+hwmon `gigabyte_laptop-isa-0000`, `platform_profile` `balanced`,
+`max_brightness` 1, the event GUID still owned by `gigabyte-laptop-events`, and
+`fan_preset` back at `auto` (driver state, as designed). DKMS, the signed `.ko`
+and both key files on disk were never affected — only the firmware's enrolled
+list was.
 
 **Both observations stand and neither should be over-read.** `BCPC` was once
 seen at 0 with no driver path that could have put it there, and `BCPC` once
