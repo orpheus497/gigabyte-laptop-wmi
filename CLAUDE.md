@@ -1892,11 +1892,25 @@ transition that clears it is one the user performs deliberately, with the
 machine open and the battery out, not something a normal shutdown does. The
 guard in `set_charge_mode()` is the right response and is exactly where it was
 aimed: it covers firmware state the driver did not write, which is precisely
-this. **Its refusal path is now reachable for the first time** — with `BCPC` at
-0, `echo 1 > charge_mode` should fail with `Refusing charge mode with a N%
-ceiling`, which no sysfs write could ever provoke because
-`charge_limit_store()` rejects 0 at the range check. Recovery is to write a sane
-ceiling first:
+this.
+
+**And the refusal path has now executed, for the first time since it was
+written.** It was added on 23 Oct for a hazard that was observed but
+unreachable through sysfs, so it shipped untested by construction — the note
+then said the thing to look for is the guard's own message, *distinct* from the
+range check's, because `charge_limit_store()` rejects a 0 write before the guard
+is ever consulted. With `BCPC` genuinely 0 after the battery pull, that is
+exactly what appeared:
+
+```
+$ echo 1 | sudo tee .../charge_mode
+tee: .../charge_mode: Invalid argument
+13:24:06 gigabyte_laptop: Refusing charge mode with a 0% ceiling, write charge_limit first
+```
+
+`charge_mode` and `charge_limit` both still read 0 afterwards, so the refusal
+did not half-apply — which is the part that mattered, since the failure it
+prevents is latching a 0 % ceiling. Recovery is to write a sane ceiling first:
 
 ```sh
 echo 80 | sudo tee charge_limit && echo 1 | sudo tee charge_mode
