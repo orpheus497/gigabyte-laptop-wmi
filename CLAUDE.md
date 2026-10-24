@@ -974,12 +974,19 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   --list-enrolled`**. Only the last one shows it. A "Key was rejected by
   service" in `journalctl -b -u systemd-modules-load` is the symptom to match.
 
-  **Recovery** keeps the existing key, since the files are intact:
+  **Recovery** keeps the existing keys, since the files on disk are never
+  affected — only the firmware's enrolled list is. Use the two-key import
+  above, not this older single-key form, which is kept only to show what it
+  misses:
 
   ```sh
-  sudo mokutil --import /var/lib/dkms/mok.pub   # sets a one-time password
+  sudo mokutil --import /var/lib/dkms/mok.pub   # DKMS only -- NOT enough
   sudo reboot                                    # then: Enroll MOK -> Continue
   ```
+
+  It re-enrols this driver and leaves `nvidia` dead, because the akmods key was
+  de-enrolled by the same event. Import both in one request or you will do the
+  reboot dance twice.
 
   Nothing in the repo or the driver causes or fixes this; it is machine state.
 
@@ -1183,6 +1190,8 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** — both keys scan in; GiMate reports `KEY_PROG1` and is bindable, Mode is consumed by the kernel and cycles `fan_preset` | low |
 | ~~6a~~ | ~~`0xF6`/`KBLL` keyboard brightness~~ **done** — LED class device, `max_brightness` 1 measured from the EC's own events | low |
 | 6b | RGB **colour** over `/dev/hidraw2` — not started, no precedent on this hardware. Open-ended research, not a blocker | high |
+| 7 | **`perf_mode`'s APU-power half via `ECPT`** — opened 24 Oct 2026. Sweep 0→1→2 under sustained AC load and watch package power and all-core clock. Needs no new code and no reverse engineering; the highest-value experiment left. See "`perf_mode` has a second half" | low |
+| 8 | **`amd_pmf.force_load=1`** — one kernel parameter and a reboot, fully reversible. Settles whether APMF binds and what a second `platform_profile` handler does to the aggregate | medium |
 
 Steps 0, 1 and 1b are complete and verified on hardware: `gigabyte-laptop/0.2.0`
 installed through DKMS, signed by the `DKMS module signing key`, loaded, with
@@ -2515,10 +2524,13 @@ remains open.
 `CRAF` reads `1` whenever `fan_mode` is 1, so the driver has been driving it as
 silent mode all along; the CWH analysis named a field this file had left
 anonymous, it did not find a new control.
-~~**Whether `BCPC` survives a power cycle.**~~ **Answered 23 Oct 2026 — it
-does.** 80 survived a reboot, so no boot-time re-apply is needed. What the
-original 0 came from is still unknown, and is not worth another reboot; see
-"Settled: `BCPC` *does* persist across a reboot".
+~~**Whether `BCPC` survives a power cycle.**~~ **Answered twice, and the second
+answer completes the first.** A reboot does not clear it — 80 survived one on
+23 Oct 2026 — so **no boot-time re-apply is needed**. A **battery pull does**
+clear it, measured 24 Oct 2026 from a clean 100-before/0-after, which also
+explains the original unattributed 100 → 0. See "Answered 24 Oct 2026: a
+battery pull clears `BCPC`". The guard in `set_charge_mode()` covers exactly
+that case and has now fired in anger.
 
 **Nothing is open in this section any more.** Phase 3 has one remaining row,
 6b, and it is a separate research project — and the APU-power half of `0xED` is
