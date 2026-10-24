@@ -20,7 +20,11 @@ ExecStart=@BINDIR@/gigabyte-fan-preset-notify
 # blocking once the attribute is removed, and pegged a core until it was
 # stopped by hand. Capped, the same bug costs 5% of one core and shows up in
 # `systemctl --user status` as CPU time on a process that should have none.
-CPUAccounting=yes
+#
+# CPUQuota alone, with no CPUAccounting=: systemd 259 removed that option and
+# logs "Support for option CPUAccounting= has been removed and it is ignored"
+# on every daemon-reload. Accounting still happens, because cgroup v2 reports
+# cpu.stat unconditionally, so CPUUsageNSec remains readable.
 CPUQuota=5%
 
 NoNewPrivileges=yes
