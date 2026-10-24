@@ -40,9 +40,12 @@ This is an **A16 5-series** machine. Separate two kinds of external finding:
   targets, GPU tier, and anything on an Intel-only code path belong to the unit
   that produced them.
 - **DSDT method analysis does transfer, as a starting point.** The AML is
-  near-identical across this firmware generation, so `GAMING-A16-3VH-DSDT.dsl`
-  in this repo **is** the accepted reference for WMI method bodies and EC field
-  names — pending `debug_method` validation on `GA65TH`.
+  near-identical across this firmware generation, which is why
+  `GAMING-A16-3VH-DSDT.dsl` in this repo ~~**is** the accepted reference~~
+  **was** the reference for WMI method bodies and EC field names — *before this
+  machine's own dump existed.* It is now the cross-generation comparison only.
+  `GAMING-A16-5TH-DSDT.dsl` is this machine's own firmware and is authoritative;
+  see "Firmware reference".
 
 Gigabyte's A16 gen codes follow `GA6` + a two-or-three character suffix, and the
 suffix tracks the generation and GPU tier, so reports from other suffixes are
@@ -188,18 +191,52 @@ Neither is committed here, and `*.dat` being gitignored means a stray
 serial number live in SMBIOS/DMI rather than in ACPI, and are not in these
 files either.
 
-**Audited 22 Oct 2026, working tree and full history, and clean.** No `MSDM`,
-`SLIC` or `SLIT`; no serial number, asset tag or MAC address; no keys,
-credentials or tokens; and no username or hostname anywhere in tracked content.
-Two things look alarming in a naive grep and are not:
+**Treat that last sentence as a per-dump conclusion, not an axiom.** ACPI
+*reserves slots* for machine-unique data even when it does not carry it — `_BIX`
+has a BatterySerialNumber field, and this firmware ships a placeholder in it
+that the EC overwrites at runtime (see the audit note below). It happens to be a
+placeholder on both A16 dumps; it is not guaranteed to be one on the next dump
+from anywhere. **Check `_BIX` specifically** when committing a new table.
 
-- **`Serial` appears hundreds of times in the DSDTs.** Every hit is the AML
-  keyword — `Serialized`, `NotSerialized`, `SerialBus`. There are no serial
-  numbers.
+**Audited 22 Oct 2026, working tree and full history, and clean. Re-run and
+re-confirmed 24 Oct 2026**, across all 38 tracked files and all 435 unique blobs
+in history. The re-run inverted the method, which is why it is worth recording
+as more than a datestamp bump: instead of grepping for *patterns* that might
+match an identifier, it took the live machine's own identifiers — hostname, both
+MAC addresses, all four filesystem UUIDs, the battery identity — and grepped the
+tree for each literal value. **Zero hits for every one.** No `MSDM`, `SLIC` or
+`SLIT`; no asset tag or MAC address; no keys, credentials or tokens; and no
+hostname anywhere in tracked content. The username `orpheus497` *does* appear
+twice — the remotes table and the PR #1 link, both below — because it is the
+public fork slug, which is the point of it being there.
+
+**One gap, stated rather than papered over.** The four root-only DMI
+identifiers — `product_serial`, `board_serial`, `chassis_serial` and
+`product_uuid`, all mode 0400 — could not be matched against the tree without a
+password, so that one check remains open. Both asset tags read the literal
+"Default string". Close it from a privileged shell by reading each value and
+`git grep`-ing for it.
+
+Three things look alarming in a naive grep and are not:
+
+- **`Serial` appears thousands of times in the DSDTs.** Nearly every hit is the
+  AML keyword — `Serialized`, `NotSerialized`, `SerialBus`. The remainder are
+  `iasl`-generated `PNP0500` comments ("Standard PC COM Serial Port") and, in
+  the two Intel DSDTs, the `SerialIoUart0`–`6` device names. None is a serial
+  number.
 - **`ToUUID` appears throughout.** All are `_DSM`/`_OSC` *interface* UUIDs,
   which are published constants shared by every machine implementing that
   interface, not system UUIDs. The one outside an `Arg0 ==` comparison is
-  Microsoft'''s "Generic Buttons Device" HID.
+  Microsoft's "Generic Buttons Device" HID.
+- **`"41167"` sits in the ACPI `_BIX` BatterySerialNumber slot of both A16
+  DSDTs** — and it is a firmware placeholder, not this unit's data. Three
+  independent reasons, which is why this is a proof rather than a reassurance:
+  the live unit reports `2287`; the AML overwrites the package at runtime via
+  `EC0.UB1I (STAX)`, so the literal is only what the table *ships* with; and the
+  identical literal is in the public 3VH dump, from somebody else's machine.
+  **This is the one serial-shaped literal in the tree**, so a future serial grep
+  will hit it, which is why the proof belongs here alongside the other two
+  rather than being re-derived every time.
 
 Re-run the audit the same way after committing any new firmware dump.
 
@@ -365,8 +402,12 @@ Asymmetries that matter:
 One caveat on `dynamic_boost` that the firmware cannot settle: the ASL proves
 the node **round-trips** (`write 0` → `DBAC = 1` → reads back `1`), but not
 which direction means "boost on". That rests on the fork's testing on a CWH.
-Confirm against `nvidia-smi` in Step 2; if it is backwards, the node is
-self-consistent but semantically inverted.
+~~Confirm against `nvidia-smi` in Step 2~~ — **the round-trip was confirmed in
+Step 2 and the direction cannot be**, because `nvidia-smi` reads a TGP that is
+pinned, so there is nothing for a toggle to move. It stays unresolvable here
+until `nvidia-powerd` initialises; see "`dynamic_boost` round-trips, direction
+still unknown". If it is backwards, the node is self-consistent but semantically
+inverted.
 
 ~~Because `perf_mode` is write-only, the `platform_profile` handler's `probe`
 must **write** a known profile to make its cached value truthful.~~ **Moot: the
@@ -399,16 +440,45 @@ consequences, both already bitten once:
 | `0xC9` | — | Fn-lock |
 | `0xC7` | `EC0.MUTE` | Mute status |
 | `0x87` / `0x88` | — | Power LED / battery LED |
-| `0xE6` | — | dGPU mux (0 dynamic, 1 discrete, 2 MS-Hybrid) |
+| `0xE6` | **CMOS `0xD0`**, not EC | dGPU mux (0 dynamic, 1 discrete, 2 MS-Hybrid). `WXCM (0xD0, Arg2)` out, `RXCM (0xD0) & 0x7F` back — so this is **extended CMOS consumed at the next boot**, like `0x63`, not a live EC field. The "EC field" column header does not apply to this row |
 | `0x63` | `WXCM 0xD2`–`0xD6` | Five bytes in, five back. RGB-shaped, see Step 6 |
 | `0x66` | `EC0.FLVL` (8-bit) | Current fan **step**, the index into the curve the EC is using |
 | `0x6B` | `EC0.FAN1` (8-bit) | CPU fan fixed duty. The driver calls this `FAN_CUSTOM_SPEED`; GCC uses it as the CPU side of its Max-mode recipe |
-| `0x57` | `EC0.CRAF` (1-bit) | The driver's `FAN_SILENT_MODE`. GCC treats it as a fourth fan-mode flag alongside `FANB`/`TENF`/`ADJF` — **never tried as a control here** |
+| `0x57` | `EC0.CRAF` (1-bit) | The driver's `FAN_SILENT_MODE`, and **already driven** — `CRAF` reads `1` whenever `fan_mode` is 1. ~~Never tried as a control here~~: what is untried is GCC's four-flag *combination* with `FANB`/`TENF`/`ADJF`, not the field. See "Open decisions" |
 | `0x03` | — | Fires the WMI event synthetically: `WMBC(0, 0x03, n)` → `Notify (AMW0, 0xD2)` |
 
 `0xF6` is the significant one: **keyboard backlight brightness is reachable
 over WMI on AMD A16 firmware**, independent of the ENE colour protocol. Nowng's
 AERO X16 fork already implements it as a `keyboard_brightness` node.
+
+### The `ERCD` general EC mailbox — found 24 Oct 2026, and **do not drive it**
+
+`WMBC`/`WMBD` are not the EC's only interface, and knowing that reframes what is
+and is not reachable here. `GAMING-A16-5TH-DSDT.dsl:8643` declares a full
+command mailbox: **1 command byte plus 5 data bytes in, 8 bytes out**, with a
+busy/complete handshake (`ECTB`, `ECTE`, a 100-tick `Sleep (0x0A)` spin) and
+every caller serialised on `Mutex (CSMX, 0x00)` one line above it.
+
+It is how the firmware does what WMI cannot express. `ECPT()` writes the APU
+power limits through it (see "`perf_mode` has a second half"), `ECPL()` reads
+the power class through it, and ACPI's own battery queries and `_REG` handler
+use it at EC bring-up.
+
+**No WMI method exposes it**, and the two obvious routes are shut: its registers
+are in the memory-mapped `ECCD` window at `0xFC7E0800`, so `ec_read()` cannot
+reach them for the same reason it cannot reach `PECM`, and `/dev/mem` is closed
+under lockdown. A kernel driver *could* `ioremap` that window — which is exactly
+why this is recorded as a prohibition rather than a lead.
+
+**The blocker is safety, not access.** There is no mechanism by which a
+kernel-side writer can serialise against AML holding `CSMX`: the mutex is an
+ACPI object, acquired inside the interpreter, and nothing in a platform driver
+can take it. Interleaving a write into a mailbox transaction that ACPI is
+mid-way through would corrupt a battery query or an EC bring-up sequence, and
+those are not failures that announce themselves. **Prefer finding a WMI wrapper
+for anything wanted here.** If it is ever attempted anyway, the first step is
+read-only — map the window and read `ERN1`..`ERN8` without ever setting `ECTE`
+— and the mutex problem needs an answer first, not after.
 
 ### The 0xD2 event chain, decoded
 
@@ -481,7 +551,13 @@ balanced                → platform_profile=balanced
 powersave               → platform_profile=low-power|quiet
 throughput-performance  → platform_profile=performance
 latency-performance     → platform_profile=performance
+accelerator-performance → platform_profile=performance
 ```
+
+Those five are the complete set — `grep -rln platform_profile
+/usr/lib/tuned/profiles/` finds no others. A profile that only `include=`s one
+of them, as `balanced-battery` includes `balanced`, inherits its row rather than
+adding one.
 
 So the minimum set the handler must expose is `low-power` (or `quiet`),
 `balanced`, `performance`. The moment the driver registers, the existing `tuned`
@@ -519,7 +595,8 @@ platforms (experimental)" — consistent with this being Rembrandt.
 If it binds, `amd_pmf_init_sps()` registers a **second** handler named
 `amd-pmf` with `low-power`/`balanced`/`performance` visible and
 `quiet`/`balanced-performance` hidden, governing APU/SMU power while ours
-governs GPU TGP and fans. Consequences to design around: the legacy aggregate
+governs ~~GPU TGP and fans~~ **fan policy** — the shipped handler never reached
+GPU TGP. Consequences to design around: the legacy aggregate
 becomes the intersection, disagreement surfaces as `custom`, a legacy write
 goes to *every* handler and fails if any returns `-EOPNOTSUPP`, and
 `platform_profile_cycle()` starts returning `-EINVAL` whenever the two
@@ -583,14 +660,26 @@ machine does not end up carrying both.
 ### A `.gitignore` entry does not untrack a file that is already tracked
 
 `tools/gigabyte-fan-preset-notify` — a 13 KB unstripped ELF — was committed in
-`7f0f8d5`, the same commit that added `tools/.gitignore` listing it on line 1.
-Ignore rules are only consulted for *untracked* paths, so a binary that was
-already staged sails straight past the rule meant to stop it. It stayed
+`7f0f8d5`. ~~The same commit added `tools/.gitignore` listing it on line 1.~~
+**Mis-attributed: `7f0f8d5` added no `.gitignore` at all.** The rule arrived one
+commit later in `fc61b85` — which is a sharper illustration than the original
+version of this note, because `fc61b85` added the ignore rule *and* re-committed
+the same binary in one commit. Ignore rules are only consulted for *untracked*
+paths, so a binary that was already staged sails straight past the rule meant to
+stop it. It stayed
 invisible because `git status` is quiet about tracked files and the build
 rewrites it in place; `make clean` is what exposed it, as a deletion.
 
 Untracked with `git rm --cached` (the blob stays in history, which is not worth
-a rewrite for 13 KB on a pushed branch). The check, for any generated file:
+a rewrite for 13 KB). **That parenthetical read "on a pushed branch", which was
+true when written and is not now.** The commits carrying the blob *were* pushed,
+as `a16-5th-kbd-charge-uevent`; origin deleted that branch head after the squash
+merge, so the two 13304-byte blobs now survive publicly only as GitHub's
+`refs/pull/2/head`. Measured 24 Oct 2026, and neither half of that is an
+assumption: an unauthenticated fetch of that ref **does** still serve both
+blobs, while a real anonymous `git clone` of the fork retrieves neither. So
+nothing a local rewrite can do would remove them, and nothing a normal clone
+does would retrieve them. The check, for any generated file:
 
 ```sh
 git ls-files tools/          # a build artifact here is a mistake
@@ -606,7 +695,8 @@ defect, not a review.
 |---|---|
 | `master` | Pristine upstream tracking. **Never commit here.** |
 | `a16-5th-gmate` | **Integration branch. All work lands here.** |
-| `a16-5th` | Retired 24 Oct 2026. Local only; deleted on the fork. |
+| `a16-5th` | Retired 24 Oct 2026. Local only; deleted on the fork. **Do not delete.** |
+| `a16-5th-kbd-charge-uevent` | PR #2's feature branch, merged. Local only; deleted on the fork. **Do not delete.** |
 
 **The integration branch changed on 24 Oct 2026, and the old name is a trap.**
 PR #3 squash-merged the whole of `a16-5th` onto `a16-5th-gmate` as `8dad4e1`,
@@ -614,16 +704,28 @@ and the remote `a16-5th` was then deleted. So `a16-5th-gmate` carries every
 change and is where work goes; the local `a16-5th` still sits at `e33932d` with
 the same content but is no longer pushed or tracked.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
-- **The history is now three commits on upstream's baseline**, not sixty-one:
-  `4b817ea` → `8dad4e1` (the squash) → whatever follows. That is a better base
-  for extracting an upstream patch series than the integration history was,
-  which is the point of having done it.
+- **The history is now a flat shape on upstream's baseline**, not sixty-one
+  commits: `4b817ea` → `8dad4e1` (the squash) → incremental work. The *shape* is
+  the durable fact and the count is not — it was three the day this was written
+  and seven two days later — so read it off `git log --oneline 4b817ea..HEAD`
+  rather than from here. That shape is a better base for extracting an upstream
+  patch series than the integration history was, which is the point of having
+  done it.
 - **`git checkout a16-5th` looks right and is wrong.** Its tracking ref is gone
   (`"upstream is gone"` on checkout), so a commit landing there goes nowhere.
   Check `git rev-parse --abbrev-ref HEAD` before committing; this mistake has
   already been made once, immediately after the merge.
+  `a16-5th-kbd-charge-uevent` carries the identical trap for the same reason.
+- **Neither retired branch may be deleted**, which is why both are in the table
+  rather than on a cleanup list: **they are the sole surviving refs for history
+  this file cites.** `920ca3b` and `75f870d` are reachable only from those two;
+  `fc61b85`, `7e0ad94` and `1e3fc39` only from `a16-5th-kbd-charge-uevent`; and
+  `de94609` only from `a16-5th`. None is an ancestor of `HEAD`. Delete either
+  and those hashes stop resolving at the next `gc`, taking the evidence for the
+  CI and review sections below with them. Tag `e33932d` first if they ever
+  genuinely need to go.
 
 Remotes, all three present:
 
@@ -664,17 +766,18 @@ What the surface produced while it was open: one full-diff review (29 files) and
 one incremental one, four actionable findings, three acted on and one declined
 with reasons. All four are described below under the commits that closed them.
 
-To get another review later, reopen that PR or raise a fresh one from `a16-5th`
-— to a scratch branch, not `master`. Two things to expect, both learned the hard
-way:
+To get another review later, reopen that PR or raise a fresh one from
+`a16-5th-gmate` — to a scratch branch, not `master`. Two things to expect, both
+learned the hard way:
 
 - **Reviews are manual-trigger on this fork, for two independent reasons**, so
   expect to ask for every one:
   - *"fewer than 10 stars"* — the free tier does not auto-review small repos.
   - *"Auto reviews are disabled on base/target branches other than the default
-    branch"* — the fork's default branch is `master`, so **any PR based on
-    `a16-5th` is skipped**, which is every feature-to-integration PR by design.
-    Seen on PR #2 (`a16-5th <- a16-5th-kbd-charge-uevent`).
+    branch"* — the fork's default branch is `master`, so **any PR based on the
+    integration branch is skipped**, which is every feature-to-integration PR by
+    design. Seen on PR #2 (`a16-5th <- a16-5th-kbd-charge-uevent`), and it
+    applies unchanged now the integration branch is `a16-5th-gmate`.
 
   Either way: the 🔍 Trigger review checkbox or an `@coderabbitai review`
   comment. Pushes do not auto-review.
@@ -692,14 +795,17 @@ way:
 
 Two consequences of using a PR this way:
 
-- **The review scope is the entire diff from upstream**, `4b817ea` to head, 29
-  files including the deleted pre-rename ones (`aorus-laptop.c`, both
-  `aorus-laptop-*.spec`). So review findings arrive in large batches covering
+- **The review scope is the entire diff from upstream**, `4b817ea` to head —
+  including the deleted pre-rename files (`aorus-laptop.c`, both
+  `aorus-laptop-*.spec`). It was 29 files when PR #1 was open and it is **35**
+  as of 24 Oct 2026, so read the figure off `git diff --stat 4b817ea HEAD`
+  rather than from here. So review findings arrive in large batches covering
   ground already settled, and some describe a state a later commit superseded.
   That is expected. **Verify every finding against the current code before
   acting on it** — several have been stale, and two caught real bugs.
-- **CodeRabbit's "Autofix" checkbox pushes its own commits to `a16-5th`.** Leave
-  it unticked; it would interleave with work in progress.
+- **CodeRabbit's "Autofix" checkbox pushes its own commits to the branch under
+  review**, now `a16-5th-gmate`. Leave it unticked; it would interleave with
+  work in progress.
 
 ### CI is green, and it validates the packaging
 
@@ -708,6 +814,15 @@ all four jobs. `920ca3b` and `75f870d` were the first two; `fc61b85`, `7e0ad94`,
 `1e3fc39` and the merge commit `de94609` have all gone green since. Rather than
 keep a list that goes stale on every push, treat it as: **CI has never been red
 on this branch**, and a red build is therefore a real regression.
+
+**But "this branch" no longer holds that evidence, and that is worth knowing
+before the claim is leaned on.** Checked 24 Oct 2026: every one of those six
+hashes is reachable only from the two retired local branches, and none is an
+ancestor of `HEAD` — the PR #3 squash replaced them with `8dad4e1`. So the
+current integration branch has **no recorded CI result at all**, on this file's
+own terms. The statement is a record of what the packaging work passed, not a
+statement about `a16-5th-gmate`. Push the current head and let the workflow run
+before citing it as green.
 
 ```
 Generate driver tar file                      success
@@ -854,6 +969,23 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   255** rather than passing an arbitrary `u32` to the EC. Deliberately *not*
   clamped to 229: upstream documents the wider range, and a user asking for a
   duty above the ceiling on an affected model is making an informed choice.
+- **`gpu_boost` value 3 is a dGPU *eject* request, not a boost level — and the
+  range check lets it through on any unit where the ejector probe does not
+  fire.** Found 24 Oct 2026 by reading `Case (0x51)` against the handler.
+  `WMBD 0x51` value 3 is `Notify (^^GPP0.PEGP, 0x03) // Eject Request`, and
+  value 4 is a bus re-check (`WMOF = 0`, `Notify (PCI0, Zero)`). The driver
+  blocks `mode >= 3` **only inside `if (gigabyte->has_dgpu_ejector)`** and then
+  falls through to `if (mode > 3)`, which *permits* 3. So the bound is inverted
+  against the firmware: the dangerous value is allowed and the harmless
+  bus-recheck value is rejected.
+
+  **This machine is safe, which is precisely why it went unnoticed** —
+  `has_dgpu_ejector` reads 1 here, so the first check fires and the fall-through
+  is never reached. It bites a `GIGABYTE GAMING` unit whose ejector probe comes
+  back 0, where `echo 3 > gpu_boost` would issue the eject request. The fix is
+  to make the cap unconditional while ejection is deliberately unimplemented;
+  it is on the upstreaming list next to the `gpu_boost_store()` oops, being the
+  same handler and the same class of defect.
 - ~~Probe aborts the whole module on any optional-method failure.~~ **Fixed in
   Step 1.** `gigabyte_laptop_init()` still treats a probe error as fatal, but
   probe no longer returns one for a firmware read: fan-mode detection falls back
@@ -883,16 +1015,40 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   Nothing is declared *at* `0x62` — the offset is where the field stops. So
   `ec_read(0x62)` reads an undefined EC byte and returns 0, which is why
   `temp3` shows `+0.0°C` while `temp1` tracks `k10temp` (46000 vs 46375). The
-  offset came from Intel Aero/AORUS units. CPU and GPU temperature come from
-  `WMBC 0xE1`/`0xE2` (`EC0.CTMP` and friends) and are unaffected.
-  `ec_read(0xD)` is suspect for the same reason, but is only reached when the
-  machine is already in custom fan mode at load time.
+  offset came from Intel Aero/AORUS units. `temp1` and `temp2` come from
+  `WMBC 0xE1`/`0xE2` and are unaffected — but see the next bullet before
+  believing `temp2`'s label. `ec_read(0xD)` is suspect for the same reason, but
+  is only reached when the machine is already in custom fan mode at load time.
+- **hwmon `temp2` is labelled GPU and is not a GPU temperature here.** Found
+  24 Oct 2026 by reading the method bodies rather than the driver's names:
+  `WMBC 0xE1` returns `EC0.CTMP`, `0xE2` returns `EC0.SKTC`, and **`0xE3`
+  returns the same `SKTC`** — the two are literally the same field. There is no
+  GPU temperature field anywhere in this DSDT (`grep -c GTMP` is `0`). So
+  `temp2` is a socket/board sensor, `TEMP_GPU 0xE2` is a misnomer on this
+  generation, and real dGPU temperature comes from `nvidia-smi`, not this
+  driver. It reads plausibly (37 °C against `temp1`'s 39 °C), which is exactly
+  why nobody questioned it.
+
+  **This also pre-empts the tempting fix for the dead `temp3`.** Pointing it at
+  `0xE3` instead of `ec_read(0x62)` would make it read a number — the *same*
+  number as `temp2`. A third channel duplicating the second is worse than one
+  reading zero, because zero is obviously wrong. The upstream label is left
+  alone for Aero/AORUS, where `0xE2` may well be a real GPU sensor; this is a
+  `GIGABYTE GAMING` finding on one machine, which is the same restraint applied
+  to the `temp3` hide under "Two review findings declined".
 - **`power_on_time` is mislabelled on this firmware.** The driver defines
   `POWER_ON_TIME` as `0x63`, but `WMBC 0x63` on this generation returns
   `TEST[0..4] = RXCM(0xD2)..RXCM(0xD6)` — the **five CMOS bytes** that
-  `WMBD 0x63` writes, not a timestamp. It read `0 1 5 5 2` here. Useful rather
-  than harmful: this node *is* the pre-write CMOS snapshot that Step 6 needs, so
-  that requirement is already satisfied by `cat power_on_time`.
+  `WMBD 0x63` writes, not a timestamp. It read `0 1 5 5 2` on 22 Oct 2026 and
+  **`0 0 0 0 0` on 24 Oct 2026.** ~~Useful rather than harmful: this node *is*
+  the pre-write CMOS snapshot that Step 6 needs.~~ **That premise is dead, and
+  the changed digits are not the point.** No path in this driver can have
+  written those bytes — `debug_method_write` explicitly refuses `0x63` and
+  `WMBD 0x63` is the only writer — so **the CMOS block behind this node is not
+  stable across sessions**, and a snapshot recorded in one session is worthless
+  by the next. Step 6b's "record `RXCM(0xD2)`–`RXCM(0xD6)` before writing
+  anything" therefore has to happen in the *same* session as the write, not read
+  back off a baseline in this file.
 - ~~**`eeepc_wmi` steals our event GUID.**~~ **Blacklisted, and verified
   24 Oct 2026.** `/lib/modules/$(uname -r)/modules.alias` still contains
   `alias wmi:ABBC0F72-8EA1-11D1-00A0-C90629100000 eeepc_wmi`, so the collision
@@ -908,7 +1064,7 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   /sys/bus/wmi/devices/ABBC0F72-…-3/driver -> /sys/bus/wmi/drivers/gigabyte-laptop-events
   ```
 
-  **This was listed as pending Stage 3 hygiene and is in fact complete** — it
+  **This was listed as pending Phase 3 hygiene and is in fact complete** — it
   was done back when the hotkey handler was being debugged, because ownership
   of the GUID is what made the absent `GBT0005` notifies a real negative rather
   than a lost race. It is **machine state, not repo state**: nothing in the
@@ -997,7 +1153,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~2~~ | ~~Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel~~ **done** — all three confirmed; GPU TGP closed as firmware-blocked | medium |
 | ~~3~~ | ~~`platform_profile` handler~~ **done** — over fan policy, not GPU power | low |
 | ~~4~~ | ~~Writable `pwm1`/`pwm2`~~ **closed 23 Oct 2026 — unreachable on this EC.** Four mechanisms tried and rejected, the last one verifiably inert. Read scaling kept. See "Step 4 is closed" | medium |
-| ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** — both keys scan in and are bound in KDE | low |
+| ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** — both keys scan in; GiMate reports `KEY_PROG1` and is bindable, Mode is consumed by the kernel and cycles `fan_preset` | low |
 | ~~6a~~ | ~~`0xF6`/`KBLL` keyboard brightness~~ **done** — LED class device, `max_brightness` 1 measured from the EC's own events | low |
 | 6b | RGB **colour** over `/dev/hidraw2` — not started, no precedent on this hardware. Open-ended research, not a blocker | high |
 
@@ -1047,9 +1203,12 @@ Two behaviours worth knowing, both normal:
 - **The fans stop entirely at idle.** `pwm1` goes to 0 and both tachs read 0
   with the CPU at 46–47 °C. Semi-passive cooling, not a failed read.
 - **`fan_mode` reads `1` (silent), and the EC holds the fans off until ~86 °C
-  in that mode.** That looks like a correct read rather than a misparse, and it
-  is the concrete argument for Step 4: writable PWM is what would let the user
-  override a fan curve that tolerates 86 °C before spinning up.
+  in that mode.** That looks like a correct read rather than a misparse, and the
+  observation stands. ~~It is the concrete argument for Step 4.~~ It is what
+  writable PWM **would** have bought, and Step 4 closed as unreachable on this
+  EC. What shipped instead is the `fan_preset` ring and the profile mapping: the
+  Mode key moves off silent in one press, which addresses the same complaint by
+  the only route the EC leaves open.
 
 Step 2 gated everything GPU-related and is **settled**: all three methods
 validated, and GPU TGP closed as firmware-blocked, so nothing further sits behind
@@ -1115,24 +1274,20 @@ Three things are confirmed by that output:
 | GiMate | `0xCE` | `KEY_PROG1` (148), `XF86Launch1`-class | userspace — bindable in GNOME/KDE |
 | Mode (Fn+F7) | `0xCC` | **none** | the driver, which cycles `fan_preset` |
 
-GiMate goes through `sparse_keymap` as a programmable keycode, the way
-`asus-wmi` reports vendor keys, so the desktop can bind it to anything. Mode is
+GiMate goes through `sparse_keymap` as a programmable keycode — `asus-wmi` uses
+`KEY_PROG1`..`4` for vendor keys for the same reason — so the desktop can bind
+it to anything. **Mode reports no keycode** because the driver acts on it: it is
 intercepted in `gigabyte_laptop_wmi_notify()` before the keymap is consulted and
-reports nothing. Events the keymap does not cover are still logged, so an event
+cycles the `fan_preset` ring instead; see "Settled: the Mode key owns fan
+policy" below. Events the keymap does not cover are still logged, so an event
 number this firmware uses but we have not seen still shows up and can be added.
 
-**Mode reports no keycode** because the driver acts on it — it
-cycles the `fan_preset` ring instead. See "Settled: the Mode key owns fan
-policy" below. GiMate is unchanged.
-
-`asus-wmi` uses `KEY_PROG1`..`4` for vendor keys for the same reason. Events the
-keymap does not cover are still logged, so a number this firmware uses that we
-have not seen can be added.
-
-**Confirmed in userspace.** Both keys reach the desktop and are bound in KDE:
-Mode to the power-profile switcher, GiMate to Steam Big Picture. That closes
+**Confirmed in userspace.** Both keys reached the desktop and were bound in KDE:
+Mode to the power-profile switcher, GiMate to Steam Big Picture. That closed
 Step 5 — the keycodes were the last unverified link, since the kernel log had
-only ever shown the WMI events arriving.
+only ever shown the WMI events arriving. **The Mode half of that is history**:
+the kernel has since taken the key over, so there is no keycode to bind and the
+KDE binding had to be removed. GiMate is unchanged and still bound.
 
 **Mode has since been taken over by the kernel** and now cycles the
 `fan_preset` ring — `auto`, `silent`, `normal`, `gaming` — which is what it was
@@ -1233,9 +1388,13 @@ taking a `struct wmi_buffer`; `min_event_size` is set to 0 so events carrying no
 data are still delivered.
 
 **This makes the `eeepc_wmi` blacklist matter more.** Two drivers matching one
-GUID means whichever binds first wins the device. `eeepc_wmi` currently probes
-and fails, leaving `ABBC0F72` with `driver=NONE`, so our driver can take it —
-but that is luck, not design. Blacklist it before relying on the handler:
+GUID means whichever binds first wins the device, and relying on `eeepc_wmi`
+probing and failing would be luck rather than design. ~~Blacklist it before
+relying on the handler.~~ **Already done — do not run this again as if it were
+pending.** `/etc/modprobe.d/gigabyte-a16.conf` holds both lines, neither module
+is resident, and the device is ours; see the `eeepc_wmi` entry under Hazards for
+the verification and for the fact that this is machine state rather than
+anything the packaging installs. The file was written as:
 
 ```sh
 printf 'blacklist eeepc_wmi\nblacklist asus_wmi\n' | sudo tee /etc/modprobe.d/gigabyte-a16.conf
@@ -1246,9 +1405,15 @@ Binding works without it; adding one would give the module a modalias and let
 udev autoload it, which is a change to load behaviour worth making separately
 from this diagnostic.
 
-Expect `0x63`/`0xCF` for the `GBT0005` path or a WMI event for the `_Q45` path;
-anything else is a query not yet accounted for, and this machine's DSDT is
-committed to look it up.
+~~Expect `0x63`/`0xCF` for the `GBT0005` path or a WMI event for the `_Q45`
+path.~~ **Settled seventy lines above — it is the `_Q45` WMI path, and the
+`GBT0005` handler has never fired.** The expectation was also malformed: the
+`0x63` in it is the EC *query* number `_Q63`, not a notify value, and
+`gigabyte_laptop_acpi_notify()` logs only the notify value, so `0x63` could
+never have appeared there. What still holds is the useful half: an event number
+the keymap does not cover is logged rather than dropped, so a query not yet
+accounted for shows up by itself, and this machine's DSDT is committed to look
+it up.
 
 On USB Gigabyte models the vendor-HID path carries report ID `0x04` with
 payload `00 00 84` = Mode key and `00 00 91` = GigaMate key (GigaMate's
@@ -1262,17 +1427,25 @@ PS/2 Gigabyte keyboard.
 
 **Squash-merged on 22 Oct 2026** as `de94609`, "A16 5th kbd charge uevent (#2)".
 Because it was a *squash*, the feature branch's individual commits are not
-ancestors of `a16-5th`, so `git merge-base --is-ancestor` answers "no" while the
-content is all present. Verify a squash by comparing trees instead:
+ancestors of `a16-5th`, so `git merge-base --is-ancestor` answered "no" while the
+content was all present. The lesson is the durable part — **verify a squash by
+comparing trees, not ancestry** — but the command that was recorded here no
+longer runs:
 
 ```sh
-git diff --stat origin/a16-5th origin/a16-5th-kbd-charge-uevent   # empty == captured
+# As recorded, and now broken twice over: both origin/ refs were deleted, and
+# the local a16-5th has since advanced past the squash to e33932d, so the
+# substitution does not produce the empty diff the comment promises either.
+#   git diff --stat origin/a16-5th origin/a16-5th-kbd-charge-uevent
+
+git diff --stat de94609 a16-5th-kbd-charge-uevent   # pin the merge commit; empty == captured
 ```
 
-**`master` is untouched and still upstream's `4b817ea`**, checked on both the
+**`master` was untouched and still upstream's `4b817ea`**, checked on both the
 local and the fork copy after the merge, with the feature branch confirmed *not*
-an ancestor of it. The never-merge rule covers `master` only; `a16-5th` is the
-integration branch and is exactly where this was meant to land.
+an ancestor of it. The never-merge rule covers `master` only; `a16-5th` was the
+integration branch at the time and was exactly where this was meant to land. It
+is `a16-5th-gmate` now — see Branches.
 
 Eleven CodeRabbit findings were addressed across three review rounds before the
 merge — six in `fc61b85`, two in `7e0ad94`, three in `1e3fc39`. One finding was
@@ -1361,9 +1534,11 @@ record of why the code looks as it does:
   over-range input as a different command (`FAN_DUTY_MAX`: duties above 229
   *stop* the fans), a guessed ceiling is not acceptable. **Measure first.**
 
-  `gigabyte_laptop_method_implemented()` is written and deliberately *not*
-  committed, because its only consumer is the capability gate this blocks and
-  the build must stay clean under `W=1`. It lands with the LED code.
+  `gigabyte_laptop_method_implemented()` was written and deliberately *not*
+  committed at this point, because its only consumer was the capability gate
+  this item blocked and the build must stay clean under `W=1` — an unused static
+  function is a warning. **It landed with the LED code**, as this said it would,
+  and now gates three methods rather than one: `0x64`, `0x65` and `0xF6`.
 
 - **`charge_mode` / `charge_limit`.** No new feature code: the handlers exist
   and are write/read symmetric (`mode << 2` out, `output >> 2` back), so the
@@ -1437,7 +1612,12 @@ move the keyboard and the sysfs value together. Kept because the caution was
 right when written — an accepted WMI write proves only that the ACPI store
 landed, never that the EC acted on it.
 
-#### Charging: factory defaults recorded, ceiling test inconclusive
+#### ~~Charging: factory defaults recorded, ceiling test inconclusive~~ — superseded
+
+> **This is the 22 Oct measurement log, and its verdict did not survive.** The
+> ceiling test was re-run properly and came back `HONOURED`; charge limiting
+> works on this unit. See "Charge limiting WORKS" below. What is kept here is
+> the factory baseline and the reason the first attempt measured nothing.
 
 **The values worth keeping.** Both IDs are implemented — neither echoed the
 `0x5A` sentinel:
@@ -1457,8 +1637,10 @@ the ceiling — so "charging stops at 80 %" was not observable. `upower` showed
 with a working implementation that only gates the transition upward. It
 distinguishes nothing. The restore ran, and the nodes read 0 and 100 again.
 
-**Re-run it from below the ceiling**, which is the condition the test needed in
-the first place. `scripts/test-charge-limit.sh` does it properly:
+~~**Re-run it from below the ceiling**~~ — **done, and it returned `HONOURED`;
+this is the reasoning that produced the script, not a pending action.** Starting
+below the ceiling was the condition the test needed in the first place, and
+`scripts/test-charge-limit.sh` is what does it properly:
 
 ```sh
 sudo bash scripts/test-charge-limit.sh        # or pass a ceiling, default 80
@@ -1577,8 +1759,15 @@ kind of thing only a second reader catches:
 
 ### Settled: `BCPC` *does* persist across a reboot — and the original 0 is unexplained
 
-Observed 22 Oct 2026, and **not yet explained.** `charge_limit` reads `0` where
-the recorded factory baseline was `100`:
+> **Read the heading, not the next four paragraphs.** They record the hypothesis
+> that `BCPC` is cleared by a power cycle, and that hypothesis was **tested and
+> disproven** — the resolution is further down, under "The test ran on 23 Oct
+> 2026". **No boot-time re-apply is needed**, and a reader who stops after the
+> first screen will take away the opposite. The paragraphs are kept because the
+> guard they motivated is still in the code and still justified.
+
+Observed 22 Oct 2026, and **not yet explained at the time.** `charge_limit` read
+`0` where the recorded factory baseline was `100`:
 
 ```
 charge_mode=0  charge_limit=0          # was 0 / 100 when first measured
@@ -1749,7 +1938,12 @@ real value:
   battery" becomes a rule rather than a habit.
 - **The state is readable.** Nothing could previously tell whether it was on.
 - **The desktop's own control works**, and tracks the key.
-- **Save/restore across reboots**, free from systemd's `leds` rule.
+- **Save/restore across reboots**, free from systemd's `leds` rule — which is
+  only true because the LED carries `LED_RETAIN_AT_SHUTDOWN` alongside
+  `LED_BRIGHT_HW_CHANGED`. Without it `led_classdev_unregister()` zeroes the
+  brightness on the way out, and systemd would dutifully save and restore a 0.
+  Worth naming, because this bullet claimed the benefit while the mechanism
+  delivering it went unrecorded.
 
 **And what it does not buy: more levels.** It is a two-level backlight, so the
 "slider" is a toggle. For a user who is happy pressing Fn+Space, the practical
@@ -1764,19 +1958,25 @@ measurable without a single speculative write.
 
 ### Mode key notifications: working, 22 Oct 2026
 
-`tools/gigabyte-fan-preset-notify`, enabled as a systemd **user** service, puts
-a toast on screen for each Mode press. Confirmed on hardware — the
+`tools/gigabyte-fan-preset-notify`, started by its systemd **user** `.path`
+unit, puts a toast on screen for each Mode press. Confirmed on hardware — the
 notifications appear when the preset changes.
 
 ```
-systemctl --user is-enabled   -> enabled
-systemctl --user is-active    -> active
+systemctl --user is-enabled …notify.path     -> enabled
+systemctl --user is-enabled …notify.service  -> static
+systemctl --user is-active  …notify.service  -> active
 CPU ticks since start         -> 1      (total, across 23 presses this boot)
 memory                        -> 268 KB cgroup / 1.6 MB RSS
 ```
 
 One CPU tick for a session's worth of notifications, because the process is
 blocked in `poll()` the whole time and only wakes to fork `notify-send`.
+
+**It is the `.path` unit that gets enabled, and the service is `static`** — the
+`.service.in` has no `[Install]` section, so `enabled` was never achievable for
+it. This block said `is-enabled -> enabled` without naming a unit, which reads
+as a claim about the service. `USAGE.md` had it right all along.
 
 **C, not Python, and the reasoning is worth keeping.** Python was the first
 suggestion and was habit rather than a decision: a resident interpreter costs
@@ -1800,9 +2000,14 @@ truncate.
   spins at 100 % CPU. That first read is also current state rather than a
   change, so it is recorded and not announced.
 - **`POLLERR` accompanies every `POLLPRI`** on a sysfs attribute and is not an
-  error on its own. A failed *read* is, and means the driver has gone: the
-  program exits non-zero so the service manager decides, rather than looping on
-  a dead fd. Tested against a missing attribute.
+  error on its own. A failed *read* is, and means the attribute has gone.
+  ~~The program exits non-zero so the service manager decides.~~ **Superseded:
+  it now re-opens instead**, because the service manager turned out to be unable
+  to recover it — a failed read triggers `RETRY_LIMIT` (30) attempts at
+  `RETRY_INTERVAL_S` (2 s), about a minute, and `exit(1)` is still the terminal
+  outcome only after all of them fail. A failed open *at startup* remains fatal
+  immediately. See "The fix: the watcher re-opens itself". Tested against a
+  missing attribute.
 
 It reacts to the **key only**, because the driver calls `sysfs_notify()` only
 from the key path. A sysfs write to `fan_preset` or `fan_mode` raises nothing,
@@ -1882,11 +2087,19 @@ reads `active` either way. The one-line check:
 ```sh
 PID=$(systemctl --user show -p MainPID --value gigabyte-fan-preset-notify.service)
 stat -c %i /sys/devices/platform/gigabyte_laptop/fan_preset   # live
-stat -L -c %i /proc/$PID/fd/3                                 # what the watcher holds
+for f in /proc/$PID/fd/*; do                                  # what the watcher holds
+	case "$(readlink $f)" in *fan_preset*) stat -L -c %i "$f";; esac
+done
 ```
 
 Equal means healthy. Different means notifications are silently dead and the
 service needs a `restart`.
+
+**This snippet read `stat -L -c %i /proc/$PID/fd/3` and that was wrong**, for
+the reason given under "Verified end to end on hardware" below: the descriptor
+number moves once the watcher has re-opened itself, so a hardcoded `fd/3`
+reports `No such file or directory` on a perfectly healthy process. Matching on
+the symlink target is the fix, and both copies of the diagnostic now do it.
 
 **Note for anyone running the test:** reloading the module breaks the toasts
 until the watcher is restarted, and nothing on screen says so. Say that before
@@ -1989,9 +2202,14 @@ Three rules, all paid for:
   exercised without a module reload.
 
 **Guarded in the unit now**, because the fix being right is not a reason to
-leave the failure mode uncapped: `CPUAccounting=yes` and `CPUQuota=5%`. The
-same bug would then cost 5% of one core and show as CPU time on a process that
-should have none, instead of pegging a core silently.
+leave the failure mode uncapped: **`CPUQuota=5%`, and that directive alone.**
+This originally read "`CPUAccounting=yes` and `CPUQuota=5%`", which credited a
+directive that does nothing — **systemd 259 removed `CPUAccounting=`** and logs
+"Support for option CPUAccounting= has been removed and it is ignored" on every
+daemon-reload. The guard is undamaged: cgroup v2 reports `cpu.stat`
+unconditionally, so `CPUUsageNSec` stays readable with no directive asking for
+it. The same bug would now cost 5% of one core and show as CPU time on a process
+that should have none, instead of pegging a core silently.
 
 ### Verified end to end on hardware, 24 Oct 2026
 
@@ -2014,10 +2232,15 @@ CPUUsageNSec for the whole life: 84 ms, forks for notify-send included
 ```
 
 **The descriptor number moves, and a diagnostic that hardcodes `fd/3` is wrong
-after the first re-open.** `arm()` opens the replacement before closing the old
-one, so the fd is 4 after one recovery, 5 after two. Exactly one is ever open --
-the listing above confirms it -- but match on the symlink target rather than the
-number:
+after the first re-open.** `arm()` opens the replacement *before* closing the
+old one, so the new fd takes the next free number while the old one is still
+held. ~~The fd is 4 after one recovery, 5 after two.~~ **Wrong — it does not
+climb, it alternates.** Corrected 24 Oct 2026: the open-before-close means the
+replacement lands on 4 while 3 is busy, then 3 is closed and freed, so the
+*next* recovery lands back on 3. The sequence is 3 → 4 → 3 → 4, and the same
+mistaken "4 then 5" is in commit `3af934a`'s message, where it cannot be fixed.
+Exactly one is ever open -- the listing above confirms it -- but match on the
+symlink target rather than the number:
 
 ```sh
 PID=$(systemctl --user show -p MainPID --value gigabyte-fan-preset-notify.service)
@@ -2191,7 +2414,10 @@ So the rename is now handled end to end by the packaging, and the manual
 `dnf remove akmod-aorus-laptop` step is **no longer required**. `INSTALL.md`
 says so.
 
-## Open decisions
+## Open decisions — all closed, kept for the record
+
+Every entry here is struck through, which is the point: these are the questions
+that were open and how each was answered.
 
 ~~**Whether to try the indexed fan curve.**~~ **Answered on hardware,
 23 Oct 2026 — it is inert.** See "Step 4 is closed". Nothing about fan duty
@@ -2206,8 +2432,11 @@ does.** 80 survived a reboot, so no boot-time re-apply is needed. What the
 original 0 came from is still unknown, and is not worth another reboot; see
 "Settled: `BCPC` *does* persist across a reboot".
 
-**Nothing is open here any more.** Phase 3 has one remaining row, 6b, and it is
-a separate research project.
+**Nothing is open in this section any more.** Phase 3 has one remaining row,
+6b, and it is a separate research project — and the APU-power half of `0xED` is
+a new experiment opened on 24 Oct 2026, recorded under "`perf_mode` has a second
+half". So this is not a claim that the project has nothing left to do; it is a
+claim about these four questions.
 
 ## Decided: upstreaming comes last
 
@@ -2220,6 +2449,7 @@ Sorted by how likely each is to be accepted, for when that time comes:
 | Candidate | Why it should go up |
 |---|---|
 | `gpu_boost_store()` oops (#45) | Dereferenced `gigabyte` before assigning it; any write oopsed the kernel |
+| `gpu_boost` mode-3 eject bound | Same handler, same class of defect: `mode >= 3` is blocked only when `has_dgpu_ejector` is set, then `if (mode > 3)` permits 3 — which the firmware treats as a dGPU **eject request**. Make the cap unconditional. See Hazards |
 | Duty clamp (#46) | Duties above `FAN_DUTY_MAX` stop the fans on an AERO 17-XA |
 | Void-WMBD tolerance | `set_devstate()` reported `-EINVAL` for a third of this firmware's setters; see below |
 | Probe hardening | One absent optional method no longer aborts the whole module |
@@ -2269,10 +2499,11 @@ rename in particular would break every downstream packaging reference.
 
 ### Step 4: writable PWM is reverted, and here is what the firmware does
 
-**Writing a duty is read-only again.** Two mechanisms were tried on hardware
-and neither gives proportional control, and one of them stops the fans, so
-shipping a writable attribute that userspace or CoolerControl could trigger was
-not defensible.
+**Writing a duty is read-only again.** ~~Two mechanisms were tried~~ — **four
+were, in the end**; this section is the chronological record and the two below
+are only where it started. None gives proportional control, one of them stops
+the fans, so shipping a writable attribute that userspace or CoolerControl could
+trigger was not defensible. The full tally is in "Step 4 is closed".
 
 | Method | Writes | Result on hardware |
 |---|---|---|
@@ -2398,11 +2629,17 @@ only mechanism that could have been confirmed is confirmed inert.
 | `0x46`/`0x47` `FDTY`/`GDTY` | `FDTY` is the EC's output, not an input |
 | `0x68` `XFNW` | store lands, EC inert, `XFN1` never populates |
 
-**The packing question is moot but was answered anyway**, and worth keeping: the
-field widths decompose as 24 = 8-bit index + 16-bit payload, `XFNR` is the 8-bit
-index and `XFN1` the 16-bit payload, which matches CWH's "index, temperature,
-duty" and matches what `fan_curve_data_store()` already builds. The packing this
-file called "a guess" was correct. It simply has nothing to drive.
+**The packing question is moot but was reasoned out anyway**, and worth keeping:
+the field widths decompose as 24 = 8-bit index + 16-bit payload, `XFNR` is the
+8-bit index and `XFN1` the 16-bit payload, which matches CWH's "index,
+temperature, duty" and matches what `fan_curve_data_store()` already builds.
+~~The packing this file called "a guess" was correct.~~ **That overclaims, and
+the overclaim matters because it is the kind that outlives its evidence.** What
+holds is that the packing is *consistent* with the field widths and with CWH's
+stated layout — and CWH's own write-up says no value in it was ever sent to
+hardware. It cannot be *validated* here at all: `XFN1` never populates, so the
+read-back channel that was the whole point is dead. Consistent, not confirmed.
+It simply has nothing to drive either way.
 
 **So writable PWM is unreachable on this EC and the nodes stay read-only.** This
 also corroborates GigaMate's report that the indexed store is inert on an
@@ -2450,8 +2687,10 @@ firmware**, method body for method body:
 | `0x70` | `TFAN = 0`, `GFAN = 1`, `FAN1 = FAN2 = Arg2` | ✓ |
 
 **The packing is the valuable part.** `XFNW` is index / temperature / duty, so
-`data << 8 | index` packs two values into a three-field register. Still
-unvalidated — but it is a stated layout to test rather than a guess to sweep.
+`data << 8 | index` packs two values into a three-field register. **Still
+unvalidated, and now unvalidatable on this unit** — a stated layout rather than a
+guess, but the read-back channel it would have been tested through is inert; see
+"The packing question is moot" above.
 
 **The second finding is that fan mode is four independent bits, and GCC sets
 all four on every switch.** `CRAF` (`0x57`), `FANB` (`0x71`), `TENF` (`0x67`),
@@ -2467,8 +2706,15 @@ all four on every switch.** `CRAF` (`0x57`), `FANB` (`0x71`), `TENF` (`0x67`),
 
 Four consequences for Step 4:
 
-- **`CRAF` had never been mentioned in this file and has never been tried.** It
-  is present and read/write on our firmware.
+- ~~**`CRAF` had never been mentioned in this file and has never been tried.**~~
+  **Both halves were false the moment they were written**, by the same commit
+  that added the `0x57` row to "Method IDs we are not using yet" 2000 lines
+  above. `CRAF` *is* the driver's `FAN_SILENT_MODE` and reads `1` whenever
+  `fan_mode` is 1, so it has been driven all along; the CWH analysis named a
+  field this file had left anonymous rather than finding a new control. See
+  "Open decisions". **What is genuinely untried is the four-flag combination** —
+  setting `CRAF`/`FANB`/`TENF`/`ADJF` together the way GCC does, rather than
+  one flag at a time. It is present and read/write on our firmware.
 - **The rejected `0x46`/`0x47` test wrote the wrong CPU register.** GCC sets CPU
   duty with `0x6B` → `FAN1`, never `0x46` → `FDTY`, which independently
   confirms the conclusion above that `FDTY` is the EC's output.
@@ -2546,6 +2792,13 @@ tuned=throughput-performance -> platform_profile=performance -> fan_mode=0
 battery mid-session, `tuned` auto-switched to `powersave`, its `[acpi]` plugin
 asked for `low-power|quiet`, took `low-power`, and the handler set silent. That
 is the `low-power` choice being load-bearing rather than belt-and-braces.
+
+**That route is not the one taken today**, though the end state is the same.
+On battery `tuned` now selects `balanced-battery`, which `include=`s `balanced`
+and so asks for `platform_profile=balanced` → `fan_mode 1` silent. So the
+anecdote above no longer describes current behaviour, and `low-power` is
+load-bearing for `powersave` specifically rather than for every battery
+transition. Both paths land on silent, which is why this was not noticed.
 
 **The legacy aggregate really is created by the class API.** That was the one
 assumption in this design taken from kernel source rather than observation, and
@@ -2803,8 +3056,20 @@ after turbo were the usual idle semi-passive behaviour at 44 °C, not a fault.
 
 ### `perf_mode`: our write lands, but nothing applies it
 
-`perf_mode` 0/1/2 leaves `enforced.power.limit` at **30 W** throughout, with
-the GPU at `P8`. That is *not* evidence the method does nothing. The chain is:
+`perf_mode` 0/1/2 leaves `enforced.power.limit` at **30 W** throughout (22 Oct
+2026; see the AC/DC caveat below), with the GPU at `P8`. That is *not* evidence
+the method does nothing. The chain is:
+
+> **Every power figure in this section is un-annotated for AC/DC, and that is a
+> real defect in the record** — the firmware branches on `EC0.ACST` and programs
+> different limits on each. The 30 W readings here were taken on 22 Oct 2026
+> with the AC/DC state unrecorded; on **24 Oct 2026, on battery**, the same
+> query reads **40 W** against the same 50 W default and 85 W maximum. Whether
+> 40 W is this machine's DC figure or a figure that has simply moved since
+> cannot be told from what was written down. **The section's conclusion is
+> unaffected** and must not be reopened on this: 40 W still sits below the 50 W
+> VBIOS default, so "capped, not idle" holds, and `nvidia-smi -pl` is still
+> refused outright. One sentence does break; it is marked below.
 
 ```
 WMBD 0xED -> NPCF.ATPP etc. -> Notify (NPCF, 0xC0) -> nvidia-powerd applies TGP
@@ -2843,34 +3108,48 @@ and the machine rebooted. `/proc/cmdline` confirms they are gone, and
 16:54:11  CRITICAL! Failed to get SysPwrLimitGetInfo
 ```
 
-`enforced.power.limit` still reads 30 W against a 50 W default. The cleanup was
+`enforced.power.limit` still read 30 W against a 50 W default. The cleanup was
 worth doing regardless — both arguments were dead weight — but it was not the
 cause. Do not re-litigate this one.
 
-**A gap in the test itself, before blaming firmware.** Every reading so far was
-taken with the dGPU at `P8` and drawing 3–5 W. On NVIDIA laptops
+~~**A gap in the test itself, before blaming firmware.** Every reading so far
+was taken with the dGPU at `P8` and drawing 3–5 W. On NVIDIA laptops
 `enforced.power.limit` reflects the *currently arbitrated* limit, which at idle
 can sit at a floor that no mode selection will move. The sweep has never been
 run with the GPU actually busy, so "`perf_mode` changes nothing" is not yet
-supported. `glxgears` and `vkcube` are both installed; drive the dGPU with
-`__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia`, confirm the
-P-state leaves `P8`, and only then compare across modes.
+supported. Drive the dGPU with `__NV_PRIME_RENDER_OFFLOAD=1`, confirm the
+P-state leaves `P8`, and only then compare across modes.~~
 
-**`gpu_boost` (`0x51`) has never been written.** It is the other GPU lever this
-firmware offers, `WMBD`-only, and the fork reports it takes 0 or 1 on Gaming
-models. It should be swept alongside `perf_mode` before concluding anything.
+~~**`gpu_boost` (`0x51`) has never been written.** It is the other GPU lever
+this firmware offers, `WMBD`-only, and the fork reports it takes 0 or 1 on
+Gaming models. It should be swept alongside `perf_mode` before concluding
+anything.~~
+
+**Both of those to-dos are refuted by the paragraph immediately below, not
+merely stale**, which is why they are struck rather than left to be read. The
+load test is named a red herring there by the very next heading, and `0x51` was
+since decoded: it writes `NPCF.ACBT` and fires the same `Notify (NPCF, 0xC0)`
+that cannot be serviced, so sweeping it cannot produce a different answer than
+`perf_mode`'s. They are kept because the reasoning that made each look
+worthwhile is the reason the refutation is worth having.
 
 **Read the limit with `enforced.power.limit`.** `power.limit` returns `[N/A]`
 on this driver — it maps to "Requested Power Limit". The useful numbers are
-`enforced.power.limit` 30 W, `power.default_limit` 50 W,
-`power.max_limit` 85 W, which matches the 30/50/85 the three modes are expected
-to select.
+`enforced.power.limit` **30 W (22 Oct, AC/DC unrecorded) / 40 W (24 Oct, on
+DC)**, `power.default_limit` 50 W, `power.max_limit` 85 W. ~~Which matches the
+30/50/85 the three modes are expected to select.~~ **That argument is gone**: it
+rested entirely on the enforced value happening to equal the eco-mode figure,
+and at 40 W the coincidence does not exist. The three-mode correspondence was
+never evidence of anything, which is worth saying plainly — an arbitrated limit
+that lands on one of the table's numbers is a coincidence, not a reading of the
+table.
 
 **The load test was a red herring, and GPU TGP is closed.** A power limit is a
 setting, not a measurement, so if `perf_mode` moved it the change would show at
-idle too. And 30 W sits *below* the 50 W VBIOS default, which is not what
-Dynamic Boost arbitration looks like — arbitration raises above base rather than
-pinning under it. That pattern means capped, not idle.
+idle too. And the enforced limit sits *below* the 50 W VBIOS default — 30 W
+then, 40 W now — which is not what Dynamic Boost arbitration looks like:
+arbitration raises above base rather than pinning under it. That pattern means
+capped, not idle, and it means the same at either figure.
 
 Confirmed by trying to set it directly:
 
@@ -2878,7 +3157,7 @@ Confirmed by trying to set it directly:
 $ sudo nvidia-smi -pl 85
 Changing power management limit is not supported in current scope for GPU: 00000000:01:00.0.
 $ nvidia-smi --query-gpu=enforced.power.limit --format=csv,noheader
-30.00 W
+30.00 W                       # 40.00 W when re-read on DC, 24 Oct 2026
 ```
 
 Rejected for 85, 50 and 30 alike. On laptop GPUs the platform owns TGP through
@@ -2891,7 +3170,8 @@ shut:
 | `perf_mode` → NPCF → `nvidia-powerd` | daemon cannot initialise; SBIOS withholds the power-limit table |
 | `nvidia-smi -pl` | refused, "not supported in current scope" |
 
-**D3 and D4 are closed as blocked by firmware, not by this driver.** The WMI
+**GPU TGP and dynamic boost — "D3" and "D4" in an earlier numbering this file
+never defined — are closed as blocked by firmware, not by this driver.** The WMI
 write lands, the AML executes, the notify arrives; the consumer above us is
 broken on BIOS FB03 with the 615.78.08 open kernel module. Nothing in
 `gigabyte-laptop.c` can change that. Revisit only if a BIOS or driver update
@@ -2906,11 +3186,78 @@ was therefore rewritten over **fan policy**, shipped, and verified on hardware
 — see "Step 3 design: profiles over fan policy, with PWM taking precedence".
 No longer an open question.
 
+### `perf_mode` has a second half, and it has never been tested — 24 Oct 2026
+
+**The most valuable finding of the firmware audit, and this file did not record
+it at all.** `0xED` was decoded here only as `→ NPCF.ATPP etc. →
+Notify (NPCF, 0xC0)`, and the whole method was then closed as firmware-blocked
+on the strength of the GPU consumer being broken. That decoding was incomplete.
+
+**Every mode branch also issues three `ECPT()` calls**, and `ECPT` has nothing
+to do with NPCF. `GAMING-A16-5TH-DSDT.dsl:9176` shows it converting watts to
+milliwatts (`Arg1 * 0x03E8`) and issuing two six-byte EC commands with command
+byte `0x45` through the `ERCD` mailbox — a raw EC write that never reaches
+`nvidia-powerd` and does not depend on it. Indices `0x30`/`0x32`/`0x34` at these
+magnitudes are the shape of APU SPL / sPPT / fPPT.
+
+On AC (`EC0.ACST == One`), per mode:
+
+| `perf_mode` | `ECPT 0x30` | `ECPT 0x32` | `ECPT 0x34` |
+|---|---|---|---|
+| 0 | 45 W | 65 W | 65 W |
+| 1 | 65 W | 65 W | 80 W |
+| 2 | 70 W | 80 W | 80 W |
+
+On battery the ladder flattens — mode 0 is 45/45/45 and mode 1 is 65/65/65 —
+which is incidentally why every power figure in this file needs an AC/DC
+annotation.
+
+**So "`perf_mode` does nothing" was only ever tested on the GPU side.** The
+GPU-TGP conclusion is untouched and must not be reopened: that chain is broken
+above the driver, independently, and this is a *different* chain that happens to
+share a method ID. What follows is narrower and more interesting — the APU-power
+half has never been measured at all, and it is the **highest-value remaining
+experiment in the project** because it needs no reverse engineering and no new
+code.
+
+**How to test it.** On AC, pin cooling first (`echo gaming > fan_preset`), run a
+sustained all-core load, and sweep `perf_mode` 0 → 1 → 2 recording steady-state
+package power and all-core clock at each step. A 45 → 65 → 70 W sustained ladder
+confirms it; a flat curve closes it. Note the usual caveat in its sharpest form
+here: `ECPT` goes through `ERCD`, so a successful write proves the mailbox
+transaction completed and proves nothing about what the EC did with it. Only the
+sustained clock settles it.
+
+### `perf_mode` value 3 exists in this firmware; the node caps at 2
+
+The driver rejects `mode > 2` (`gigabyte-laptop.c`: "Invalid performance mode")
+and its comment documents 0 eco / 1 balanced / 2 boost. This firmware implements
+a **fourth fully-populated mode**, and it is not a duplicate of mode 2: mode 2
+reads a runtime power class with `Local0 = ECPL ()` and switches `ATPP` on the
+result, where **mode 3 pins `ATPP = 0xC8`** outright, with `ACBT = 0xA0`,
+`AMAT = 0x78` and the mode-2 `ECPT` ladder. `If ((Local1 == 0x04)){}` and
+`If ((Local1 == 0x05)){}` follow it with **empty bodies**, so **0–3 is the real
+range** and the cap is one short rather than arbitrary.
+
+Try it through `debug_method_write` (`echo '0xED 3'`) during the sweep above,
+not by raising the sysfs range check first. If mode 3 behaves, raise the check
+to 3 and correct the node's comment block; if it does not, record 0–2 as the
+real range *with* the firmware reason, which is what is missing today.
+
 ### `dynamic_boost` round-trips, direction still unknown
 
 `0 -> 1 -> 0` reads back correctly, so the node and the inversion are right.
 Which direction means "boost on" cannot be settled while the TGP is pinned, so
-**D4 is blocked on the same thing** as D3.
+**dynamic boost is blocked on the same thing** as GPU TGP.
+
+The firmware does give the sweep above a second observable it did not have
+before. `Case (0xE7)` writes `EC0.PPAB` as well as the NPCF fields — write 0
+zeroes `AMAT` and clears `PPAB`, write 1 restores `AMAT` from the value `0xED`
+cached and sets `PPAB` — and `PPAB` is a 1-bit EC field that every `perf_mode`
+branch also sets. So toggling `dynamic_boost` at each `perf_mode` step and
+watching sustained package power costs nothing extra once the APU sweep is being
+run, and it is the only route to the direction question that does not go through
+`nvidia-powerd`.
 
 ### Other
 
@@ -2919,19 +3266,33 @@ Which direction means "boost on" cannot be settled while the TGP is pinned, so
   work means blind-probing report `0x0B`, where GigaMate's firmware-hang
   warning applies.
 - CPU power management is out of scope. `amd-pstate-epp` with `dynamic_epp` and
-  `prefcore` already works; this driver must not touch it. The gap is GPU TGP
-  and fan policy.
+  `prefcore` already works; this driver must not touch it. ~~The gap is GPU TGP
+  and fan policy.~~ **Both of those closed**: fan policy shipped as the
+  `platform_profile` handler plus the `fan_preset` ring, and GPU TGP is
+  firmware-blocked. The gap now is the **APU package power** that `0xED` writes
+  through `ECPT` — which is adjacent to CPU power management but is a
+  platform/EC limit rather than a governor setting, so it does not conflict with
+  leaving `amd-pstate-epp` alone.
 
-## Pending root-only diagnostics
+## Root-only diagnostics — both done
 
-This needs a password, so it cannot run from a non-interactive shell.
+**Nothing here is pending.** This section used to be the last thing in the file
+and read as a to-do list, which is the worst possible place for one that is
+already complete. Kept because the hygiene note in the first item is worth
+having the next time a dump is taken.
+
+~~Dump every table and decompile all of them~~ — **done; the output is
+committed.** `GAMING-A16-5TH-DSDT.dsl` and `GAMING-A16-5TH-SSDT12-APMF.dsl` came
+from this run, which is where `AMDI0100` and the APMF methods were found, and
+they are analysed at length under "Firmware reference" and "amd_pmf is one
+kernel parameter away from binding". It needed a password, so it could not run
+from a non-interactive shell. The command, for the next time:
 
 ```sh
-# Dump every table and decompile all of them, not just the DSDT. AMDI0100 and
-# the APMF methods are not in the DSDT, so they must be in an SSDT.
 # acpidump -b writes into the current directory and runs as root, so do it in a
 # scratch directory -- never in the checkout, or the repo fills with root-owned
-# .dat and .dsl files.
+# .dat and .dsl files. Commit only the tables needed; see "Only commit the
+# tables you need".
 d=$(mktemp -d) && cd "$d" && sudo acpidump -b && iasl -d dsdt.dat ssdt*.dat
 ```
 
