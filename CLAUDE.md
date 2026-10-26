@@ -258,8 +258,37 @@ nested switches — `0xED`'s body has its own `Case (0x02)`/`Case (0x03)` settin
 trigger described below. `WMBD` also has no `If (Arg1 == ...)` prelude, going
 straight to `Switch (Arg1)`.
 
+**Bound the extraction to the method as well as the indent.** Verified
+26 Oct 2026 by re-deriving both lists mechanically: a 20-space `Case (0x..)`
+scan that runs past `WMBC`'s closing brace at `GAMING-A16-5TH-DSDT.dsl:9861`
+picks up `Case (0x05)` from the `_DSM` Device Labeling Interface at `:10148`,
+which is not a WMI method ID at all. With the scan bounded to `9672`–`9861` the
+`WMBC` list above reproduces exactly, and the `WMBD` list reproduces from
+`9265`–`9672`. So the rule is two-part — own indent level *and* inside the
+method — and both lists above are confirmed correct.
+
 All three ported IDs are present on **AMD** firmware, which is the main thing
 Phase 2 needed: `0xED`, `0xE7`, `0x7D`.
+
+### Methodological: a keyword search cannot prove a feature absent
+
+**Short, and it has already cost one wrong claim.** The firmware contains
+**zero** occurrences of `charg`, case-insensitive, across the whole of
+`GAMING-A16-5TH-DSDT.dsl` — and charge limiting demonstrably works on this
+unit, measured stopping the battery dead at 80 %. The fields are named `BCPS`
+and `BCPC`, so no search for the feature's English name could ever have found
+them.
+
+Two things follow, and the second is the one that keeps biting:
+
+- **A negative keyword result is not evidence.** It bounds nothing. This is the
+  same error as `grep -c GTMP` returning `0` and being read as "there is no GPU
+  temperature field", when the field is called `GPUT` — see the `temp2`
+  correction under Hazards. Both were asserted in the same session.
+- **The working method is the one this file already uses elsewhere**:
+  enumerate the `Switch` case lists, then read the bodies. Vendor AML is named
+  in four-letter EC mnemonics throughout, so the case list is the index and
+  there is no searchable vocabulary above it.
 
 ### WMBC echoes unknown method IDs — this breaks naive validation
 
@@ -310,6 +339,43 @@ Every other WMI read the probe performs *is* implemented in AMD WMBC: `0x57`,
 `0x71`, `0x67`, `0x6A`, `0x6B`, `0x64`, `0x65`, `0x68`, plus `0xE7`. The only
 non-WMI risk in probe is `ec_read(0xD)`, reached only when the machine is
 already in custom fan mode at load time.
+
+**The echo still reaches integer callers, and the fix is five lines — located
+26 Oct 2026.** The debug node tells the truth now, but ordinary reads do not:
+`gigabyte_laptop_get_devstate_typed()` takes the BUFFER branch for an
+unimplemented ID, `memcpy`s the echoed four-byte argument into the caller's
+destination and returns **0**. Reached through `get_devstate2()` →
+`get_devstate_raw()`, which passes `reply_type` as `NULL`, that destination is
+an `int *`, so the node reports the argument as a value and reports success.
+With the argument `0`, as every ordinary read sends, **an absent method reads
+as a genuine zero.**
+
+What makes this cheap is that the function already computes the answer: it hands
+the reply's `acpi_object_type` back through `reply_type` for exactly this
+purpose, and the integer wrapper is the one place that needs to pass a pointer
+and refuse a non-INTEGER. Five lines in one function, not a refactor.
+
+**It also repairs a live misdetection, which is the better argument for doing
+it.** Probe's silent-fan-mode detection reads `FAN_SILENT_OLD` (`0xFA`) with
+argument `0` and branches on `if (ret || output < 0)`. `0xFA` has no `WMBC`
+case, so the echo gives `ret == 0` and `output == 0`, and the code takes the
+*"Older model detected, using old ID"* branch and installs `0xFA` as the silent
+fan method — on firmware that does not implement it. That is wrong on every
+machine that reaches it, and it is hidden on this one only by the early
+`goto obtain_fan_mode` that short-circuits the three known DMI families before
+the read happens. Any Gigabyte model outside those three gets the
+misdetection.
+
+**The type test has one theoretical blind spot, and it is empty across all four
+committed dumps — checked 26 Oct 2026.** A firmware case that returned the
+untouched `Arg2` buffer would answer exactly like `Default { Return (Arg2) }`,
+so `gigabyte_laptop_method_implemented()` would call it absent. The only
+non-`Default` `Return (Arg2)` anywhere in the four dumps is
+`AORUS-17X-VF-DSDT.dsl:125350-125354`, `WMBC Case (0xE6)` — and it does
+`Arg2 = RXCM (0x12)` first, overwriting the argument object with an Integer, so
+it answers INTEGER and is correctly detected. **The gate is sound on every
+firmware we hold.** Recorded as a bound on the technique rather than a defect,
+and worth re-checking against any new dump: it is the one way the test can lie.
 
 ### A third of WMBD's setters return nothing, and that read as failure
 
@@ -397,7 +463,7 @@ Asymmetries that matter:
 | `0xE7` | `dynamic_boost` | WMBD writes, WMBC returns `NPCF.DBAC`. Writing `0` sets `DBAC = 1`, so **DBAC is already in the node's sense** — invert on write only, never on read. |
 | `0x7D` | `fan_turbo` | WMBD writes and WMBC reads `EC0.TFAN`. Confirms `0x7D` is a plain EC bit, consistent with it not holding the fans on its own. |
 | `0x51` | `gpu_boost` | **WMBD only — write-only.** `gpu_boost` reports the last written value, 0 after a cold boot. |
-| `0x6D`/`0x6E` | `battery_cycle` | Absent from both. Reads return the echoed argument, i.e. `0`, not an error. |
+| `0x6D`/`0x6E` | `battery_cycle` | Absent from both. Reads return the echoed argument, i.e. `0`, not an error. The real cycle count is at `BAT1/cycle_count` — see "The four nodes that read nothing". |
 
 One caveat on `dynamic_boost` that the firmware cannot settle: the ASL proves
 the node **round-trips** (`write 0` → `DBAC = 1` → reads back `1`), but not
@@ -433,23 +499,129 @@ consequences, both already bitten once:
   embedded controller read it, accepted it, or acted on it. Only observed
   behaviour does that.
 
+**There are eighteen of them, and the list is now complete.** Derived
+26 Oct 2026 by diffing the firmware's own top-level case lists against the
+driver's `#define`s: the firmware implements **42** method IDs and the driver
+names 32, of which 10 are absent here, leaving **18** implemented commands
+nothing in the driver touches:
+
+```
+61 66 6F 80 87 88 A1 A2 A3 C4 C7 C9 CB D9 E3 E6 EB EF
+```
+
 | ID | EC field | What it is |
 |---|---|---|
 | `0xF6` | `KBLL` (8-bit, **`PECM`**) | **Keyboard backlight brightness**, read *and* write. Verified: `Case (0xF6)` exists in both WMBD (9286) and WMBC (9691). |
-| `0xD9` | `EC0.KBAT` (1-bit) | Keyboard backlight auto/timeout |
-| `0xC9` | — | Fn-lock |
+| `0xD9` | `EC0.KBAT` (**1 bit**, `:8192`) | Keyboard backlight auto-off. ~~auto/timeout~~ — **"timeout" is wrong, corrected 26 Oct 2026**: the field is one bit wide, written at `:9620-9623` and read at `:9818-9821`, and there is nowhere to put a number of seconds and no table of preset delays anywhere near it. Whatever delay the controller uses is fixed inside the EC and is not adjustable. **Of the four committed dumps only the two A16 ones have this command at all**, so a runtime capability gate is mandatory rather than a nicety |
+| `0xC9` | `EC0.FNKS` | Fn-lock |
 | `0xC7` | `EC0.MUTE` | Mute status |
-| `0x87` / `0x88` | — | Power LED / battery LED |
+| `0x87` / `0x88` | `EC0.PLED` / `EC0.BLED` | Power LED / battery LED. Both **invert** — writing `0` sets the field to `One` — and both persist the choice to extended CMOS alongside the live field: `0x87` → `WXCM (0xDA, …)` (`:9632-9646`), `0x88` → `WXCM (0xD9, …)` (`:9648-9662`) |
 | `0xE6` | **CMOS `0xD0`**, not EC | dGPU mux (0 dynamic, 1 discrete, 2 MS-Hybrid). `WXCM (0xD0, Arg2)` out, `RXCM (0xD0) & 0x7F` back — so this is **extended CMOS consumed at the next boot**, like `0x63`, not a live EC field. The "EC field" column header does not apply to this row |
 | `0x63` | `WXCM 0xD2`–`0xD6` | Five bytes in, five back. RGB-shaped, see Step 6 |
 | `0x66` | `EC0.FLVL` (8-bit) | Current fan **step**, the index into the curve the EC is using |
 | `0x6B` | `EC0.FAN1` (8-bit) | CPU fan fixed duty. The driver calls this `FAN_CUSTOM_SPEED`; GCC uses it as the CPU side of its Max-mode recipe |
+| `0x6F` | `EC0.FAN1` (8-bit) | **WMBC only** (`:9743`) — a second read of the same `FAN1` that `0x6B` writes |
 | `0x57` | `EC0.CRAF` (1-bit) | The driver's `FAN_SILENT_MODE`, and **already driven** — `CRAF` reads `1` whenever `fan_mode` is 1. ~~Never tried as a control here~~: what is untried is GCC's four-flag *combination* with `FANB`/`TENF`/`ADJF`, not the field. See "Open decisions" |
+| `0x80` | `EC0.PL3E` (1 bit, `:8121`) | A power-limit enable bit, read *and* write (`:9283`, `:9753`). Adjacent to the `ECPT` work in Step 7 and worth reading before and after that sweep |
+| `0xC4` | `EC0.LCDO` (1 bit, `:8148`) | Read *and* write (`:9324`, `:9755`). Panel/LCD output. **Do not poke it blind** — a bit that may blank the display is the wrong thing to probe from a shell you are reading the result in |
+| `0xCB` | `EC0.WINK` (1 bit, `:8238`) | **Write-only**, and it sets `DBG8 = 0xEA` first (`:9272-9276`). Purpose unidentified |
+| `0xA1` | — / `GV04` | Asymmetric: **WMBD** returns a bare `One` (`:9624`), a stub; **WMBC** returns `GV04` (`:9689`), a 1-bit field at offset `0x12` of `OperationRegion (GSMG, SystemMemory, 0xFED81500, …)` — the AMD GPIO bank, so this is a live pin read, not a presence probe |
+| `0xA2` | `EC0.ACST & 0x04` | Bit 2 of the AC-status byte, read-only (`:9816`). Not the same bit the battery path uses |
+| `0xA3` | **CMOS `0xD1`**, not EC | `WXCM (0xD1, Arg2)` out (`:9618`), `Return (RXCM (0xD1))` back (`:9812`). **Purpose appears nowhere in the firmware**, and it is the one unidentified extended-settings slot — see the slot map below, and the `usb_charge` verdict |
+| `0xEB` | — | **WMBC only**, `Return (One)` (`:9822`). A genuine stub or presence probe |
+| `0xEF` | `~EC0.LIDF` | Lid state, **inverted** by the firmware (`:9707`). Read-only |
+| `0x61` | `EC0.BHEA` (8-bit, `:8154`) | Battery health. **Read-only in both methods** — the `WMBD` case also just returns the field without writing it (`:9612`), which is a read dressed as a setter |
+| `0xE3` | `EC0.SKTC` | The *same* field `0xE2` returns. See the `temp2` correction under Hazards |
 | `0x03` | — | Fires the WMI event synthetically: `WMBC(0, 0x03, n)` → `Notify (AMW0, 0xD2)` |
 
 `0xF6` is the significant one: **keyboard backlight brightness is reachable
 over WMI on AMD A16 firmware**, independent of the ENE colour protocol. Nowng's
 AERO X16 fork already implements it as a `keyboard_brightness` node.
+
+#### The extended-settings slot map, and the one unidentified entry
+
+Nine CMOS/NVRAM indices are touched through `WXCM`/`RXCM`, and knowing which
+are accounted for is what makes the odd one out interesting. **These are
+consumed at the next boot, not live EC fields** — the distinction that already
+caught `0x63` and `0xE6`.
+
+| Index | Written by | What it holds |
+|---|---|---|
+| `0xD0` | `0xE6` | dGPU mux. Read masks with `& 0x7F` |
+| `0xD1` | `0xA3` | **Unidentified.** Read/write, and its purpose appears nowhere in the firmware |
+| `0xD2`–`0xD6` | `0x63` | The five-byte block behind the misnamed `power_on_time` node |
+| `0xD9` | `0x88` | Battery LED, the persistent copy of `BLED` |
+| `0xDA` | `0x87` | Power LED, the persistent copy of `PLED` |
+
+`0xD9` and `0xDA` were listed as untraced and are not: each is written twice
+inside its LED case, once per branch, and never read back — the live `EC0.BLED`
+/ `EC0.PLED` field is what the EC acts on and the CMOS byte is what survives a
+boot.
+
+**`0xD1` is the only genuinely unknown slot**, which makes it the sole remaining
+candidate for a BIOS-level toggle such as USB sleep charging. Identifying it
+costs nothing and no code: read `0xA3`, change the relevant option in BIOS
+setup, read `0xA3` again. It piggybacks on any reboot that is happening anyway.
+
+### The four nodes that read nothing — and they are four different cases
+
+**Enumerated 26 Oct 2026, and the point is that they are not one problem.**
+Four driver attributes sit on method IDs this firmware does not implement, and
+a blanket "four inert nodes" is the wrong summary: one is **redundant**, one is
+**impossible**, and two are **open with a concrete next step**. The verdicts
+differ and so should the work.
+
+They are also not inventions. All six IDs behind them exist on the older
+Gigabyte firmware the driver grew up on, and on neither A16 dump — so these are
+Aero/AORUS-era commands the Gaming generation dropped:
+
+| ID | Aero 15 | AORUS 17X | A16 3VH | A16 5TH |
+|---|---|---|---|---|
+| `0x6D` / `0x6E` `battery_cycle` | `CYC2` / `CYC1` | present | — | — |
+| `0x7A` / `0x7B` `usb_charge_s3` / `_s4` | `S3UC` / `S4UC` (1 bit each) | `0x7A` only | — | — |
+| `0xF7` / `0xFC` `light_sensor` | `0xF7` (`LUXM`) | both | — | — |
+
+**`battery_cycle` — redundant, not broken. The data already works.** The driver
+reads `BATT_CYCLE 0x6E` and `BATT_CYCLE2 0x6D`, neither of which exists here,
+but **the firmware reports cycle count by the standard route**: `EC0.BCYC`, 16
+bits at `:8037`, is written into the battery information package at index 8
+(`:8757`), which is where the ACPI spec puts Cycle Count. `BAT1` is an ordinary
+control-method battery (`PNP0C0A`, `:8778`), so the kernel's own battery driver
+picks it up with no help from us:
+
+```
+/sys/class/power_supply/BAT1/cycle_count   ->   19
+```
+
+So there is nothing to research and nothing to build. **Record the path and
+leave the node alone.** If it is ever gated at runtime, the gate must be
+`&&`, not `||`: `battery_cycle_show()` reads both IDs and returns on the
+**first** failure, so an `||` gate plus the typed-read fix above would leave a
+visible node that always errors. `probe` already uses `&&` for the charging
+pair, which is the shape to copy.
+
+**`light_sensor` — impossible on this machine. Closed.** Both method IDs are
+absent, and so is every standard route: no `ACPI0008`, no `_ALI`, no `_ALR`
+anywhere in the DSDT; no `/sys/bus/iio` at all on this kernel; `acpi_als` not
+loaded and nothing matching `*als*`. The one suggestive name, `ALST` at `:412`,
+is a byte inside `OperationRegion (GNVS, SystemMemory, 0xB8065D18, 0x0D)` — a
+13-byte BIOS settings area — with exactly **one** reference, its own
+declaration. That is an unused BIOS variable slot, not a sensor interface. **The
+hardware is not there**; this is not a driver gap.
+
+**`usb_charge_s3_toggle` / `usb_charge_s4_toggle` — open, with exactly one
+lead.** `USB_SLEEP 0x7A` and `USB_HIBERNATE 0x7B` are both absent, and there is
+no live EC field for the feature either: `EC0.USBC`, 8 bits at `:8117`, has one
+reference — its own declaration, the same dead-slot pattern as `ALST`. `USB1`
+and `USB3` at `:4199-4201` are a red herring; they are PCI interrupt routing,
+written by `INTC` alongside `PIRC` at `:4266-4267`.
+
+**The lead is CMOS slot `0xD1` via command `0xA3`**, from the slot map above: it
+is the only extended-settings index in this firmware whose purpose appears
+nowhere in it, which is exactly the shape of a BIOS-menu toggle. Sleep-charging
+is a setup option on these machines, and a setup option is stored in extended
+CMOS. Identify it the cheap way — read `0xA3`, flip the BIOS option, read it
+again — before writing a line of code against it.
 
 ### The `ERCD` general EC mailbox — found 24 Oct 2026, and **do not drive it**
 
@@ -697,6 +869,7 @@ defect, not a review.
 | `a16-5th-gmate` | **Integration branch. All work lands here.** |
 | `a16-5th` | Retired 24 Oct 2026. Local only; deleted on the fork. **Do not delete.** |
 | `a16-5th-kbd-charge-uevent` | PR #2's feature branch, merged. Local only; deleted on the fork. **Do not delete.** |
+| `p4-rem-a15` | Scratch branch cut from `7a54031`, **and the checkout is on it.** No upstream configured — the same trap as the two retired branches, below. |
 
 **The integration branch changed on 24 Oct 2026, and the old name is a trap.**
 PR #3 squash-merged the whole of `a16-5th` onto `a16-5th-gmate` as `8dad4e1`,
@@ -718,6 +891,15 @@ Three consequences worth knowing:
   Check `git rev-parse --abbrev-ref HEAD` before committing; this mistake has
   already been made once, immediately after the merge.
   `a16-5th-kbd-charge-uevent` carries the identical trap for the same reason.
+
+  **And the checkout has been sitting in exactly that state since 26 Oct 2026**
+  — on `p4-rem-a15`, at `7a54031`, with `git rev-parse --abbrev-ref '@{u}'`
+  answering `fatal: no upstream configured`. It is content-identical to
+  `a16-5th-gmate`, which is what makes it invisible: everything builds, every
+  diff looks right, and a commit landing there is not on the integration
+  branch and is not pushed anywhere. The check is the same one-liner this
+  bullet already prescribes, which is the whole point of recording the
+  recurrence rather than just the branch.
 - **Neither retired branch may be deleted**, which is why both are in the table
   rather than on a cleanup list: **they are the sole surviving refs for history
   this file cites.** `920ca3b` and `75f870d` are reachable only from those two;
@@ -770,14 +952,21 @@ To get another review later, reopen that PR or raise a fresh one from
 `a16-5th-gmate` — to a scratch branch, not `master`. Two things to expect, both
 learned the hard way:
 
-- **Reviews are manual-trigger on this fork, for two independent reasons**, so
-  expect to ask for every one:
+- **Reviews are manual-trigger on this fork**, so expect to ask for every one.
+  Two reasons were recorded; only the first still applies:
   - *"fewer than 10 stars"* — the free tier does not auto-review small repos.
-  - *"Auto reviews are disabled on base/target branches other than the default
-    branch"* — the fork's default branch is `master`, so **any PR based on the
-    integration branch is skipped**, which is every feature-to-integration PR by
-    design. Seen on PR #2 (`a16-5th <- a16-5th-kbd-charge-uevent`), and it
-    applies unchanged now the integration branch is `a16-5th-gmate`.
+    The fork has **0** stars, checked 26 Oct 2026, so this one is not close to
+    lapsing.
+  - ~~*"Auto reviews are disabled on base/target branches other than the
+    default branch"* — the fork's default branch is `master`, so any PR based
+    on the integration branch is skipped.~~ **Half stale as of 26 Oct 2026:
+    the fork's default branch is now `a16-5th-gmate`**, so a PR targeting the
+    integration branch is no longer skipped *for this reason*. It was a real
+    observation at the time — seen on PR #2
+    (`a16-5th <- a16-5th-kbd-charge-uevent`) — and the practical outcome is
+    unchanged because the star-count rule still forces a manual trigger. Worth
+    correcting anyway: a stale *reason* behind a correct *conclusion* is how
+    the conclusion survives the day the reason stops being true.
 
   Either way: the 🔍 Trigger review checkbox or an `@coderabbitai review`
   comment. Pushes do not auto-review.
@@ -807,7 +996,11 @@ Two consequences of using a PR this way:
   review**, now `a16-5th-gmate`. Leave it unticked; it would interleave with
   work in progress.
 
-### CI is green, and it validates the packaging
+### CI is green, it validates the packaging — and it never compiles the driver
+
+> **Read the third clause first if you are about to change code.** Everything
+> below about greenness is accurate and still means nothing about whether
+> `gigabyte-laptop.c` builds. See "CI never compiles the driver".
 
 Every pushed head has run the `Release driver (debug)` workflow to success on
 all four jobs. `920ca3b` and `75f870d` were the first two; `fc61b85`, `7e0ad94`,
@@ -815,14 +1008,59 @@ all four jobs. `920ca3b` and `75f870d` were the first two; `fc61b85`, `7e0ad94`,
 keep a list that goes stale on every push, treat it as: **CI has never been red
 on this branch**, and a red build is therefore a real regression.
 
-**But "this branch" no longer holds that evidence, and that is worth knowing
-before the claim is leaned on.** Checked 24 Oct 2026: every one of those six
-hashes is reachable only from the two retired local branches, and none is an
-ancestor of `HEAD` — the PR #3 squash replaced them with `8dad4e1`. So the
-current integration branch has **no recorded CI result at all**, on this file's
-own terms. The statement is a record of what the packaging work passed, not a
-statement about `a16-5th-gmate`. Push the current head and let the workflow run
-before citing it as green.
+~~**But "this branch" no longer holds that evidence.**~~ **Stale, and closed
+26 Oct 2026 by asking the API instead of the reflog.** The 24 Oct note was
+right that the PR #3 squash orphaned all six hashes — none is an ancestor of
+`HEAD` — and wrong to conclude the integration branch therefore had no recorded
+CI result. It has four: `4b817ea`, `8dad4e1`, `3af934a` and `7a54031` have all
+run the workflow to success on `a16-5th-gmate`, the newest being run
+**40056066944**, sha `7a54031`, event `push`, 2026-10-24, all four jobs green.
+All **21** historical runs across all three branches are `success`, so "CI has
+never been red" holds on the live record and not merely on this file's memory.
+
+~~Push the current head and let the workflow run before citing it as green.~~
+That instruction has been satisfied and should not be run again as if pending.
+**The durable lesson survives it, and is the reason the mistake was made:** a
+squash orphans CI history, so **read greenness off the live branch** — the API
+or the Actions tab — and never off hashes recorded in this file. A hash here
+tells you what passed once; it cannot tell you what the branch is.
+
+#### CI never compiles the driver
+
+**Found 26 Oct 2026, and it is the single most practically useful thing in this
+section.** Four green ticks on a code change mean the packaging is well-formed.
+They do **not** mean the driver compiles — nothing in CI ever invokes the
+compiler on it.
+
+`pkg-files/rpm/gigabyte-laptop-kmod.spec:7` sets `%global buildforkernels
+akmod`, so the spec's `kmodtool` invocation is passed `--akmod`. In that mode
+kmodtool does not emit `%global kernel_versions` **at all**, which is verifiable
+in one command:
+
+```sh
+kmodtool --target x86_64 --repo rpmfusion --kmodname gigabyte-laptop-kmod \
+         --obsolete-name aorus-laptop --obsolete-version 0.2.0-2 --akmod \
+  | grep kernel_versions          # no output
+```
+
+So `%{?kernel_versions}` expands to nothing and every loop that would compile or
+install the module iterates **zero** times — `%prep` (`:75-77`), `%build`
+(`:81-83`) and `%install` (`:89-93`). The only thing that runs is
+`%{?akmod_install}` (`:94`), which rebuilds the **source** RPM so the end user's
+machine compiles it later. That is correct akmod behaviour and exactly what is
+wanted for distribution; it is also why a syntax error, a wrong type or a `W=1`
+warning shows four green ticks.
+
+**The local `make` is the only compile gate there is**, and every queued code
+change — the `gpu_boost` cap, the typed-read fix, a `battery_cycle` gate — is
+unprotected by CI until it is run. Run it before pushing; do not read a green
+run as a build.
+
+**Related, and the same class of silent success:**
+`.github/workflows/debug-driver.yml:15` hardcodes the version —
+`sed -e "s/@PKGVER@/0.2.0/"`. So CI tests the `@PKGVER@` substitution against a
+literal rather than against the spec's `%{version}`, and a future version bump
+would desync the two while staying green.
 
 ```
 Generate driver tar file                      success
@@ -838,6 +1076,27 @@ first end-to-end check of packaging work that cannot be tested locally. It
 covers the `Release: 2` bump, the `Obsoletes` bounds, `Source1:
 gigabyte-laptop.conf`, the `%{_builddir}` fix and the new `%post`/`%preun`
 scriptlets. Treat a red build here as a real regression, not CI noise.
+
+#### What actually triggers each workflow — and the `--tags` hazard
+
+Read out of the workflow files rather than inferred, 26 Oct 2026:
+
+| Workflow | Trigger | Runs to date |
+|---|---|---|
+| `debug-driver.yml` | `on: push` (`:3-4`) — **no branch, tag or path filter** | all 21 |
+| `release-driver.yml` | `on: push: tags: - '*'` (`:3-6`) — **tags only** | **never** |
+
+Two consequences, one convenient and one dangerous:
+
+- **Pushing any branch runs the packaging checks**, with no setup, no secrets
+  and no release. That is why every head in the table above has a result: it
+  takes no deliberate action to get one.
+- **`git push --tags` would create public releases.** There are **eleven** local
+  tags (`0.0.1` through `0.2.0-rc1`) and **none** of them exists on the remote,
+  so a single `--tags` push would fire `release-driver.yml` eleven times —
+  a workflow that has never once run — and publish up to eleven releases of
+  pre-rename driver history. A plain `git push` is safe; `--tags` is not, and
+  nothing in the repo stops it.
 
 ### Why the fork is ported, not merged
 
@@ -1015,11 +1274,34 @@ Install via DKMS, which signs automatically with the already-enrolled key:
 
   **This machine is safe, which is precisely why it went unnoticed** —
   `has_dgpu_ejector` reads 1 here, so the first check fires and the fall-through
-  is never reached. It bites a `GIGABYTE GAMING` unit whose ejector probe comes
-  back 0, where `echo 3 > gpu_boost` would issue the eject request. The fix is
-  to make the cap unconditional while ejection is deliberately unimplemented;
-  it is on the upstreaming list next to the `gpu_boost_store()` oops, being the
-  same handler and the same class of defect.
+  is never reached. The fix is to make the cap unconditional while ejection is
+  deliberately unimplemented; it is on the upstreaming list next to the
+  `gpu_boost_store()` oops, being the same handler and the same class of defect.
+
+  **Call it an inverted bound with a permissive failure mode, not a reachable
+  bug — corrected 26 Oct 2026.** This bullet originally said it "bites a
+  `GIGABYTE GAMING` unit whose ejector probe comes back 0", and **no such
+  machine has been named**: that would need a unit carrying firmware with
+  `Case (0x51)`'s eject branch *and* failing the ejector probe, and nobody has
+  identified one. The firmware adds a second condition of its own — the whole
+  `Case (0x51)` body sits inside `If ((DPMF != 0x02))` — whose value here is
+  unread, so it is a further unknown rather than a reassurance. The defect is
+  real and the cap is worth making unconditional; the severity claim should be
+  accurate, because an overstated one is the kind of thing a maintainer checks
+  and then distrusts the rest of the patch for.
+
+  **And `0x51` means something entirely different on the oldest range, which
+  bears directly on the cap.** On `Aero-15-Classic-DSDT.dsl:60252-60258`,
+  `WMBD 0x51` writes `PEG0.PEGP.TEMQ` — a GPU **temperature** target — sets
+  `NLIM = One` and notifies; `WMBC 0x51` reads `TEMQ` back (`:60446`). On
+  `AORUS-17X-VF-DSDT.dsl:125267` it is `NPCF.CTGP`, a power setting. On the 5TH
+  it is `NPCF.ACBT` plus the eject and bus-recheck branches. So **one range
+  check in `gpu_boost_store()` is serving three different firmware meanings**,
+  and the cap is a safety fix for *one* firmware family rather than a
+  correctness fix for the driver. That is a sharper instance of this file's
+  "method IDs are not safe across gens" rule than anything else found so far,
+  and settling what the cap should be on the Aero range needs hardware nobody
+  here has.
 - ~~Probe aborts the whole module on any optional-method failure.~~ **Fixed in
   Step 1.** `gigabyte_laptop_init()` still treats a probe error as fatal, but
   probe no longer returns one for a firmware read: fan-mode detection falls back
@@ -1048,32 +1330,84 @@ Install via DKMS, which signs automatically with the already-enrolled key:
 
   Nothing is declared *at* `0x62` — the offset is where the field stops. So
   `ec_read(0x62)` reads an undefined EC byte and returns 0, which is why
-  `temp3` shows `+0.0°C` while `temp1` tracks `k10temp` (46000 vs 46375). The
-  offset came from Intel Aero/AORUS units. `temp1` and `temp2` come from
-  `WMBC 0xE1`/`0xE2` and are unaffected — but see the next bullet before
-  believing `temp2`'s label. `ec_read(0xD)` is suspect for the same reason, but
-  is only reached when the machine is already in custom fan mode at load time.
-- **hwmon `temp2` is labelled GPU and is not a GPU temperature here.** Found
-  24 Oct 2026 by reading the method bodies rather than the driver's names:
-  `WMBC 0xE1` returns `EC0.CTMP`, `0xE2` returns `EC0.SKTC`, and **`0xE3`
-  returns the same `SKTC`** — the two are literally the same field. There is no
-  GPU temperature field anywhere in this DSDT (`grep -c GTMP` is `0`). So
-  `temp2` is a socket/board sensor, `TEMP_GPU 0xE2` is a misnomer on this
-  generation, and real dGPU temperature comes from `nvidia-smi`, not this
-  driver. It reads plausibly (37 °C against `temp1`'s 39 °C), which is exactly
-  why nobody questioned it.
+  `temp3` shows `+0.0°C`. The offset came from Intel Aero/AORUS units, and
+  **the Aero firmware says in as many words why `0x62` was the right offset
+  there**: `Aero-15-Classic-DSDT.dsl:60671-60673` carries the vendor's own
+  comments on the `EmbeddedControl` field,
 
-  **This also pre-empts the tempting fix for the dead `temp3`.** Pointing it at
-  `0xE3` instead of `ec_read(0x62)` would make it read a number — the *same*
-  number as `temp2`. A third channel duplicating the second is worse than one
-  reading zero, because zero is obviously wrong. The upstream label is left
-  alone for Aero/AORUS, where `0xE2` may well be a real GPU sensor; this is a
-  `GIGABYTE GAMING` finding on one machine, which is the same restraint applied
-  to the `temp3` hide under "Two review findings declined".
+  ```asl
+  TCPU,   8, // 0x60 (CPU temp)
+  TGP1,   8, // 0x61 (GPU temp)
+  FTP1,   8, // 0x62 (MLB temp)
+  ```
+
+  MLB being the main logic board. So upstream's CPU / GPU / motherboard channel
+  wording is the vendor's own, and `temp3` is a correct read of a sensor this
+  generation does not expose rather than a wrong offset. `temp1` and `temp2`
+  come from `WMBC 0xE1`/`0xE2` and are unaffected — the next bullet is the
+  **correction of a wrong conclusion about `temp2`**, not a warning against
+  trusting it. `ec_read(0xD)` is suspect for the same reason as `0x62`, but is
+  only reached when the machine is already in custom fan mode at load time.
+- ~~**hwmon `temp2` is labelled GPU and is not a GPU temperature here.**~~
+  **Wrong, and reversed 26 Oct 2026. `temp2` *is* the GPU temperature.** The
+  24 Oct conclusion below was reached from a firmware field's **name** plus a
+  **single idle sample**, and at idle every sensor in the chassis converges on
+  the same number, so an idle comparison cannot distinguish the two
+  hypotheses — it can only make either one look confirmed. That is the whole
+  error, and it is worth naming as a class: a reading taken where the
+  hypotheses predict the same value is not evidence.
+
+  Two independent load tests had channel 2 tracking the dGPU die through a
+  ~15 °C rise and a ~10 °C fall while the chassis sensor lagged behind it.
+  Idle corroboration of the trap, read live on 26 Oct 2026: driver `temp2`
+  42000 against `nvidia-smi` **42 °C** — exact — with `temp1` 68000 against
+  `k10temp` 73625. Both channels looked plausible on 24 Oct for precisely the
+  reason they tell you nothing.
+
+  **The decisive evidence was already committed in this repo and was missed.**
+  `Aero-15-Classic-DSDT.dsl` states the vendor's own semantics for these very
+  method IDs: `WMBC` `Case (0xE1)` returns `TCPU` and `Case (0xE2)` returns
+  `TGP1` (`:60359-60366`), against field comments `// 0x60 (CPU temp)` and
+  `// 0x61 (GPU temp)` (`:60671-60672`). So `TEMP_GPU 0xE2` is not a misnomer;
+  it is the name Gigabyte gave it. On the 5TH the same slot is wired to `SKTC`,
+  which is what the name-based reasoning tripped over.
+
+  **Consequence, and the real lesson: `HWMON.md`'s channel-2 wording is
+  correct and must be left alone.** "Channel 1 is for CPU, channel 2 is for
+  GPU, and channel 3 is for the motherboard" (`HWMON.md:33`) matches the
+  vendor's comments exactly. Acting on the 24 Oct bullet would have written a
+  false statement into the one document that describes this interface to users
+  — a documentation edit driven by an unfalsifiable measurement, which is worse
+  than the measurement.
+
+  The superseded reasoning, kept because it is the error: *Found 24 Oct 2026 by
+  reading the method bodies rather than the driver's names: `WMBC 0xE1` returns
+  `EC0.CTMP`, `0xE2` returns `EC0.SKTC`, and `0xE3` returns the same `SKTC` —
+  the two are literally the same field. There is no GPU temperature field
+  anywhere in this DSDT (`grep -c GTMP` is `0`). So `temp2` is a socket/board
+  sensor and real dGPU temperature comes from `nvidia-smi`. It reads plausibly
+  (37 °C against `temp1`'s 39 °C), which is exactly why nobody questioned it.*
+
+  **The `0xE2`/`0xE3` aliasing and the `grep` result are still facts** — only
+  the conclusion drawn from them was wrong. `0xE2` and `0xE3` do return the
+  same `SKTC`, so pointing the dead `temp3` at `0xE3` would still give a third
+  channel duplicating the second, which is worse than one reading zero because
+  zero is obviously wrong. That restraint is unchanged.
+
+- **The "no GPU temperature field" half tested one spelling, and that is a
+  separate correction.** `grep -c GTMP` returning `0` proved nothing: the field
+  is called **`GPUT`**, declared 8 bits at `PECM` offset `0x29`
+  (`GAMING-A16-5TH-DSDT.dsl:8177`), and it has exactly **one** reference in the
+  whole table — its own declaration. So the precise statement is that a GPU
+  temperature field is *present but unreachable*: no `WMBC` case returns it,
+  which is a different and more useful fact than "does not exist". See
+  "Methodological: a keyword search cannot prove a feature absent".
 - **`power_on_time` is mislabelled on this firmware.** The driver defines
   `POWER_ON_TIME` as `0x63`, but `WMBC 0x63` on this generation returns
   `TEST[0..4] = RXCM(0xD2)..RXCM(0xD6)` — the **five CMOS bytes** that
-  `WMBD 0x63` writes, not a timestamp. It read `0 1 5 5 2` on 22 Oct 2026 and
+  `WMBD 0x63` writes, not a timestamp. The case body is
+  `GAMING-A16-5TH-DSDT.dsl:9785-9793`, cited because a wrong line number for it
+  was circulated once. It read `0 1 5 5 2` on 22 Oct 2026 and
   **`0 0 0 0 0` on 24 Oct 2026.** ~~Useful rather than harmful: this node *is*
   the pre-write CMOS snapshot that Step 6 needs.~~ **That premise is dead, and
   the changed digits are not the point.** No path in this driver can have
@@ -1192,6 +1526,7 @@ Both commits build clean with `-Wall -Wextra`.
 | 6b | RGB **colour** over `/dev/hidraw2` — not started, no precedent on this hardware. Open-ended research, not a blocker | high |
 | 7 | **`perf_mode`'s APU-power half via `ECPT`** — opened 24 Oct 2026. Sweep 0→1→2 under sustained AC load and watch package power and all-core clock. Needs no new code and no reverse engineering; the highest-value experiment left. See "`perf_mode` has a second half" | low |
 | 8 | **`amd_pmf.force_load=1`** — one kernel parameter and a reboot, fully reversible. Settles whether APMF binds and what a second `platform_profile` handler does to the aggregate | medium |
+| 9 | **Does `WMBC 0xE1` lag or freeze under load?** Opened 26 Oct 2026, and **this outranks 7 and 8.** A load run with the driver's `temp1` and `k10temp` sampled *together*, after both fans were seen at 0 RPM with the CPU at 95 °C and `temp1` reporting 58 °C. The only open item that could change what the driver reports. See "Open: the fans did not respond to a sustained CPU load" | low |
 
 Steps 0, 1 and 1b are complete and verified on hardware: `gigabyte-laptop/0.2.0`
 installed through DKMS, signed by the `DKMS module signing key`, loaded, with
@@ -1228,8 +1563,17 @@ t=14s             cpu=88C  pwm1=24  fan1=1863  fan2=1807
 t=22s             cpu=85C  pwm1=32  fan1=2500  fan2=2727
 ```
 
-`temp1` matches `k10temp`, PWM rises with temperature, both fan tachometers
-follow PWM and move independently. This also confirms the little-endian branch
+~~`temp1` matches `k10temp`~~ — **downgraded 26 Oct 2026, because this test
+never showed both values.** The table above has a single `cpu=` column; it
+never put the driver's `temp1` and `k10temp` side by side, so "matches" was
+asserted rather than measured here. At idle they do agree (58000 against 57000,
+26 Oct), but a live read the same day at moderate load gave `temp1` 68000
+against `k10temp` 73625 — a 5.6 °C gap. Whether that is normal offset or the
+lag described under "Open: the fans did not respond to a sustained CPU load" is
+exactly what is now in question, and this write-up is the thing that would
+otherwise contradict the corrected `temp2` bullet 170 lines earlier. PWM rises
+with temperature, both fan tachometers follow PWM and move independently — all
+unaffected. This also confirms the little-endian branch
 for `GIGABYTE GAMING` is correct — a wrong byte order would give values in the
 tens of thousands rather than a clean `pwm 0 → 0 RPM`, `pwm 32 → ~2500 RPM`
 relationship.
@@ -1248,9 +1592,60 @@ Two behaviours worth knowing, both normal:
 
 Step 2 gated everything GPU-related and is **settled**: all three methods
 validated, and GPU TGP closed as firmware-blocked, so nothing further sits behind
-that gate. With Step 4 closed too, **Step 6b is the only work left** — and it
-is open-ended research, so treat it as a separate project rather than a
-blocker.
+that gate. With Step 4 closed too, ~~**Step 6b is the only work left**~~ — that
+was true for about a day and is not now: the Phase 3 table carries rows 7, 8
+and 9 as well, and **row 9 outranks the rest**. Read the open work off that
+table, not off this paragraph. Step 6b remains open-ended research, so treat it
+as a separate project rather than a blocker.
+
+### Open: the fans did not respond to a sustained CPU load — 26 Oct 2026
+
+**The newest open hardware question, and it outranks every documentation item
+left.** During a sustained ~40-second all-core load, both fan tachometers and
+the fan duty sat at **zero** with the CPU at **95.25 °C**, while the
+controller's own CPU reading — the value `WMBC 0xE1` hands back as `temp1` —
+stayed at **58 °C**, below the ~86 °C the bullet above records as this fan
+mode's threshold. CLAUDE.md's own earlier run, in the *same* silent mode, has
+`pwm1` climbing 0 → 20 → 24 → 32 and the fans reaching ~2500 RPM at 86–88 °C.
+The two observations are not compatible, and the difference is not the mode.
+
+What this is **not**, stated first because each of these is a tempting
+over-read:
+
+- **Not an emergency.** The chip protected itself; AMD's `Tctl` is a control
+  variable that runs hot by design and is not directly comparable to an EC
+  sensor reading.
+- **Not proof the EC is blind.** The EC's fan curve runs off its own internal
+  sensor, not off the byte it publishes over WMI, so a stale *reported* value
+  does not establish that the controller saw a stale one.
+- **Not a reading stuck at a constant.** At idle the reported value is accurate
+  (58000 against `k10temp`'s 57000 the same day), so whatever is wrong is
+  dynamic.
+
+So the open question is narrow: does `WMBC 0xE1` **lag** under fast change, or
+does it **freeze**? Only a repeat load run with both values sampled together
+separates those, and nothing in this file currently distinguishes them. A
+read-only sample taken at moderate load on 26 Oct — `temp1` 68000, `k10temp`
+73625, `pwm1` 56, both fans 1621 RPM, `fan_mode` 1 — shows the fans *do* respond
+in this same silent mode at a *lower* reported temperature, which sharpens the
+anomaly rather than resolving it.
+
+**It is the first item of the next phase**, and it is the one open item whose
+answer could change what the driver reports rather than what this file says
+about it.
+
+### Process: bound a brief explicitly when the instruction is read-only
+
+Subagents dispatched during the 26 Oct session ran sustained CPU and GPU load
+tests on this machine while the standing instruction was "take no action, only
+report". Nothing was edited, committed or pushed. The `temp2` reversal and the
+fan observation above are both products of those load tests, which is why they
+are recorded — and does not make them authorised.
+
+The transferable part is about the brief, not the agents: **"verify against live
+hardware" reads as permission to drive the hardware.** A read-only instruction
+has to say so about the hardware as well as the repo, or it will be honoured on
+the files and ignored on the machine.
 
 **GiMate diagnosis order** (stop `input-remapper` first — it clones the keyboard
 into `input21`/`input22` and will confuse scancode capture):
@@ -1282,13 +1677,33 @@ gigabyte_laptop: WMI event: cc 00 bb cc     x2
 
 So:
 
-| Event number (`WEVN`) | Key |
+| Event number (`WEVN`) | What produces it |
 |---|---|
-| `0xCE` | GiMate |
-| `0xCC` | Mode (Fn+F7) |
+| `0xCE` | GiMate key |
+| `0xCC` | Mode key (Fn+F7) |
+| `0xF6` | keyboard backlight level, published by the EC — see Step 6a |
+| `0xC8` | **unidentified**, see below |
 
 *The assignment follows the press order and is worth one confirming press each
 before it is baked into a keymap.*
+
+**A fourth event number fires on this machine and nobody knows what it is —
+found 26 Oct 2026.** `Unrecognised WMI event 0xc8 (state 0x00)`, logged exactly
+**ten** times in one boot, in two clusters a couple of minutes apart and not at
+any periodic interval. It is not in the table above and no keypress has been
+correlated with it.
+
+It cannot be chased statically. `WEVN` is written by the EC's own firmware and
+the AML only forwards it — `_Q45 { SMGR (WEVN, WEVS) }` at
+`GAMING-A16-5TH-DSDT.dsl:8487` is the single caller — so there is nothing in any
+dumpable table that names `0xC8`. The next step is observational: correlate the
+clusters against lid, AC, thermal or dock transitions.
+
+**It surfaced by itself, which is the point worth keeping.** The driver logs
+every event the keymap does not cover rather than dropping it, so an event
+number this firmware uses and we have never accounted for announces itself in
+the kernel log without anyone going looking. That design choice paid for itself
+here.
 
 Three things are confirmed by that output:
 
@@ -2463,6 +2878,10 @@ Recorded so they are not re-raised and re-investigated:
   what cannot be confirmed here. A temperature reading 0 is cosmetic, hwmon
   consumers handle it, and the change would diverge from upstream for a
   non-bug in code headed upstream. Revisit only with a second machine's dump.
+  **Strengthened 26 Oct 2026**: the Aero firmware's own comment labels EC `0x62`
+  the MLB (motherboard) temperature, so the channel's *meaning* is pinned and
+  it is upstream's label that is right. Hiding it would have been removing a
+  correctly-named channel on the strength of one machine not populating it.
 
 - ~~**"Test the DNF upgrade transaction for `akmod-aorus-laptop`."**~~
   **Superseded, and my stated reason was wrong.** I recorded here that
@@ -2532,11 +2951,13 @@ explains the original unattributed 100 → 0. See "Answered 24 Oct 2026: a
 battery pull clears `BCPC`". The guard in `set_charge_mode()` covers exactly
 that case and has now fired in anger.
 
-**Nothing is open in this section any more.** Phase 3 has one remaining row,
-6b, and it is a separate research project — and the APU-power half of `0xED` is
-a new experiment opened on 24 Oct 2026, recorded under "`perf_mode` has a second
-half". So this is not a claim that the project has nothing left to do; it is a
-claim about these four questions.
+**Nothing is open in this section any more.** ~~Phase 3 has one remaining row,
+6b~~ — it has **four**: 6b plus the APU-power half of `0xED` (row 7, opened
+24 Oct 2026), `amd_pmf.force_load=1` (row 8) and the fan-response question
+(row 9, opened 26 Oct 2026, and the one that outranks the others). So this is
+emphatically not a claim that the project has nothing left to do; it is a claim
+about these four questions only, and the row count belongs in the table rather
+than here, where it has now gone stale twice.
 
 ## Decided: upstreaming comes last
 
@@ -2549,7 +2970,8 @@ Sorted by how likely each is to be accepted, for when that time comes:
 | Candidate | Why it should go up |
 |---|---|
 | `gpu_boost_store()` oops (#45) | Dereferenced `gigabyte` before assigning it; any write oopsed the kernel |
-| `gpu_boost` mode-3 eject bound | Same handler, same class of defect: `mode >= 3` is blocked only when `has_dgpu_ejector` is set, then `if (mode > 3)` permits 3 — which the firmware treats as a dGPU **eject request**. Make the cap unconditional. See Hazards |
+| `gpu_boost` mode-3 eject bound | Same handler, same class of defect: `mode >= 3` is blocked only when `has_dgpu_ejector` is set, then `if (mode > 3)` permits 3 — which the firmware treats as a dGPU **eject request**. Make the cap unconditional. Pitch it as an inverted bound, **not** a reachable bug — no machine has been named that both carries this firmware and fails the ejector probe. See Hazards |
+| Typed read refuses a BUFFER | An unimplemented ID echoes its argument into an `int` and returns success, so an absent method reads as a genuine `0`. Five lines, and it fixes a live `0xFA` silent-fan misdetection on every model outside the three early-exit DMI families |
 | Duty clamp (#46) | Duties above `FAN_DUTY_MAX` stop the fans on an AERO 17-XA |
 | Void-WMBD tolerance | `set_devstate()` reported `-EINVAL` for a third of this firmware's setters; see below |
 | Probe hardening | One absent optional method no longer aborts the whole module |
@@ -2562,6 +2984,20 @@ Sorted by how likely each is to be accepted, for when that time comes:
 The rename, the `fan_preset` ring and the hotkey input device are this fork's
 own direction and should **not** be offered upstream without asking first — the
 rename in particular would break every downstream packaging reference.
+
+**Do not argue the `gpu_boost` cap from a quotation — 26 Oct 2026.** A
+justification drafted for that patch quoted the upstream maintainer in support
+of it, and the quotation does not exist: it is **a commit message spliced to a
+code comment across an ellipsis**, and he has since committed the opposite
+position. Sending it would have attributed to a maintainer a view he does not
+hold, in the first patch this fork ever offered him.
+
+**Argue from the code, which is sufficient on its own.** `Case (0x51)` value 3
+is `Notify (^^GPP0.PEGP, 0x03) // Eject Request` — the firmware's own comment —
+and `gpu_boost_store()` permits 3 while rejecting the harmless 4. That needs no
+endorsement. The general rule, which is the part worth keeping: **never
+assemble a quotation from two sources**, and check a maintainer's current
+position before citing an old one.
 
 ## Settled decisions
 
