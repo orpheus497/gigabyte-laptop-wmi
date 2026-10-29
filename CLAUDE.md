@@ -729,7 +729,7 @@ caught `0x63` and `0xE6`.
 | Index | Written by | What it holds |
 |---|---|---|
 | `0xD0` | `0xE6` | dGPU display MUX — BIOS: Peripherals → "Switchable Graphics device". Read masks with `& 0x7F`. **`0x00` = MSHybrid, `0x01` = discrete**, each measured twice in both directions, 29 Oct 2026, against the DRM connectors. Whether a third value exists is unknown; the option's own selector was never opened |
-| `0xD1` | `0xA3` | **Unidentified.** Read/write, purpose appears nowhere in the firmware, **not USB sleep charging** (no USB option exists in setup), and **probably not Wake on LAN** — enabling it did not move the byte, though the original state went unrecorded. Reads `0x1` in every sample ever taken |
+| `0xD1` | `0xA3` | **Unidentified.** Read/write, purpose appears nowhere in the firmware, and **not USB sleep charging** — no USB option exists in setup. A Wake-on-LAN attempt was **inconclusive**, not negative: the byte did not move but the option's state change was never confirmed. Reads `0x1` in every sample ever taken |
 | `0xD2`–`0xD6` | `0x63` | The five-byte block behind the misnamed `power_on_time` node |
 | `0xD9` | `0x88` | Battery LED, the persistent copy of `BLED` |
 | `0xDA` | `0x87` | Power LED, the persistent copy of `PLED` |
@@ -801,7 +801,7 @@ Three things follow, and the first two are what make this worth the space:
   the option most likely stored with the other boot settings rather than here.
 
 
-#### Wake on LAN is probably not `0xD1`, and the test has one hole
+#### Wake on LAN and `0xD1`: inconclusive, not negative
 
 **Tested 29 Oct 2026 by enabling "Wake on LAN Enable" in setup**, in the same
 BIOS visit that put the MUX back. `0xA3` did not move:
@@ -823,22 +823,40 @@ both-hypotheses-predict-the-same-output trap this file keeps catching. And
 there is a coincidence worth being suspicious of: `0xA3` reads `0x1`, WoL is
 now on, and `1` is exactly what an enabled flag would read.
 
-**The check that closes it costs one command**, because the NIC's own WoL state
-is readable and the BIOS option is what seeds it:
+~~**The check that closes it costs one command**~~ — it was run and it does not
+close it; see below.
 
-```sh
-sudo ethtool eno1 | grep -i 'Wake-on'
-#   Wake-on: g   -> magic-packet wake armed; the BIOS change DID take effect,
-#                   so 0xA3 not moving is a real negative
-#   Wake-on: d   -> disabled; the setting did not reach the NIC, and this
-#                   test measured nothing
+
+**The `ethtool` check came back `Wake-on: d` — and it does not settle it
+either way.** Run 29 Oct 2026 after enabling the BIOS option:
+
+```
+Supports Wake-on: pumbg
+Wake-on: d
 ```
 
-**And the decisive version, if it still matters:** set the option to **off**
-and re-read. A `0xA3` of `0x0` identifies the slot outright; unchanged at `0x1`
-rules WoL out properly, whichever way it started. Worth folding into any BIOS
-visit that is happening anyway rather than making a trip for it.
+The hardware can do it and it is not currently armed. **That is weaker
+evidence than it looks**, and the earlier framing of this check overstated it:
+Linux network drivers commonly leave WoL disarmed at boot regardless of the
+firmware setting, so `d` is consistent both with "the BIOS option never
+changed" and with "it changed and the OS disarmed it anyway". A reading where
+both hypotheses predict the same output distinguishes nothing — the same trap
+again.
 
+**So the status is inconclusive, not negative.** `0xA3` did not move, but
+nobody can say the thing it was supposed to track actually moved either.
+
+**The decisive version is now cheap, because the current state is known.** The
+option is **on** — deliberately set. Turn it **off** at the next BIOS visit and
+re-read: that is a guaranteed state change, so
+
+| `0xA3` after turning it off | Verdict |
+|---|---|
+| `0x0` | Wake on LAN **is** slot `0xD1`. Identified |
+| still `0x1` | Wake on LAN is **not** `0xD1`. Properly ruled out |
+
+Either answer is clean, which the first attempt could not be. Off is also the
+sensible resting state for a laptop, so this restores rather than disturbs.
 **Three candidates remain** — RTC Support, SVM Enable, Network Stack — and the
 standing advice holds: **not SVM** while `kvm_amd` is loaded. Nothing depends
 on identifying this slot; it is an unlabelled byte whose only motivation was
@@ -1062,7 +1080,12 @@ Method (_Q49) { ^^^GPP0.PG00._ON () ; Notify (PCI0, Zero) } // restore
 
 Note `_Q49` calls `PG00._ON()` (the slot's power gate) where `WMBD 0x51`
 value 4 calls `PEGP._ON()` (the GPU) after testing `GPP0.D0ST == 0x03`. Not
-interchangeable, and the WMI path is the more careful of the two.
+interchangeable, and ~~the WMI path is the more careful of the two~~ — **that
+judgement is now doubtful.** `PEGP._ON` is an unresolved `External` on this
+machine and writing `gpu_boost 4` with the card attached aborts `WMBD` with
+`AE_NOT_FOUND`. `PG00._ON` is the slot gate and is not obviously the less
+careful of the two when it is the one that resolves. See "`gpu_boost 4` aborts
+in firmware".
 
 **This reframes the `gpu_boost` bound fix.** It is not primarily a safety
 patch. **3 and 4 are a matched pair implementing a feature this machine
@@ -1962,9 +1985,17 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   **The reachable defect is at the other end: `if (mode > 3)` rejects 4.** On
   both Gaming dumps value 4 is the *recovery* — `GPP0.PEGP._ON ()` at `:9580`
   and `:9437`, then `WMOF = Zero` and `Notify (PCI0, Zero) // Bus Check`. It is
-  the only route back from an ejection. So the handler permits the hazard and
-  blocks the undo, which holds regardless of reachability and is the better
-  argument for the patch.
+  the only firmware route back from an ejection. So the handler permits the
+  hazard and blocks the undo, which holds regardless of reachability and is
+  the better argument for the patch.
+
+  **That route is conditionally broken on this machine, found 29 Oct 2026.**
+  `PEGP._ON` is an unresolved `External`, so value 4 aborts `WMBD` with
+  `AE_NOT_FOUND` on the branch taken when `D0ST != 3` — which is the branch
+  taken whenever the card is attached. Whether the post-eject branch works is
+  untested. It does not change the argument for unblocking 4, since a broken
+  recovery is still better than a refused one and `/sys/bus/pci/rescan` is
+  the fallback either way. See "`gpu_boost 4` aborts in firmware".
 
   **Capping at 2 costs the AORUS firmware nothing**, which is what makes an
   unconditional cap safe across generations rather than merely safe here: at
@@ -5442,6 +5473,70 @@ reason enough. See "Settled: the MUX caused the arbitration, not `amd_pmf`".
 
 
 
+
+### `gpu_boost 4` aborts in firmware: `PEGP._ON` does not resolve — 29 Oct 2026
+
+**Found by accident, from a test that correctly refused to run.** The detach
+test's precondition check saw `kwin_wayland` holding the card and refused, as
+designed — and its restore path then fired anyway and produced this:
+
+```
+gigabyte_laptop: dGPU restore requested
+ACPI BIOS Error (bug): Could not resolve symbol [^^GPP0.PEGP._ON], AE_NOT_FOUND
+ACPI Error: Aborting method \_SB.PCI0.AMW0.WMBD due to previous error (AE_NOT_FOUND)
+```
+
+**`PEGP._ON` is declared `External` and is never defined.**
+`GAMING-A16-5TH-DSDT.dsl:59` is
+`External (_SB_.PCI0.GPP0.PEGP._ON_, MethodObj)`, which tells the interpreter
+to expect it in another table. At runtime it is not there. The only
+`Method (_ON)` in the whole dump is at `:3100` and belongs to `BTRT`, a
+**Bluetooth** power resource under `XHC1` — nothing to do with the GPU.
+
+**The branch is what decides whether this matters**, and it is not the whole
+of value 4:
+
+```asl
+If ((Local0 == 0x04)) {
+    If ((^^GPP0.D0ST == 0x03)) {
+        ^^GPP0.WMOF = Zero ; Notify (PCI0, Zero)      // safe branch
+    } Else {
+        ^^GPP0.PEGP._ON () ; ^^GPP0.WMOF = Zero ; Notify (PCI0, Zero)
+    }
+}
+```
+
+So the crash happens on the **Else** branch, taken when `D0ST != 3`. The card
+was attached and active when this ran, so that is the branch it took.
+
+**What is established, stated narrowly:** writing `gpu_boost 4` **while the
+GPU is attached** aborts `WMBD` with `AE_NOT_FOUND`. It is **not** a harmless
+no-op, which is how this driver's own test was treating it.
+
+**What is NOT established: whether the restore works after a real eject.** If
+a detached card reports `D0ST == 3`, value 4 takes the safe branch, never
+touches `_ON`, and works. That is the branch it was presumably designed for.
+`D0ST` is an ACPI object and cannot be read from userspace under lockdown, so
+this stays open until someone runs a real detach and then a real restore.
+
+**Two corrections to this file.** It said value 4 is "the only route back from
+an ejection" — it may be, but it is at best conditionally functional. And it
+said, comparing `WMBD 0x51` value 4 against `_Q49`'s `PG00._ON()`, that "the
+WMI path is the more careful of the two". **That is now doubtful**: the EC's
+own `_Q49` calls `PG00._ON()`, the *slot's* power gate, while the WMI path
+calls `PEGP._ON()`, the *GPU's*, which does not exist here. The careful one
+may be the one that does not reference a missing symbol.
+
+**Consequence for anyone detaching:** have `echo 1 > /sys/bus/pci/rescan` ready
+before writing `gpu_boost 3`, and do not assume `4` will bring it back. A
+reboot always does.
+
+**And a consequence for the driver worth weighing:** `gpu_boost_store()`
+accepts `4` unconditionally, so a userspace GUI offering "reattach GPU" would
+throw an ACPI error into the kernel log every time it was pressed with the
+card already present. Nothing is damaged, but it is noise with a BIOS-Error
+label on it, and a GUI has no way to know. There is no field this driver can
+read to predict the branch.
 ### The GPU power contract passes 14/14 in hybrid mode — 29 Oct 2026
 
 **The regression test that reported three failures two hours earlier now passes

@@ -87,11 +87,37 @@ draw() {
 
 restored=0
 RESTORE_OK=1
+DETACHED=0            # set to 1 only once the eject has actually been written
 restore() {
 	[ "$restored" -eq 1 ] && return
 	restored=1
+
+	# If no detach was ever attempted -- the preconditions refused, or the
+	# user interrupted before that point -- there is nothing to put back and
+	# writing gpu_boost 4 is NOT harmless. On this firmware it takes the
+	# PEGP._ON() branch whenever the card is attached, and that symbol does
+	# not resolve: the whole WMBD method aborts with AE_NOT_FOUND. An earlier
+	# version restored unconditionally and then reported "the round trip
+	# works" about a round trip that never happened.
+	if [ "$DETACHED" -eq 0 ]; then
+		say "nothing was detached -- not writing the restore"
+		echo "  The GPU was never ejected, so gpu_boost 4 is not sent. It is"
+		echo "  not a no-op on this firmware: with the card attached it hits"
+		echo "  PEGP._ON(), which is an unresolved External here, and aborts"
+		echo "  WMBD with an ACPI BIOS Error in dmesg."
+		printf '  dGPU present: %s   driver: %s\n' "$(gpu_present)" "$(gpu_driver)"
+		return
+	fi
+
 	say "restoring the GPU"
-	echo 4 > "$P/gpu_boost" 2>/dev/null
+	# The error is NOT suppressed. A failing write here is the single most
+	# important thing this test can report, because it means the firmware
+	# route back is unavailable and recovery needs the PCI rescan below.
+	if ! echo 4 > "$P/gpu_boost" 2>&1; then
+		echo "  gpu_boost 4 FAILED -- the firmware restore did not run."
+		echo "  Check dmesg for an ACPI error naming PEGP._ON."
+		RESTORE_OK=0
+	fi
 	sleep "$SETTLE"
 	if [ "$(gpu_present)" != yes ]; then
 		echo "not back yet -- trying a bus rescan"
@@ -125,8 +151,11 @@ restore() {
 		different feature from one that round-trips.
 		EOF
 		RESTORE_OK=0
-	else
+	elif [ "$RESTORE_OK" -eq 1 ]; then
 		echo "  driver re-bound cleanly -- the round trip works"
+	else
+		echo "  the card is back and bound, but the firmware restore errored"
+		echo "  -- the PCI rescan is what recovered it, not gpu_boost 4."
 	fi
 }
 trap restore EXIT
@@ -199,6 +228,10 @@ else
 fi
 
 say "detaching"
+# DETACHED gates the restore. Set it BEFORE the write, not after: if the eject
+# lands and the script is then interrupted, the card is already gone and the
+# restore must still run. A flag set afterwards would miss exactly that case.
+DETACHED=1
 echo 3 > "$P/gpu_boost" || die "write to gpu_boost failed"
 sleep "$SETTLE"
 echo "dGPU present: $(gpu_present)"
