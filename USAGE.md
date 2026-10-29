@@ -134,8 +134,10 @@ done
 ```
 
 **Match on the symlink target, not on `fd/3`.** Recovery opens the replacement
-before closing the old descriptor, so the number moves: 4 after one re-open, 5
-after two. Exactly one is ever open.
+before closing the old descriptor, so the number moves — and it **alternates
+rather than climbing**. The replacement takes the lowest free number while the
+old one is still held, then the old number is released and is the one reused on
+the next recovery. The sequence is 3 -> 4 -> 3 -> 4. Exactly one is ever open.
 
 Equal is healthy. If they differ on a build that predates the self-healing
 watcher, recover with `restart` — **not `start`**, which is the no-op above:
@@ -181,6 +183,20 @@ echo '128' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_custom_speed
 # Before version 0.2.0
 echo '50' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_custom_speed
 ```
+
+**Caution on Gigabyte Gaming (2025+) firmware: the scale here is unresolved.**
+The driver passes this value to the controller **unconverted** — that much is
+plain in the code — while the PWM read path treats the controller's duty scale
+as percent, which is what `fan_pwm` reports and what hwmon `pwm1` converts from.
+The two halves therefore disagree.
+
+In practice it makes no difference to fan speed on this generation, because
+**the controller does not act on this value proportionally at all.** It reaches
+the hardware by two routes and neither is a duty: auto mode hands it to a method
+the controller ignores, and turbo reaches full speed through a single-bit flag
+rather than through the number. So treat this node as having no reliable
+proportional effect here, whatever scale it is read on, and do not rely on a
+value as a percentage of fan speed.
 
 ## Charging mode
 
@@ -287,6 +303,20 @@ Aero/AORUS laptops support battery cycles, but are only accessible through the e
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/battery_cycle`
 
+**Not available on Gigabyte Gaming (2025+) firmware, and the node is not
+created there.** Both method IDs this node reads are absent from that
+generation. The driver asks the firmware at load time and omits the node
+entirely rather than publishing one that would answer `0` forever — an absent
+file means "no such feature", where a file reading `0` is indistinguishable
+from a real measurement.
+
+The count is still available: the firmware reports it by the standard route and
+the kernel's own battery driver picks it up with no help from here:
+
+```sh
+cat /sys/class/power_supply/BAT1/cycle_count
+```
+
 ## GPU boost (added in version 0.1.0)
 
 **Disclaimer:** Models older than the [Aero 15 X9 Series](https://www.gigabyte.com/Laptop/AERO-15--RTX-20-Series) do not support this, as it requires NVIDIA's Dynamic Boost from their Max-Q technologies.
@@ -295,6 +325,31 @@ Aero/AORUS laptops support boosting the discrete GPU's power limit. Even though 
 
 Laptops with RTX 3000 series GPUs or newer have three different modes, while older models have one.
 
+**On Gigabyte Gaming (2025+) firmware this node means something different, and
+the driver's range does not match it.** Reading the firmware for that
+generation, the accepted values are:
+
+| Value | What the firmware does |
+|---|---|
+| `0` | disable the NPCF boost state |
+| `1` | enable it |
+| `2` | **nothing — no branch exists for it** |
+| `3` | **request a dGPU eject** (detach the discrete GPU from the PCI bus) |
+| `4` | restore the discrete GPU and rescan the bus |
+
+**The driver accepts 0, 1 and 2 only.** Values 3 and 4 are a matched
+detach/restore pair rather than boost levels, and both are refused on every
+model — ejection is deliberately not implemented, so the restore has nothing to
+undo. The cap is unconditional and does not depend on model detection.
+
+And the whole routine is **gated on the display MUX**: it runs only while the internal panel is driven by the integrated GPU,
+which the firmware enforces itself so that you cannot detach the GPU drawing
+your screen. Check which GPU owns the panel with:
+
+```sh
+grep -l '^connected$' /sys/class/drm/card*-eDP-*/status
+```
+
 **Node:** `/sys/devices/platform/gigabyte_laptop/gpu_boost`
 
 **Example:** To enable GPU boost:
@@ -302,6 +357,16 @@ Laptops with RTX 3000 series GPUs or newer have three different modes, while old
 ```sh
 echo '1' | sudo tee /sys/devices/platform/gigabyte_laptop/gpu_boost
 ```
+
+## dGPU ejector presence
+
+Reports whether the driver believes this model can detach its discrete GPU. The
+value is decided from the model name when the driver loads, not by asking the
+firmware. It is read-only, and **ejection itself is deliberately not
+implemented** — the node exists so userspace can tell which models the firmware
+offers it on.
+
+**Node:** `/sys/devices/platform/gigabyte_laptop/has_dgpu_ejector`
 
 ## USB toggles (added in version 0.1.0)
 
@@ -313,6 +378,11 @@ Aero/AORUS laptops support USB power output when they are asleep (S3) or in hibe
 /sys/devices/platform/gigabyte_laptop/usb_charge_s3_toggle
 /sys/devices/platform/gigabyte_laptop/usb_charge_s4_toggle
 ```
+
+**Not available on Gigabyte Gaming (2025+) firmware, and the nodes are not
+created there.** Both method IDs are absent from that generation, and there is
+no live controller field behind the feature either. The driver checks at load
+time and omits both nodes rather than publishing toggles that always read `0`.
 
 ## Keyboard backlight
 
@@ -368,6 +438,12 @@ busctl --system call org.freedesktop.UPower /org/freedesktop/UPower/KbdBacklight
 
 Aero/AORUS laptops support "power on time", though its use is unknown. This node is read-only.
 
+**On Gigabyte Gaming (2025+) firmware the name is wrong.** The method behind
+this node returns no timestamp there. It returns five bytes of extended CMOS
+settings storage — the same five the matching setter writes — and their contents
+are not stable from one session to the next. Do not read a value here as a
+running total of anything.
+
 **Node:** `/sys/devices/platform/gigabyte_laptop/power_on_time`
 
 ## Light sensor (added in version 0.2.0)
@@ -384,6 +460,11 @@ All VE and newer models (e.g. Aero 16 XE5) return four 8-bit values, while older
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/light_sensor`
 
+**Not available on Gigabyte Gaming (2025+) firmware**, and not merely
+unimplemented here: both method IDs are absent from that generation, and so is
+every standard route — no ACPI ambient-light device is declared at all. The
+sensor is not fitted.
+
 ## PWM (added in version 0.2.0)
 
 **Disclaimers:**
@@ -393,17 +474,33 @@ All VE and newer models (e.g. Aero 16 XE5) return four 8-bit values, while older
 
 Aero/AORUS laptops support reading the current PWM for each fan. This should not be confused with the custom fan speed, which returns the PWM for use in custom fan mode.
 
-The sysfs and HWMON nodes are read-only, and stay that way until a firmware mechanism is found that actually sets a proportional duty. Three were tried on a Gigabyte Gaming A16 and none worked:
+The sysfs and HWMON nodes are read-only, and stay that way until a firmware mechanism is found that actually sets a proportional duty. **Four were tried on a Gigabyte Gaming A16 and none worked:**
 
 - `0x6A` writes `ADJF`, a **single bit**, and runs the fans flat out.
 - `0x70` writes the per-fan targets and *ignored* them, then **stopped both fans** when asked for 100%.
 - `0x46`/`0x47` write the duty and the target together, and the fans did not move across 30-70%.
+- `0x68` writes an indexed fan curve. The store lands and the controller never acts on it — the read-back field that would have confirmed a point is never populated.
 
 The embedded controller decides what to do with those bytes, and no ACPI method
 reads them back as anything but storage, so there is nothing left to analyse —
 only experiments. The sysfs node will only return the PWM for the CPU fan, while the HWMON nodes have separate channels for CPU and GPU fans.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/fan_pwm`
+
+### `fan_pwm` and hwmon `pwm1` are the same reading on different scales
+
+Both read the same firmware method. Neither is wrong, but they do not print the
+same number:
+
+| Node | Scale | Example |
+|---|---|---|
+| `fan_pwm` | the controller's own duty, **unconverted** | `31` |
+| hwmon `pwm1` | the hwmon convention, **0-255** | `79` |
+
+`31 * 255 / 100 = 79`. The controller works in percent, and hwmon defines
+`pwmX` as 0-255, so the driver converts for hwmon and leaves its own node
+alone. Read `fan_pwm` for the controller's figure, `pwm1` for something a
+standard hwmon tool will interpret correctly. See `HWMON.md`.
 
 ## Performance mode (Gigabyte Gaming models)
 
@@ -432,6 +529,13 @@ the SBIOS does not hand over the power-limit table it needs
 default and `nvidia-smi -pl` is refused as well, since the platform owns TGP on
 laptop GPUs. Nothing in this driver can change that; check whether a BIOS or
 driver update has fixed it with `journalctl -u nvidia-powerd -b | head`.
+
+**Only the GPU half of that is settled.** The same method also programs the
+**APU's own power limits** through a separate controller channel that does not
+involve the graphics card or `nvidia-powerd` at all — roughly 45 W, 65 W and
+70 W for the three modes on mains power. Whether those land has never been
+measured, so "the write does nothing" is proven for the GPU and unproven for
+the CPU.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/perf_mode`
 

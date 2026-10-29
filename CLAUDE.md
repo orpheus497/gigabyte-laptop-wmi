@@ -210,12 +210,35 @@ hostname anywhere in tracked content. The username `orpheus497` *does* appear
 twice — the remotes table and the PR #1 link, both below — because it is the
 public fork slug, which is the point of it being there.
 
-**One gap, stated rather than papered over.** The four root-only DMI
-identifiers — `product_serial`, `board_serial`, `chassis_serial` and
+**The one gap is closed, 29 Oct 2026 — all four clean.** The four root-only
+DMI identifiers — `product_serial`, `board_serial`, `chassis_serial` and
 `product_uuid`, all mode 0400 — could not be matched against the tree without a
-password, so that one check remains open. Both asset tags read the literal
-"Default string". Close it from a privileged shell by reading each value and
-`git grep`-ing for it.
+password, which is why they sat open through two audits. Read from a privileged
+shell and each searched for as a literal across tracked content: **zero hits for
+all four.** Both asset tags still read "Default string".
+
+Two details make that a real negative rather than a vacuous one. The loop skips
+any value that is empty or a BIOS placeholder and says so, and **none of the
+four was skipped** — so every one held a genuine value that was actually
+searched, which is the failure mode a careless version of this check would hit.
+And it never echoes a value to the terminal, so its output is safe to paste
+anywhere:
+
+```sh
+for f in product_serial board_serial chassis_serial product_uuid; do
+	v=$(sudo cat /sys/class/dmi/id/$f 2>/dev/null)
+	case "$v" in ""|"Default string"|"To Be Filled"*) echo "$f: empty/placeholder"; continue;; esac
+	if git grep -qI -F -- "$v"; then echo "$f: *** FOUND IN REPO ***"; else echo "$f: clean"; fi
+done
+```
+
+**Scope, stated because it is narrower than the 24 Oct run:** `git grep` with no
+revision searches the **tracked working tree**, not history. The 24 Oct audit
+covered all 435 blobs in history, for a different set of identifiers; this one
+covers the current tree only. The committed firmware has not changed since it
+landed, so the two coincide for the files that could plausibly carry an
+identifier — but append `$(git rev-list --all)` to the `git grep` if a stronger
+guarantee is ever wanted.
 
 Three things look alarming in a naive grep and are not:
 
@@ -360,11 +383,29 @@ it.** Probe's silent-fan-mode detection reads `FAN_SILENT_OLD` (`0xFA`) with
 argument `0` and branches on `if (ret || output < 0)`. `0xFA` has no `WMBC`
 case, so the echo gives `ret == 0` and `output == 0`, and the code takes the
 *"Older model detected, using old ID"* branch and installs `0xFA` as the silent
-fan method — on firmware that does not implement it. That is wrong on every
-machine that reaches it, and it is hidden on this one only by the early
-`goto obtain_fan_mode` that short-circuits the three known DMI families before
-the read happens. Any Gigabyte model outside those three gets the
-misdetection.
+fan method — on firmware that does not implement it. It is hidden on this
+machine by the early `goto obtain_fan_mode` that short-circuits the three known
+DMI families before the read happens.
+
+**But it is not demonstrable on any firmware held — checked 29 Oct 2026, and
+this corrects an overstatement that stood here.** The claim was that the
+misdetection "is wrong on every machine that reaches it". That needs both halves
+to hold and the second one fails. The machines that *reach* the read are the
+ones outside the early exit: family `AERO` or `Intel`, plus the legacy
+`Aero 14` / `P64V6` / `P64V7` entries — all old Aero and P-series. The one dump
+from that range is `Aero-15-Classic-DSDT.dsl`, and it carries `Case (0xFA)`
+**twice**: `:60113` inside `WMBD` (which opens at `:60109`) and `:60296` inside
+`WMBC` (which opens at `:60285`). `WMBC` implements it there, so the read
+returns a real integer and the detection works. On the Gaming dumps `0xFA`
+appears once — `:9269` on the 5TH, inside `WMBD` — so a read *would* echo, but
+those machines take the early exit and never make it.
+
+**So across every firmware in this repo, either the read works or it is never
+performed.** The hole in `get_devstate2()` is still real and still worth
+closing: an unimplemented ID reads back as a genuine `0` with a success return.
+But it is a latent correctness hole, not the repair of a live misdetection, and
+writing it up as the latter is exactly the overstatement this file warns about
+elsewhere.
 
 **The type test has one theoretical blind spot, and it is empty across all four
 committed dumps — checked 26 Oct 2026.** A firmware case that returned the
@@ -516,7 +557,7 @@ nothing in the driver touches:
 | `0xC9` | `EC0.FNKS` | Fn-lock |
 | `0xC7` | `EC0.MUTE` | Mute status |
 | `0x87` / `0x88` | `EC0.PLED` / `EC0.BLED` | Power LED / battery LED. Both **invert** — writing `0` sets the field to `One` — and both persist the choice to extended CMOS alongside the live field: `0x87` → `WXCM (0xDA, …)` (`:9632-9646`), `0x88` → `WXCM (0xD9, …)` (`:9648-9662`) |
-| `0xE6` | **CMOS `0xD0`**, not EC | dGPU mux (0 dynamic, 1 discrete, 2 MS-Hybrid). `WXCM (0xD0, Arg2)` out, `RXCM (0xD0) & 0x7F` back — so this is **extended CMOS consumed at the next boot**, like `0x63`, not a live EC field. The "EC field" column header does not apply to this row |
+| `0xE6` | **CMOS `0xD0`**, not EC | **dGPU display MUX.** `WXCM (0xD0, Arg2)` out (`:9279`), `RXCM (0xD0) & 0x7F` back (`:9685`) — **extended CMOS consumed at the next boot**, like `0x63`, not a live EC field, so the "EC field" column header does not apply. ~~0 dynamic, 1 discrete, 2 MS-Hybrid~~ — **that encoding was unsourced and is withdrawn 29 Oct 2026**; the AML decodes nothing, and the `& 0x7F` mask means bit 7 carries something unidentified. **One value is now anchored:** `0x00`, read 29 Oct 2026 while the panel was independently confirmed on the iGPU. See "`DPMF` is the display-MUX flag" |
 | `0x63` | `WXCM 0xD2`–`0xD6` | Five bytes in, five back. RGB-shaped, see Step 6 |
 | `0x66` | `EC0.FLVL` (8-bit) | Current fan **step**, the index into the curve the EC is using |
 | `0x6B` | `EC0.FAN1` (8-bit) | CPU fan fixed duty. The driver calls this `FAN_CUSTOM_SPEED`; GCC uses it as the CPU side of its Max-mode recipe |
@@ -547,7 +588,7 @@ caught `0x63` and `0xE6`.
 
 | Index | Written by | What it holds |
 |---|---|---|
-| `0xD0` | `0xE6` | dGPU mux. Read masks with `& 0x7F` |
+| `0xD0` | `0xE6` | dGPU display MUX. Read masks with `& 0x7F`. Measured `0x00` on 29 Oct 2026 with the panel on the iGPU; no other value observed, and the full encoding is unknown |
 | `0xD1` | `0xA3` | **Unidentified.** Read/write, and its purpose appears nowhere in the firmware |
 | `0xD2`–`0xD6` | `0x63` | The five-byte block behind the misnamed `power_on_time` node |
 | `0xD9` | `0x88` | Battery LED, the persistent copy of `BLED` |
@@ -622,6 +663,114 @@ nowhere in it, which is exactly the shape of a BIOS-menu toggle. Sleep-charging
 is a setup option on these machines, and a setup option is stored in extended
 CMOS. Identify it the cheap way — read `0xA3`, flip the BIOS option, read it
 again — before writing a line of code against it.
+
+### `DPMF` is the display-MUX flag, and it gates `gpu_boost` — 29 Oct 2026
+
+**This machine advertises a MUX switch in Windows and in Gigabyte Control
+Centre, and the firmware plumbing for it is all here.** It was decoded after
+asking whether `0x51`'s values 3 and 4 relate to enabling and disabling the
+dGPU. They do, and the picture is bigger than that node.
+
+**What `DPMF` is, proven rather than guessed.** The brightness-key handlers
+`_Q11` and `_Q12` (`:8368-8394`) branch on it to decide which GPU owns the
+internal panel:
+
+```asl
+If ((DPMF != 0x02)) { Notify (^^^GP17.VGA.LCD,   0x87) }   // AMD iGPU's panel
+Else                { Notify (^^^GPP0.PEGP.EDP1, 0x87) }   // NVIDIA dGPU's eDP
+```
+
+`GP17.VGA` is the Rembrandt iGPU and owns `_DOD`/`_DOS` (`:2618-2625`);
+`GPP0.PEGP` is the RTX 5050. So **`DPMF == 2` means the panel is routed to the
+discrete GPU** and anything else means it is on the integrated one. `DPMF` is
+`External (_SB_.PCI0.SBRG.EC0_.DPMF)` here, declared in a table not committed,
+so it cannot be read from this dump.
+
+**It does not need to be. The MUX state is readable for free, with no root and
+no WMI call**, which is the most useful practical result of this work:
+
+```
+/sys/class/drm/card1-eDP-1   amdgpu   status=connected      <- panel on iGPU
+/sys/class/drm/card0-eDP-2   nvidia   status=disconnected
+```
+
+Read 29 Oct 2026. The dGPU *has* an eDP connector — the hardware can route the
+panel either way, which is the MUX — and nothing is attached to it. So this
+machine currently sits at `DPMF != 2`.
+
+**Consequence, and it closes an open question: `gpu_boost` is not inert here.**
+The whole of `WMBD Case (0x51)` sits inside `If ((DPMF != 0x02))` (`:9549`).
+That gate was recorded as "a further unknown" because `DPMF` could not be read.
+The connector status answers it: the gate is **passing** today, so the node's
+writes do reach the firmware. If the MUX were ever switched to discrete, the
+entire case would be skipped and `gpu_boost` would silently do nothing.
+
+**The firmware interlock is the elegant part.** You cannot detach the GPU that
+is driving your screen, and the firmware enforces that itself rather than
+trusting the caller — the eject branch is unreachable precisely when it would
+black the display.
+
+**Two separate mechanisms, routinely conflated:**
+
+| | Boot-time MUX | Runtime attach/detach |
+|---|---|---|
+| Method | `0xE6` → `WXCM (0xD0, Arg2)` (`:9279`), read `RXCM (0xD0) & 0x7F` (`:9685`) | `0x51` values **3** and **4** (`:9566-9586`) |
+| Storage | extended CMOS, consumed at next boot | live, immediate |
+| Effect | which GPU drives the panel | whether the dGPU is on the PCI bus at all |
+| In the driver | **not implemented at all** | 3 permitted, 4 blocked — backwards |
+
+**The `0xE6` encoding in the method table above is unsourced.** "0 dynamic,
+1 discrete, 2 MS-Hybrid" is asserted there with no evidence; the AML shows only
+a byte in and a masked byte out, and the `& 0x7F` means bit 7 carries something
+else that nobody has identified. **Do not write `0xE6` on the strength of that
+row** — a wrong value is consumed at the next boot and could route the panel to
+a GPU whose driver is not up.
+
+**The read was taken on 29 Oct 2026 and anchors exactly one value:**
+
+```
+method 0xe6 arg 0x0 -> 0x0 (0) [implemented]
+```
+
+`[implemented]` with its brackets, so this is a genuine INTEGER reply and not
+the `Default { Return (Arg2) }` echo — which matters here because the argument
+sent was also `0`. Taken while the connector check above independently showed
+the panel on the iGPU. So **`0x00` means panel-on-iGPU with the dGPU present on
+the bus**, and that is the whole of what is known. It does **not** confirm any
+three-way labelling: a single observation of one state cannot distinguish
+"0 = dynamic" from "0 = hybrid" or from any other scheme. The remaining values
+stay unknown until one is observed from a known state, which is what a BIOS
+setup option would give for free if this firmware exposes one.
+
+**The EC can do the detach and attach by itself, with no WMI involved.** Found
+on both Gaming dumps:
+
+```asl
+Method (_Q48) { Notify (^^^GPP0.PEGP, 0x03) }              // eject
+Method (_Q49) { ^^^GPP0.PG00._ON () ; Notify (PCI0, Zero) } // restore
+```
+
+Note `_Q49` calls `PG00._ON()` (the slot's power gate) where `WMBD 0x51`
+value 4 calls `PEGP._ON()` (the GPU) after testing `GPP0.D0ST == 0x03`. Not
+interchangeable, and the WMI path is the more careful of the two.
+
+**This reframes the `gpu_boost` bound fix.** It is not primarily a safety
+patch. **3 and 4 are a matched pair implementing a feature this machine
+advertises**, and the driver currently permits the destructive half and blocks
+the recovery half. That is the argument to use.
+
+**Linux already offers a weaker form of the same thing**, which belongs in any
+comparison: `/sys/bus/pci/devices/0000:01:00.0/remove` plus
+`/sys/bus/pci/rescan`, both present. What the firmware route adds is the power
+gate — `PG00._ON` / `PEGP._ON` imply a rail the PCI layer does not touch.
+Runtime D3 is also already working (`Runtime D3 status: Enabled
+(fine-grained)`), so the power case for ejecting at all needs measuring before
+any of this is built.
+
+**Unidentified, found alongside:** `DNLV`, an 8-bit EC field (`:8119`), drives
+`_Q44` (`:8455-8482`) to send one of five distinct notifies — `0xD1` through
+`0xD5` — to the dGPU. Purpose unconfirmed; the shape suggests a level or state
+index being reported to the NVIDIA driver.
 
 ### The `ERCD` general EC mailbox — found 24 Oct 2026, and **do not drive it**
 
@@ -1262,9 +1411,107 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   255** rather than passing an arbitrary `u32` to the EC. Deliberately *not*
   clamped to 229: upstream documents the wider range, and a user asking for a
   duty above the ceiling on an affected model is making an informed choice.
-- **`gpu_boost` value 3 is a dGPU *eject* request, not a boost level — and the
-  range check lets it through on any unit where the ejector probe does not
-  fire.** Found 24 Oct 2026 by reading `Case (0x51)` against the handler.
+
+  **The duty scale is read one way and written another, and the halves
+  disagree — found 29 Oct 2026, and it is the open question behind this whole
+  bullet.** `pwm1` converts the controller's duty from percent to hwmon's
+  0–255 (`ec_duty_to_pwm`, `gigabyte-laptop.c:426`, clamping at
+  `EC_DUTY_MAX 100`). `fan_custom_speed` does **not** convert: it range-checks
+  at 255 and hands the raw number to `0x6B`/`0x47`
+  (`set_fan_custom_speed`, `:711-728`). So the driver simultaneously asserts
+  the field is 0–100 on the way in and 0–255 on the way out.
+
+  **Live evidence favours percent**, read 29 Oct 2026 on the running driver:
+  `fan_pwm` (raw) `31` with `fan1_input` **2479 RPM**, against this file's own
+  recorded reference of duty `32` → ~2500 RPM and duty `22` → ~1666 RPM. Those
+  three sit on one smooth curve as percentages. As `/255` fractions they would
+  be 8.6 % → 31 % of maximum and 12 % → 47 % of maximum, which is not a fan
+  curve. The 5263 RPM turbo figure is the maximum both are measured against.
+
+  **If percent is right, three things follow and none is yet acted on.** A
+  write of 128 asks for 128 % and saturates rather than giving half speed, so
+  the documented example is wrong on this generation (flagged in `USAGE.md`,
+  deliberately without asserting the outcome). `FAN_DUTY_MAX` 229 is not a
+  meaningful ceiling here but simply "over 100", which is why `fan_turbo`
+  works. And the AERO 17-XA behaviour behind issue #46 belongs to a different
+  controller model, so this bullet's opening sentence is about *that* hardware,
+  not this one.
+
+  **Do not run a duty sweep to settle it — that experiment is already closed,
+  and proposing it again was an error worth recording.** `fan_mode 4` is
+  `FAN_AUTO_MODE`, and `set_fan_mode()` at `:657-660` calls it with
+  `fan_custom_speed` as the argument — so mode 4 *is* method `0x70`, the
+  mechanism Step 4 already rejected. Its recorded result is in the Step 4 table
+  above: targets of 25/50/75 % ignored, and **a target of 100 stopped both
+  fans.** A sweep through 100 would therefore re-run a known-failed test at a
+  value known to stop the fans, which also makes the "no new exposure, turbo
+  already writes 229" reasoning wrong: turbo reaches full speed through
+  `ADJF`, a single bit, not through the duty.
+
+  **So the write scale has no observable consequence on this hardware, and that
+  is the resolution.** `fan_custom_speed` feeds exactly two paths and neither
+  acts on the number proportionally: mode 4 hands it to `0x70`, which the
+  controller ignores, and `fan_turbo` latches `ADJF`, which is one bit. There
+  is no third path. The scale mismatch is therefore a real inconsistency in the
+  driver's own model of the field — asserting 0–100 on the read side and 0–255
+  on the write side — with no effect on fan behaviour to measure.
+
+  **What follows for the node's documentation**, which is the only place it
+  bites: `fan_custom_speed` is not a proportional control on this generation at
+  any scale, so an example presenting a value as a percentage of fan speed is
+  wrong for a reason that has nothing to do with scaling. `USAGE.md` says so.
+
+  **The sweep was run anyway on 29 Oct 2026, and it is inconclusive — which is
+  the more useful finding, because of *why*.** Every value gave the same
+  answer:
+
+  ```
+  fan_mode 4, then fan_custom_speed:
+  50 -> 0 RPM, fan_pwm=0      128 -> 0 RPM, fan_pwm=0
+  75 -> 0 RPM, fan_pwm=0      200 -> 0 RPM, fan_pwm=0
+  100 -> 0 RPM, fan_pwm=0     229 -> 0 RPM, fan_pwm=0
+  ```
+
+  That looks like a dramatic negative — the duty ignored at every value and the
+  fans dead — and it is not, because **the baseline was already 0.** The
+  machine was at 38 °C idle, where this chassis runs semi-passive with both
+  fans stopped and `FDTY` at 0 by design. A reading taken where both hypotheses
+  predict the same number distinguishes nothing: "the EC ignored the duty" and
+  "the EC accepted the duty and overrode it at 38 °C" produce identical output.
+  **This is the `temp2` error exactly** — see the Hazards entry — and it is the
+  second time in this project that an idle measurement has been mistaken for
+  evidence.
+
+  Afterwards `fan_mode` was 1, `pwm1_enable` 2 and `fan_pwm` 0 at 38 °C with
+  `k10temp` 39.1 °C, so the restore worked and the EC had its curve back. **No
+  harm done and nothing learnt**, which is the correct summary.
+
+  To be decisive the sweep would have to start from fans already spinning —
+  under sustained load, or from a mode where the EC is driving them — so that
+  "duty applied" and "duty ignored" predict different numbers. **That is not
+  worth doing.** Step 4 closed this mechanism on four independent grounds and
+  mode 4 is one of the four; a decisive re-run would at best re-confirm a
+  closed result.
+
+  **Unrelated but adjacent: `0xE5` is defined twice.** `FAN_GPU_RPM 0xE5` at
+  `:69` is a WMBC method ID; `FAN_DUTY_MAX 0xE5` at `:94` is a duty value. Two
+  namespaces, one literal, no malfunction — but it reads as a collision and is
+  worth a comment if either is ever touched.
+- **`gpu_boost` value 3 is a dGPU *eject* request, not a boost level.**
+  ~~And the range check lets it through on any unit where the ejector probe
+  does not fire.~~ **Fixed 29 Oct 2026: the cap is now `mode > 2`,
+  unconditional**, so both 3 and its restore are refused on every model and the
+  `has_dgpu_ejector` test is gone from the handler. The rest of this entry is
+  the analysis that produced the fix and is kept for it.
+
+  Three reasons the cap sits at 2 rather than being made conditional, all from
+  firmware rather than preference: `has_dgpu_ejector` is derived from DMI and
+  cannot track which firmware carries the eject branch; 3 and 4 are a matched
+  pair, so leaving only the destructive half reachable was the actual defect;
+  and on AORUS firmware values 2 and 3 both set `NPCF.DTGP` with the same
+  notify, so refusing 3 loses nothing there.
+
+  Found 24 Oct 2026 by reading `Case (0x51)` against the handler.
   `WMBD 0x51` value 3 is `Notify (^^GPP0.PEGP, 0x03) // Eject Request`, and
   value 4 is a bus re-check (`WMOF = 0`, `Notify (PCI0, Zero)`). The driver
   blocks `mode >= 3` **only inside `if (gigabyte->has_dgpu_ejector)`** and then
@@ -1284,11 +1531,45 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   machine has been named**: that would need a unit carrying firmware with
   `Case (0x51)`'s eject branch *and* failing the ejector probe, and nobody has
   identified one. The firmware adds a second condition of its own — the whole
-  `Case (0x51)` body sits inside `If ((DPMF != 0x02))` — whose value here is
-  unread, so it is a further unknown rather than a reassurance. The defect is
+  `Case (0x51)` body sits inside `If ((DPMF != 0x02))` — which was recorded
+  here as "a further unknown" and **is now resolved, 29 Oct 2026**: `DPMF` is
+  the display-MUX flag, and the panel is on the iGPU on this machine, so the
+  gate is **passing** and the node's writes do reach the firmware. See
+  "`DPMF` is the display-MUX flag". The defect is
   real and the cap is worth making unconditional; the severity claim should be
   accurate, because an overstated one is the kind of thing a maintainer checks
   and then distrusts the rest of the patch for.
+
+  **Proven unreachable across all four dumps, 29 Oct 2026 — which is stronger
+  than "no machine has been named" and should replace it.**
+  `has_dgpu_ejector` is set from DMI alone (`gigabyte-laptop.c:2601-2621`),
+  never from a firmware read, and families `GIGABYTE AERO` and
+  `GIGABYTE GAMING` set it to 1 unconditionally. Reading `Case (0x51)` in each:
+
+  | Firmware | what value 3 does | ejector flag |
+  |---|---|---|
+  | `GAMING-A16-5TH-DSDT.dsl:9568` | `Notify (GPP0.PEGP, 0x03) // Eject Request` | forced **1** |
+  | `GAMING-A16-3VH-DSDT.dsl:9424` | the same eject branch | forced **1** |
+  | `AORUS-17X-VF-DSDT.dsl:125294` | `NPCF.DTGP = One`, "Qboost Enable" | **0** |
+  | `Aero-15-Classic-DSDT.dsl:60252` | no value dispatch; `Arg2` is a temperature target | **0** |
+
+  The firmware that ejects is exactly the firmware whose DMI family forces the
+  flag on. Inverted in shape, unreachable in fact.
+
+  **The reachable defect is at the other end: `if (mode > 3)` rejects 4.** On
+  both Gaming dumps value 4 is the *recovery* — `GPP0.PEGP._ON ()` at `:9580`
+  and `:9437`, then `WMOF = Zero` and `Notify (PCI0, Zero) // Bus Check`. It is
+  the only route back from an ejection. So the handler permits the hazard and
+  blocks the undo, which holds regardless of reachability and is the better
+  argument for the patch.
+
+  **Capping at 2 costs the AORUS firmware nothing**, which is what makes an
+  unconditional cap safe across generations rather than merely safe here: at
+  `:125287` and `:125294` values 2 and 3 are *identical*, both `NPCF.DTGP = One`
+  followed by the same `Notify`. Nothing is lost by refusing 3 anywhere. Argue
+  the patch from that and from the firmware's own `// Eject Request` comment,
+  and say explicitly that 4 stays blocked because ejection is blocked, or a
+  reviewer will ask.
 
   **And `0x51` means something entirely different on the oldest range, which
   bears directly on the cap.** On `Aero-15-Classic-DSDT.dsl:60252-60258`,
@@ -1526,6 +1807,10 @@ Both commits build clean with `-Wall -Wextra`.
 | 6b | RGB **colour** over `/dev/hidraw2` — not started, no precedent on this hardware. Open-ended research, not a blocker | high |
 | 7 | **`perf_mode`'s APU-power half via `ECPT`** — opened 24 Oct 2026. Sweep 0→1→2 under sustained AC load and watch package power and all-core clock. Needs no new code and no reverse engineering; the highest-value experiment left. See "`perf_mode` has a second half" | low |
 | 8 | **`amd_pmf.force_load=1`** — one kernel parameter and a reboot, fully reversible. Settles whether APMF binds and what a second `platform_profile` handler does to the aggregate | medium |
+| ~~10~~ | ~~dGPU attach/detach — fix the `0x51` bounds~~ **done 29 Oct 2026** — cap is unconditional at 2, so the eject and its restore are both refused on every model rather than the destructive half alone being reachable. See "`DPMF` is the display-MUX flag" | low |
+| ~~A2~~ | ~~Hide nodes whose methods the firmware lacks~~ **done 29 Oct 2026** — `battery_cycle`, `usb_charge_s3_toggle`, `usb_charge_s4_toggle` are now omitted at load rather than reporting a permanent `0`. `light_sensor` is **not** gated and is the remaining candidate | low |
+| 11 | **MUX encoding via `0xE6`** — one value anchored (`0x00` = panel on iGPU). Identify the rest from a known state before ever writing it; a wrong value is consumed at the next boot and can black the panel | **high if written** |
+| 12 | **Is detaching the dGPU worth anything?** Runtime D3 already works fine-grained on this card, and Linux already offers `pci .../remove` + `rescan`. Measure the power difference before building a firmware path that duplicates them | low |
 | 9 | **Does `WMBC 0xE1` lag or freeze under load?** Opened 26 Oct 2026, and **this outranks 7 and 8.** A load run with the driver's `temp1` and `k10temp` sampled *together*, after both fans were seen at 0 RPM with the CPU at 95 °C and `temp1` reporting 58 °C. The only open item that could change what the driver reports. See "Open: the fans did not respond to a sustained CPU load" | low |
 
 Steps 0, 1 and 1b are complete and verified on hardware: `gigabyte-laptop/0.2.0`
@@ -1593,10 +1878,10 @@ Two behaviours worth knowing, both normal:
 Step 2 gated everything GPU-related and is **settled**: all three methods
 validated, and GPU TGP closed as firmware-blocked, so nothing further sits behind
 that gate. With Step 4 closed too, ~~**Step 6b is the only work left**~~ — that
-was true for about a day and is not now: the Phase 3 table carries rows 7, 8
-and 9 as well, and **row 9 outranks the rest**. Read the open work off that
-table, not off this paragraph. Step 6b remains open-ended research, so treat it
-as a separate project rather than a blocker.
+was true for about a day and has been restated wrongly twice since, each time by
+naming the rows that happened to be open. **Read the open work off the Phase 3
+table, which is the only place it is maintained.** Step 6b remains open-ended
+research, so treat it as a separate project rather than a blocker.
 
 ### Open: the fans did not respond to a sustained CPU load — 26 Oct 2026
 
@@ -2951,13 +3236,45 @@ explains the original unattributed 100 → 0. See "Answered 24 Oct 2026: a
 battery pull clears `BCPC`". The guard in `set_charge_mode()` covers exactly
 that case and has now fired in anger.
 
-**Nothing is open in this section any more.** ~~Phase 3 has one remaining row,
-6b~~ — it has **four**: 6b plus the APU-power half of `0xED` (row 7, opened
-24 Oct 2026), `amd_pmf.force_load=1` (row 8) and the fan-response question
-(row 9, opened 26 Oct 2026, and the one that outranks the others). So this is
-emphatically not a claim that the project has nothing left to do; it is a claim
-about these four questions only, and the row count belongs in the table rather
-than here, where it has now gone stale twice.
+**Nothing is open in this section any more**, and that is a claim about *these
+questions only* — emphatically not a claim that the project has nothing left to
+do. **Read the open work off the Phase 3 table and nowhere else.** This
+paragraph used to enumerate the open rows and give a count; it went stale three
+times doing so (one row, then four, then seven), which is the whole argument for
+not repeating the list here. The table is the single source.
+
+## Decided: the userland GUI is a separate project — so sysfs is a contract
+
+**Recorded 29 Oct 2026.** A separate project will build the userland GUI for
+every control this driver exposes. That is the right split and it is the
+standard one: **the driver provides mechanism, userspace decides policy.** No
+scheduling, no profiles-by-time-of-day, no "limit charge unless I am
+travelling" logic belongs in here.
+
+**The consequence is what matters for the work queued below.** The sysfs
+surface stops being this machine's private debug interface and becomes an
+interface another codebase is written against. Three things follow:
+
+- **A node that reports a wrong or meaningless value is now a bug with a
+  downstream victim**, not a cosmetic flaw. `battery_cycle` and the two
+  `usb_charge_*` toggles read `0` because the firmware has no such method, and
+  a GUI reading `0` will display "0 cycles" to a user. That moves the typed-read
+  fix from tidy-up to prerequisite.
+- **Ambiguous units are an integration hazard.** `fan_pwm` is raw percent and
+  hwmon `pwm1` is the same reading scaled to 0–255; `fan_custom_speed` accepts
+  0–255 but has no proportional effect by any route. Each is now documented in
+  `USAGE.md`, and `USAGE.md` is the document the GUI project should be written
+  against.
+- **Node semantics should not churn once the GUI exists.** Anything that
+  changes a node's range, units or meaning — the `gpu_boost` bound, the duty
+  scale decision — is cheapest to settle *before* another codebase depends on
+  it, which is an argument for doing those first rather than last.
+
+**What the GUI will want that does not exist yet**, so it can be planned for
+rather than discovered: a working dGPU attach/detach pair (the `0x51` bound
+fix), the MUX read (available today from `/sys/class/drm/card*-eDP-*/status`,
+no driver work needed), and an honest answer on whether `perf_mode` does
+anything on the CPU side.
 
 ## Decided: upstreaming comes last
 
@@ -2970,7 +3287,7 @@ Sorted by how likely each is to be accepted, for when that time comes:
 | Candidate | Why it should go up |
 |---|---|
 | `gpu_boost_store()` oops (#45) | Dereferenced `gigabyte` before assigning it; any write oopsed the kernel |
-| `gpu_boost` mode-3 eject bound | Same handler, same class of defect: `mode >= 3` is blocked only when `has_dgpu_ejector` is set, then `if (mode > 3)` permits 3 — which the firmware treats as a dGPU **eject request**. Make the cap unconditional. Pitch it as an inverted bound, **not** a reachable bug — no machine has been named that both carries this firmware and fails the ejector probe. See Hazards |
+| `gpu_boost` mode-3 eject bound | **Fixed 29 Oct 2026 — the cap is now unconditional at 2.** Was: `mode >= 3` blocked only when `has_dgpu_ejector` is set, then `if (mode > 3)` permitted 3 — a dGPU **eject request** — while rejecting 4, its restore. Argue it as a matched pair the handler split, not as a reachable bug. See Hazards |
 | Typed read refuses a BUFFER | An unimplemented ID echoes its argument into an `int` and returns success, so an absent method reads as a genuine `0`. Five lines, and it fixes a live `0xFA` silent-fan misdetection on every model outside the three early-exit DMI families |
 | Duty clamp (#46) | Duties above `FAN_DUTY_MAX` stop the fans on an AERO 17-XA |
 | Void-WMBD tolerance | `set_devstate()` reported `-EINVAL` for a third of this firmware's setters; see below |

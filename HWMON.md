@@ -21,12 +21,14 @@ All `fanX_input` nodes are read-only, and all values returned are in revolutions
 
 ### Why writing is not supported
 
-Two firmware methods were tried on a GAMING A16 5TH and neither gives proportional control:
+Four firmware methods were tried on a GAMING A16 5TH and none gives proportional control. The two that come closest:
 
 - **`FAN_FIXED_MODE` (`0x6A`)** writes `ADJF`, which is a **single bit**. It cannot express a duty, and latching it runs the fans at maximum regardless of what duty was programmed. This is the mechanism `fan_turbo` uses.
 - **`FAN_AUTO_MODE` (`0x70`)** writes `FAN1` and `FAN2`, the per-fan targets, and looked like the answer. In practice the controller ignored targets of 25%, 50% and 75%, continuing to run its own curve — and a target of 100% **stopped both fans**.
 
-Because a wrong duty can stop the fans rather than merely run them at the wrong speed, the attributes stay read-only until a mechanism is confirmed on hardware. Untried leads are recorded in `CLAUDE.md`.
+The other two were `0x46`/`0x47`, which write a field the controller uses as its *output* rather than an input, and `0x68`, an indexed fan curve whose store lands in controller memory and is never acted on.
+
+Because a wrong duty can stop the fans rather than merely run them at the wrong speed, the attributes stay read-only. All four mechanisms and the reasoning behind each rejection are recorded in `CLAUDE.md`.
 
 ## Temperature
 

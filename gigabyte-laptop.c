@@ -902,6 +902,15 @@ static ssize_t fan_preset_store(struct device *dev, struct device_attribute *att
 	return count;
 }
 
+/*
+ * Reports the cache rather than reading 0x6B back, and that is deliberate.
+ * WMBC 0x6B does implement the read, but it returns EC0.FAN1 -- the byte WMBD
+ * 0x6B just assigned -- so a readback only confirms the ACPI store landed. It
+ * cannot say whether the controller consumed the duty, which is the only thing
+ * worth knowing here. charge_mode and charge_limit read their firmware back for
+ * a reason that does not apply to this node: a charge ceiling is persistent
+ * state the firmware clears on its own, a fan duty is not.
+ */
 static ssize_t fan_custom_speed_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
@@ -1350,15 +1359,24 @@ static ssize_t gpu_boost_store(struct device *dev, struct device_attribute *attr
 
 	// TODO: Check for AORUS laptops with 4 modes
 
-	// Disable dGPU ejector mode for now
-	if (gigabyte->has_dgpu_ejector) {
-		if (mode >= 3) {
-			pr_err("dGPU ejecting disabled for now\n");
-			return -EINVAL;
-		}
-	}
-
-	if (mode > 3) {
+	/*
+	 * Cap at 2 unconditionally. On Gigabyte Gaming firmware WMBD 0x51 is not
+	 * a boost level above 2: value 3 is Notify (GPP0.PEGP, 0x03), a dGPU
+	 * eject request, and value 4 is the matching restore -- PEGP._ON() plus
+	 * a bus rescan. They are a pair. Ejection is deliberately not
+	 * implemented here, so the restore has nothing to undo and is capped
+	 * with it rather than being the only one of the two left reachable.
+	 *
+	 * The cap is not conditional on has_dgpu_ejector, which the old check
+	 * was: that flag comes from DMI, not from the firmware, so it cannot be
+	 * relied on to track which firmware carries the eject branch. The old
+	 * shape also rejected 4 while permitting 3, which is backwards.
+	 *
+	 * Capping at 2 costs nothing on the older ranges. On AORUS firmware
+	 * values 2 and 3 both set NPCF.DTGP and fire the same notify, so 3 is
+	 * redundant there rather than useful.
+	 */
+	if (mode > 2) {
 		pr_err("Invalid boost mode\n");
 		return -EINVAL;
 	}
@@ -1893,6 +1911,37 @@ static umode_t gigabyte_laptop_sysfs_is_visible(struct kobject *kobj, struct att
 		attr == &dev_attr_dynamic_boost.attr ||
 		attr == &dev_attr_fan_turbo.attr)
 		return gigabyte->gaming_family ? attr->mode : 0;
+
+	/*
+	 * Hide the nodes whose firmware methods this machine does not implement
+	 * at all. Leaving them visible is worse than it looks: WMBC ends in
+	 * Default { Return (Arg2) }, so a read of an absent ID comes back as the
+	 * argument that was sent rather than as an error, and these handlers all
+	 * read with 0. The node then reports a confident, permanent 0 that is
+	 * indistinguishable from a real measurement -- a consumer reading
+	 * battery_cycle would show "0 cycles" rather than "not supported".
+	 *
+	 * An absent node says that unambiguously. An erroring node does not: it
+	 * reads as a transient fault to anything polling it.
+	 *
+	 * The firmware is asked directly rather than consulting a flag, because
+	 * is_visible runs during sysfs_create_group(), before probe(), so
+	 * anything probe works out is not available here yet.
+	 */
+	if (attr == &dev_attr_battery_cycle.attr)
+		/*
+		 * battery_cycle_show reads both IDs and returns on the first
+		 * failure, so it is only useful when both are implemented. The
+		 * gate has to be && for that reason, not ||.
+		 */
+		return (gigabyte_laptop_method_implemented(BATT_CYCLE) &&
+			gigabyte_laptop_method_implemented(BATT_CYCLE2)) ? attr->mode : 0;
+
+	if (attr == &dev_attr_usb_charge_s3_toggle.attr)
+		return gigabyte_laptop_method_implemented(USB_SLEEP) ? attr->mode : 0;
+
+	if (attr == &dev_attr_usb_charge_s4_toggle.attr)
+		return gigabyte_laptop_method_implemented(USB_HIBERNATE) ? attr->mode : 0;
 
 	return attr->mode;
 }
