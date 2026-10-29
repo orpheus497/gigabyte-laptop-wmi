@@ -854,15 +854,45 @@ echo '2' | sudo tee /sys/devices/platform/gigabyte_laptop/perf_mode
 ## Dynamic boost (Gigabyte Gaming models)
 
 Gigabyte Gaming laptops support dynamic boost, which shifts power between the
-CPU and the discrete GPU under load. The embedded controller takes this value
-inverted, and the driver hides that, so the node reads back whatever was
-written to it: `0 -> 1 -> 0` round-trips correctly.
+CPU and the discrete GPU under load. The node is the conventional way around:
 
-**Which value means "enabled" is unverified.** It is `0` to disable and `1` to
-enable on the model this was ported from, but confirming it needs the GPU's
-power limit to respond, and on `GA65TH` that path is broken (see Performance
-mode above). The node is self-consistent either way; it may be semantically
-inverted.
+```
+0 = off      1 = on
+```
+
+```sh
+S=/sys/devices/platform/gigabyte_laptop
+cat $S/dynamic_boost                      # 0 or 1
+echo 1 | sudo tee $S/dynamic_boost        # allow power to shift
+```
+
+**The direction was wrong before 29 Oct 2026 and is now measured.** Earlier
+versions of this driver inverted the value on its way to the firmware, so
+writing `1` switched dynamic boost *off*. If you scripted around the old
+behaviour, invert what you write.
+
+It was settled by watching the GPU's power limit wander. With boost on, the
+platform raises `enforced.power.limit` above the tier `perf_mode` selected —
+measured going 60 W to 75 W and back with nothing being written. With boost
+off, the limit sits still at the tier. Four 120-second windows, including a
+control window that restored the original setting and saw the wandering
+return, which is what ruled out the alternative explanation that the
+excursions had simply stopped on their own.
+
+**You will only see an effect while the discrete GPU has work to do**, and
+only on mains. An idle card sits in its lowest power state and nothing
+arbitrates, so the limit is flat whatever this is set to. On battery the
+firmware withholds the power-limit table from `nvidia-powerd` altogether — see
+Performance mode above.
+
+```sh
+# watch it for yourself, with the GPU busy
+for i in $(seq 60); do
+	nvidia-smi --query-gpu=enforced.power.limit --format=csv,noheader
+	sleep 1
+done | sort | uniq -c
+# several values = boost is arbitrating; one value = it is not
+```
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/dynamic_boost`
 

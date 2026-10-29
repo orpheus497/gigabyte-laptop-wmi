@@ -76,7 +76,7 @@ MODULE_VERSION(GIGABYTE_LAPTOP_VERSION);
 
 // Gigabyte Gaming (2025+) models only (e.g. A16 CWH, A16 5TH)
 #define FAN_TURBO        0x7D // EC TFAN bit, max fan speed
-#define DYN_BOOST        0xE7 // NPCF dynamic boost (write 0 to enable)
+#define DYN_BOOST        0xE7 // NPCF dynamic boost (1 enables, 0 zeroes AMAT)
 #define PERF_MODE        0xED // NPCF perf mode, controls GPU TGP/CTGP boost
 
 // Adding support (WIP)
@@ -1645,8 +1645,22 @@ static ssize_t power_preset_store(struct device *dev, struct device_attribute *a
  * Dynamic boost (Gigabyte Gaming models).
  * Shifts power between the CPU and the discrete GPU under load.
  *
- * The EC takes this one inverted, so the value written is flipped. The node
- * itself reads and writes the conventional way around: 0 = off, 1 = on.
+ * The node reads and writes the conventional way around: 0 = off, 1 = on,
+ * and the value is sent to the firmware UNCHANGED. It used to be inverted
+ * here, which was backwards -- measured 29 Oct 2026 on a GA65TH.
+ *
+ * WMBD Case (0xE7) takes a raw 1 to restore NPCF.AMAT from LMAT and a raw 0
+ * to zero it. AMAT is the budget Dynamic Boost is allowed to shift between
+ * the CPU and the GPU, so a zeroed AMAT is boost switched off. The test
+ * watched enforced.power.limit over four 120-second windows: it wandered
+ * 60-75 W as found, held still at 60 W with the node at 1 under the old
+ * inverted write, and wandered again at 0 and again in the control window.
+ * So the old code's "on" was switching boost off.
+ *
+ * WMBC returns NPCF.DBAC, which the firmware sets to One on the same branch
+ * that zeroes AMAT -- it is a DISABLE flag, so the node reports its
+ * complement. Both halves changed together: removing the write inversion
+ * without adding the read one would have made the node lie about itself.
  */
 static ssize_t dynamic_boost_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -1670,7 +1684,7 @@ static ssize_t dynamic_boost_store(struct device *dev, struct device_attribute *
 		return -EINVAL;
 	}
 
-	ret = gigabyte_laptop_set_devstate(DYN_BOOST, !enable, &output);
+	ret = gigabyte_laptop_set_devstate(DYN_BOOST, enable, &output);
 	if (ret)
 		return ret;
 
@@ -3021,16 +3035,18 @@ obtain_custom_fan_speed:
 	 * what was last written to it, starting at eco after a cold boot
 	 * regardless of what the firmware is actually doing.
 	 *
-	 * Dynamic boost reads back NPCF.DBAC, which is already in the node's
-	 * own sense: writing 0 sets DBAC to 1. The inversion belongs on the
-	 * write path only.
+	 * Dynamic boost reads back NPCF.DBAC, which is a DISABLE flag: the
+	 * firmware sets it to One on the branch that zeroes AMAT. So the node's
+	 * value is its complement, and the write path sends the node value
+	 * unchanged. Measured, not inferred -- see the comment on
+	 * dynamic_boost_store().
 	 *
 	 * Turbo fan has no state of its own to read, being a combination of fan
 	 * mode and duty rather than a single value.
 	 */
 	if (gigabyte->gaming_family) {
 		if (!gigabyte_laptop_get_devstate(DYN_BOOST, &output))
-			gigabyte->dynamic_boost = output;
+			gigabyte->dynamic_boost = !output;
 		else
 			pr_info("Dynamic boost unsupported by this firmware\n");
 	}

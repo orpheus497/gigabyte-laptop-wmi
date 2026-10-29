@@ -642,7 +642,9 @@ Asymmetries that matter:
 | `0x51` | `gpu_boost` | **WMBD only — write-only.** `gpu_boost` reports the last written value, 0 after a cold boot. |
 | `0x6D`/`0x6E` | `battery_cycle` | Absent from both. Reads return the echoed argument, i.e. `0`, not an error. The real cycle count is at `BAT1/cycle_count` — see "The four nodes that read nothing". |
 
-One caveat on `dynamic_boost` that the firmware cannot settle: the ASL proves
+~~One caveat on `dynamic_boost` that the firmware cannot settle:~~ **SETTLED
+29 Oct 2026 — the direction was wrong and the node is fixed; see "Row 19
+ANSWERED". The paragraph below is the superseded reasoning.** the ASL proves
 the node **round-trips** (`write 0` → `DBAC = 1` → reads back `1`), but not
 which direction means "boost on". That rests on the fork's testing on a CWH.
 ~~Confirm against `nvidia-smi` in Step 2~~ — **the round-trip was confirmed in
@@ -2163,7 +2165,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~A2~~ | ~~Hide nodes whose methods the firmware lacks~~ **done 29 Oct 2026** — all four of `battery_cycle`, `usb_charge_s3_toggle`, `usb_charge_s4_toggle` and `light_sensor` are omitted at load rather than reporting a permanent `0`. The rule is now uniform: **a node that exists means the feature exists** | low |
 | ~~11~~ | ~~MUX encoding via `0xE6`~~ **done 29 Oct 2026 — two values measured.** `0x00` = MSHybrid (panel on iGPU), `0x01` = discrete (panel on dGPU), confirmed by the CMOS byte, the connected eDP and `boot_vga` all moving together. BIOS option: Peripherals → "Switchable Graphics device". A possible third value is unenumerated | low |
 | ~~18~~ | ~~`gpu_boost` inert in discrete mode?~~ **answered 29 Oct 2026 — INERT, and the `DPMF` decode is confirmed.** With the panel on the dGPU and the tier pinned at 60 W, `gpu_boost 0` left the floor at **60.00 W** where a landed write gives 50 W. The firmware skipped `Case (0x51)` exactly as the `If (DPMF != 0x02)` gate says it should | low |
-| 19 | **`dynamic_boost` direction — attempted 29 Oct 2026, inconclusive, test fixed.** Both node values pinned the limit while the baseline wandered, which is equally consistent with "the write pins it either way" and "the burst ended on its own". The script lacked a control window and its verdict text described a case it had not caught; both fixed. **Re-run with the control**, and note the direction may need package power under load rather than the limit's spread. See "Row 19 attempt 1" | low |
+| ~~19~~ | ~~`dynamic_boost` direction~~ **answered 29 Oct 2026 — the node was INVERTED, now fixed.** Four 120 s windows: node 1 pinned the limit at the 60 W tier, node 0 wandered 60-75 W, and the control window wandered again with 7 distinct values. Node 1 was being sent as raw 0, the branch that zeroes `AMAT`, so "on" was switching boost off. Write inversion removed and a read inversion added — `DBAC` is a disable flag. See "Row 19 ANSWERED" | low |
 | 12 | **Is detaching the dGPU worth anything?** Runtime D3 already works fine-grained on this card, and Linux already offers `pci .../remove` + `rescan`. Measure the power difference before building a firmware path that duplicates them | low |
 | ~~9~~ | ~~Does `WMBC 0xE1` lag or freeze under load?~~ **answered 29 Oct 2026 — it lags, by minutes.** `temp1` held at 66 °C for **120 consecutive samples** while `k10temp` swung 78→86→65, then moved once in the following 60 s. Not frozen, heavily damped. The EC's own fan control is unaffected and tracked the load correctly | low |
 
@@ -5265,6 +5267,58 @@ this observable at all. If writing either value pins the limit, then the
 limit's spread cannot distinguish the two branches, and settling the direction
 needs something else — sustained package power under load, where `AMAT`'s
 ±15 W budget would show as CPU/GPU power actually shifting.
+### Row 19 ANSWERED: `dynamic_boost` was inverted — 29 Oct 2026
+
+**The node's sense was backwards, and the fix is two lines.** Re-run with the
+control window added after the first attempt was inconclusive, four windows of
+120 s, `perf_mode` tier floor 60 W:
+
+```
+1  as-found (node 0)   min 60.00  max 75.00  distinct 2    wandered
+2  node = 1            min 60.00  max 60.00  distinct 1    PINNED
+3  node = 0            min 60.00  max 75.00  distinct 2    wandered
+4  as-found again       min 60.00  max 75.00  distinct 7    wandered  <- control
+```
+
+**The control is what makes this conclusive**, and it is why the first attempt
+failed. Window 4 restored the original setting and the limit wandered again —
+with **7** distinct values, more than the baseline's 2 — so the quiet window at
+node 1 cannot be dismissed as the burst having ended. One setting pins the
+limit, the other does not, and the effect comes back when the setting does.
+
+**What that means against the AML.** `WMBD Case (0xE7)` raw 0 sets
+`NPCF.AMAT = Zero`; raw 1 restores `AMAT = LMAT`. `AMAT` is the ±15 W budget
+Dynamic Boost shifts between CPU and GPU, so a zeroed `AMAT` is boost switched
+**off**. Node 1 pinned the limit, and node 1 was being sent as raw `!1` = 0 —
+the zeroing branch. **So the node's "on" was switching boost off.**
+
+**Fixed, and both halves had to move together:**
+
+| | before | after |
+|---|---|---|
+| write | `set_devstate(DYN_BOOST, !enable, …)` | `set_devstate(DYN_BOOST, enable, …)` |
+| probe read | `dynamic_boost = output` | `dynamic_boost = !output` |
+
+The read side matters as much as the write. `WMBC 0xE7` returns `NPCF.DBAC`,
+which the firmware sets to `One` on the same branch that zeroes `AMAT` — it is
+a **disable** flag. Under the old inverted write, `DBAC` happened to equal the
+node value, which is why this file previously recorded *"DBAC is already in the
+node's sense — invert on write only, never on read"*. That statement was
+**correct about the old code** and is the reason the bug survived: the node was
+self-consistent and simply meant the opposite of what it said. Removing the
+write inversion without adding the read one would have made it inconsistent
+as well as wrong.
+
+**The direction question is closed.** It had stood open since Phase 2, recorded
+as resting on the fork's testing on a CWH and unresolvable here because the
+TGP was pinned. It became answerable the moment the TGP started arbitrating,
+and the answer is that the fork's direction does not hold on this firmware.
+
+**`enforced.power.limit`'s spread is a usable observable after all**, which is
+worth noting since the same section had doubted it. What made it work was not
+a better statistic but a **control measurement** — the thing that distinguishes
+a setting having an effect from a burst ending on its own.
+
 ### `amd_pmf` binds, and two handlers coexist — 29 Oct 2026
 
 Row 8 is answered. `amd_pmf.force_load=1` plus a reboot and the driver binds:
