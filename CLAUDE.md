@@ -884,7 +884,7 @@ caught `0x63` and `0xE6`.
 | Index | Written by | What it holds |
 |---|---|---|
 | `0xD0` | `0xE6` | dGPU display MUX — BIOS: Peripherals → "Switchable Graphics device". Read masks with `& 0x7F`. **`0x00` = MSHybrid, `0x01` = discrete**, each measured twice in both directions, 29 Oct 2026, against the DRM connectors. Whether a third value exists is unknown; the option's own selector was never opened |
-| `0xD1` | `0xA3` | **Unidentified.** Read/write, purpose appears nowhere in the firmware, and **not USB sleep charging** — no USB option exists in setup. A Wake-on-LAN attempt was **inconclusive**, not negative: the byte did not move but the option's state change was never confirmed. Reads `0x1` in every sample ever taken |
+| `0xD1` | `0xA3` | **Unidentified.** Read/write, purpose appears nowhere in the firmware. Two candidates are now **eliminated**: **not USB sleep charging** (no USB option exists in setup) and **not Wake on LAN** (ruled out 30 Oct 2026 across a confirmed ON→OFF change, with `0xE6` as a positive control in the same log — see "ANSWERED 30 Oct 2026"). Remaining: RTC Support, SVM Enable, Network Stack. Reads `0x1` in every sample ever taken |
 | `0xD2`–`0xD6` | `0x63` | The five-byte block behind the misnamed `power_on_time` node |
 | `0xD9` | `0x88` | Battery LED, the persistent copy of `BLED` |
 | `0xDA` | `0x87` | Power LED, the persistent copy of `PLED` |
@@ -934,12 +934,20 @@ Three things follow, and the first two are what make this worth the space:
   `0x88`/`0x87` persist to `0xD9`/`0xDA`, and they are the only two rows in
   this table whose BIOS counterpart had never been seen. The map was derived
   from AML alone; the menu agrees with it.
-- **The remaining `0xD1` candidates are the four options not yet accounted
-  for**: RTC Support, Wake on LAN Enable, SVM Enable, Network Stack. Only one
-  slot is unidentified and four options are unmatched, so at most one of them
-  lives there and the other three are stored elsewhere — plain NVRAM rather
-  than this CMOS block. Identifying it still costs nothing and no code: read
-  `0xA3`, flip one of those four, read `0xA3` again.
+- **The remaining `0xD1` candidates are the options not yet accounted for**:
+  ~~RTC Support, Wake on LAN Enable, SVM Enable, Network Stack~~ — **Wake on
+  LAN was eliminated on 30 Oct 2026**, so it is **RTC Support, SVM Enable,
+  Network Stack**. Only one slot is unidentified and three options are
+  unmatched, so at most one of them lives there and the others are stored
+  elsewhere — plain NVRAM rather than this CMOS block. Identifying it still
+  costs nothing and no code: read `0xA3`, flip one of those three, read
+  `0xA3` again.
+
+  **It may well be none of them**, which is worth stating now that a candidate
+  has actually been tested rather than assumed. The reasoning that produced
+  this list — "a setup option has to be stored in extended CMOS somewhere" —
+  only ever established that *some* options are; it never established that
+  `0xD1` holds one of these. The USB hypothesis died the same way.
 
   **Flip Wake on LAN, not SVM.** SVM was recommended here first on the
   reasoning that it gates AMD-V and so is a real hardware toggle the firmware
@@ -949,14 +957,27 @@ Three things follow, and the first two are what make this worth the space:
   BIOS flip without checking what depends on it is the same class of error as
   handing over a sweep with no restore step.
 
-  ~~Wake on LAN is the right candidate~~ — **tried 29 Oct 2026 and it did not
-  move the byte**; see "Wake on LAN is probably not `0xD1`" below for the one
-  hole in that test. **RTC Support is the next one** — harmless to toggle,
+  ~~Wake on LAN is the right candidate~~ — **it was the right candidate to
+  try, and the answer is no.** The 29 Oct attempt was inconclusive because
+  nobody recorded the option's prior state; the 30 Oct re-run turned it off
+  from a known-on baseline and the byte still did not move. See "ANSWERED
+  30 Oct 2026: Wake on LAN is **not** slot `0xD1`" two headings below — and
+  note that this cross-reference previously pointed at a section title
+  ("Wake on LAN is probably not `0xD1`") that never existed under that name,
+  which is its own small lesson about citing headings from memory.
+
+  **RTC Support is the next one** if anyone continues — harmless to toggle,
   though it may affect `rtcwake`. **Network Stack is the one to skip**, being
   the option most likely stored with the other boot settings rather than here.
+  **Not SVM** while `kvm_amd` is loaded.
 
 
-#### Wake on LAN and `0xD1`: inconclusive, not negative
+#### Wake on LAN and `0xD1`: the inconclusive first attempt — superseded
+
+> **Settled 30 Oct 2026: Wake on LAN is NOT slot `0xD1`.** Jump to "ANSWERED
+> 30 Oct 2026" below for the clean result. This section is the first attempt
+> and the reason it proved nothing, kept because the flaw — changing a setting
+> without recording its prior state — is the whole method.
 
 **Tested 29 Oct 2026 by enabling "Wake on LAN Enable" in setup**, in the same
 BIOS visit that put the MUX back. `0xA3` did not move:
@@ -1001,28 +1022,64 @@ again.
 **So the status is inconclusive, not negative.** `0xA3` did not move, but
 nobody can say the thing it was supposed to track actually moved either.
 
-**The decisive version is now cheap, because the current state is known.** The
-option is **on** — deliberately set. Turn it **off** at the next BIOS visit and
-re-read: that is a guaranteed state change, so
+#### ANSWERED 30 Oct 2026: Wake on LAN is **not** slot `0xD1`
+
+**The decisive run happened, and it is a clean negative in both directions.**
+The prediction table was written before the test and the result matched the
+second row:
 
 | `0xA3` after turning it off | Verdict |
 |---|---|
 | `0x0` | Wake on LAN **is** slot `0xD1`. Identified |
-| still `0x1` | Wake on LAN is **not** `0xD1`. Properly ruled out |
+| **still `0x1`** | **Wake on LAN is not `0xD1`. Properly ruled out** ← this |
 
-Either answer is clean, which the first attempt could not be. Off is also the
-sensible resting state for a laptop, so this restores rather than disturbs.
+The script's whole log, which is why this is conclusive rather than another
+single reading:
+
+```
+29 Oct 15:56   0xE6 0x0   0xA3 0x1   amdgpu     before any BIOS visit
+29 Oct 16:03   0xE6 0x1   0xA3 0x1   nvidia     MUX -> discrete
+29 Oct 17:23   0xE6 0x1   0xA3 0x1   nvidia
+29 Oct 19:47   0xE6 0x0   0xA3 0x1   amdgpu     MUX -> MSHybrid, WoL turned ON
+30 Oct 00:56   0xE6 0x0   0xA3 0x1   amdgpu     baseline, nothing changed
+30 Oct 00:59   0xE6 0x0   0xA3 0x1   amdgpu     WoL turned OFF
+```
+
+**Both transitions are now covered**, which is what the 29 Oct attempt could
+not claim: OFF→ON across runs 1-4 and ON→OFF across runs 5-6. The byte never
+moved for either.
+
+**And the run carries its own positive control, which is the part that makes
+the negative worth anything.** `0xE6` tracked the graphics option perfectly in
+both directions in the same log — `0x0`→`0x1`→`0x0`, in lockstep with the
+panel moving between `card1-eDP-1 (amdgpu)` and `card2-eDP-2 (nvidia)`. So the
+method demonstrably detects a CMOS byte changing when one does. "`0xA3` did
+not move" is therefore a reading about `0xA3`, not about the test's
+sensitivity — the distinction the inconclusive first attempt lacked entirely.
+
+**The corrected procedure was followed, and that is why the comparison holds.**
+Run 5 is a baseline taken with nothing changed since run 4, then exactly one
+BIOS option changed, then run 6 — with a real reboot between them (booted
+00:58:21, between the 00:56:56 and 00:59:35 readings). No visit both restored
+one option and changed another, which is precisely the attribution failure the
+procedure was rewritten to prevent two sections ago.
+
 **Three candidates remain** — RTC Support, SVM Enable, Network Stack — and the
-standing advice holds: **not SVM** while `kvm_amd` is loaded. Nothing depends
-on identifying this slot; it is an unlabelled byte whose only motivation was
-USB charging, which closed by a different route.
+standing advice holds: **not SVM** while `kvm_amd` is loaded. **RTC Support is
+the next one** if anyone cares, harmless to toggle though it may affect
+`rtcwake`; **Network Stack is the one to skip**, being the most likely stored
+with the other boot settings.
 
-**Note for next time: record the option's original value before changing it.**
-The script's own instructions say so and this run did not, which is why the
-result is provisional rather than clean.
-**None of this is urgent.** No feature depends on `0xD1`; it is an unlabelled
-byte, and the only reason to chase it was USB charging, which is now closed by
-a different route.
+**But nothing depends on this and it should probably stop here.** `0xD1` is an
+unlabelled byte; the only motivation for chasing it was USB sleep charging,
+which closed separately when BIOS setup turned out to have no USB option at
+all. Two of the four candidates are now eliminated and the remaining two cost
+two reboots each for a fact with no consumer.
+
+**The note that produced this result, kept because it is the method:** record
+the option's original value before changing it. The 29 Oct attempt did not,
+which is the entire reason it was provisional — "the byte did not move" and
+"the thing it tracks did not move either" are indistinguishable without it.
 
 ### The four nodes that read nothing — and they are four different cases
 
