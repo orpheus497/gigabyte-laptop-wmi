@@ -232,6 +232,12 @@ for f in product_serial board_serial chassis_serial product_uuid; do
 done
 ```
 
+**Scope — and the narrowness was the hole.** A third run on 29 Oct 2026 took
+the enumeration to **commit history** rather than the tree and found the
+battery serial surviving in sixteen commits, five of them public. See "The
+removed battery serial is still in pushed history". The paragraph below is the
+original scope note, which was accurate and insufficient.
+
 **Scope, stated because it is narrower than the 24 Oct run:** `git grep` with no
 revision searches the **tracked working tree**, not history. The 24 Oct audit
 covered all 435 blobs in history, for a different set of identifiers; this one
@@ -294,7 +300,7 @@ except as noted:
 | MAC addresses | `ip -o link` | clean |
 | filesystem UUIDs | `lsblk -no UUID` | clean |
 | disk serial | `/sys/class/nvme/nvme0/serial` | clean |
-| **battery serial** | `/sys/class/power_supply/BAT1/serial_number` | **was present — removed** |
+| **battery serial** | `/sys/class/power_supply/BAT1/serial_number` | **was present — removed from the tree, but STILL IN PUSHED HISTORY**; see "The removed battery serial is still in pushed history" |
 | IP addresses | `ip -4 -o addr` | clean |
 | SSH host keys | `/etc/ssh/ssh_host_*.pub` | clean |
 | network names | `nmcli connection show` | clean |
@@ -316,6 +322,66 @@ prefix. Process IDs are ephemeral and identify nothing, but they are noise in a
 document and `<pid>` reads better — one was replaced in `USAGE.md` for that
 reason on the same day.
 
+
+### The removed battery serial is still in pushed history — 29 Oct 2026
+
+**"Removed" meant removed from the working tree. It is still in sixteen
+commits, five of which are public.** The audit table above records the battery
+serial as *"was present — removed"*, which reads as closed and is not. Found by
+re-running the source enumeration against **commit history** rather than the
+tree, which is a scope no previous audit here had used.
+
+```
+commits containing it, local            16
+of those, reachable from a remote ref    5
+remote branches carrying it              origin/a16-5th-gmate
+                                         origin/p4-rem-a15
+current working tree                     clean
+```
+
+The surviving line is in an older `CLAUDE.md` blob and reads *"the live unit
+reports `<serial>`"* — the quotation that the 29 Oct note already identified as
+unnecessary to the argument it was supporting. So this is the same leak, not a
+second one; what is new is knowing it was never actually retracted.
+
+**It predates this work.** The 39 commits on `a16-5th-phase-a` introduce **no**
+identifier from the enumerated list — hostname, machine-id, boot id, NVMe
+serial, both MACs, all four filesystem UUIDs, both global IPs, SSH host keys
+and every network name all come back clean against those commits.
+
+**Two methodological points, and the first is the one that generalises.**
+
+- **Deleting a leak from the tree does not delete it from history, and a
+  pushed history is public.** This file already records the same shape for a
+  build artifact — `git rm --cached` left the blob reachable — and reasoned
+  there that 13 KB of ELF was not worth a rewrite. **Per-unit data is a
+  different calculus from a stray binary**, and the earlier note's reasoning
+  should not be read across to it. **Audit history, not just the tree:**
+  `git grep -F -- "$v" $(git rev-list --all)`.
+- **A short identifier defeats a naive search in both directions.** This serial
+  is **four characters**, short enough to match by coincidence constantly — so
+  a hit is not evidence on its own, and a careless check would dismiss the real
+  one as noise. The surrounding line is what settles it. Conversely a four-byte
+  needle makes a "clean" result on a large corpus weaker than it looks.
+
+**Exposure, stated plainly rather than minimised or inflated.** A battery
+serial is per-unit data and is exactly the class this audit exists to exclude,
+so it should not be there. It is also not a credential, does not identify a
+person, and cannot be reversed to anything — the practical risk is low. **Both
+halves are true and neither cancels the other.**
+
+**The decision is the repo owner's, and the two options are not close in
+cost:**
+
+| Option | Cost |
+|---|---|
+| **Leave it, documented** | nothing; the record is now accurate |
+| **Rewrite history** | force-push to the fork, and it **invalidates every commit hash this file cites** — see Branches, where two retired branches are kept solely because they are the last refs for hashes referenced here |
+
+**The second option is more destructive than it first looks**, which is why it
+is spelled out: a rewrite does not just change `a16-5th-gmate`, it orphans the
+CI evidence, the review history and the commit citations throughout this file.
+Weigh that against four characters of battery identity.
 ### Method IDs present in the AMD sibling
 
 Verified by reading the `Switch` case lists directly:
@@ -1230,6 +1296,14 @@ menu works through it; `power-profiles-daemon` itself is **not** wanted.
 
 ### amd_pmf is one kernel parameter away from binding
 
+> **Row 8 is answered and the parameter was removed again on 29 Oct 2026.**
+> `amd_pmf` binds with `force_load=1`, registers a second `platform_profile`
+> handler, and its trusted-application session fails so nothing else of it
+> runs. It was removed on the evidence that it contributes a duplicate handler
+> with a narrower choice list and nothing else. **So the state below is the
+> live state again** -- loaded and unbound -- but by choice rather than by
+> default. See "`amd_pmf` binds, and two handlers coexist".
+
 `amd_pmf` is loaded but unbound. The platform device
 `/sys/devices/platform/AMDI0100:00` exists with no `driver` link, so
 `amd_pmf_probe()` ran and returned `-ENODEV`. Exactly one gate fails:
@@ -1396,7 +1470,8 @@ defect, not a review.
 | `a16-5th-gmate` | **Integration branch. All work lands here.** |
 | `a16-5th` | Retired 24 Oct 2026. Local only; deleted on the fork. **Do not delete.** |
 | `a16-5th-kbd-charge-uevent` | PR #2's feature branch, merged. Local only; deleted on the fork. **Do not delete.** |
-| `p4-rem-a15` | Scratch branch cut from `7a54031`, **and the checkout is on it.** No upstream configured — the same trap as the two retired branches, below. |
+| `p4-rem-a15` | Scratch branch cut from `7a54031`. No upstream configured — the same trap as the two retired branches, below. **The checkout is no longer on it**; see the row below |
+| `a16-5th-phase-a` | **Where the checkout is, and where the whole 29 Oct session landed — 39 commits.** No upstream, on no remote, and **not merged into `a16-5th-gmate`.** Builds clean and every script passes syntax, so it is ready to land; it simply has not been |
 
 **The integration branch changed on 24 Oct 2026, and the old name is a trap.**
 PR #3 squash-merged the whole of `a16-5th` onto `a16-5th-gmate` as `8dad4e1`,
@@ -2263,12 +2338,17 @@ listed 25 entries, the other seven being device-core
 `uevent`). With 1b done, nothing blocks Step 2.
 
 Those counts are the Step 1b snapshot. The figure now, verified on the installed
-build, is **20** driver attributes (`debug_method_write` joined them) out of
-**30** directory entries, the other ten being device-core — the three additions
-being `input`, `leds` and `platform-profile`, one per interface Steps 3 and 5
-and the keyboard backlight registered. Re-count with
-`ls /sys/devices/platform/gigabyte_laptop` rather than trusting this number,
-since it goes stale every time a node lands.
+build, was **20** driver attributes (`debug_method_write` joined them) out of
+**30** directory entries, the other ten being device-core -- the three
+additions being `input`, `leds` and `platform-profile`, one per interface
+Steps 3 and 5 and the keyboard backlight registered.
+
+**It is 27 entries as of 29 Oct 2026**, four fewer because `battery_cycle`,
+both `usb_charge_*` toggles and `light_sensor` are now hidden at load when the
+firmware lacks their methods. **Re-count with
+`ls /sys/devices/platform/gigabyte_laptop` rather than trusting any number
+here**, which is the standing instruction precisely because this figure has
+gone stale three times.
 
 The load log is itself free reconnaissance, because Step 1 made every optional
 read report itself. On this machine it printed only `Skipping silent fan mode ID
