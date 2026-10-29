@@ -366,6 +366,35 @@ Two things follow, and the second is the one that keeps biting:
   in four-letter EC mnemonics throughout, so the case list is the index and
   there is no searchable vocabulary above it.
 
+
+### Methodological: the older dumps are a decoder for this firmware
+
+**Added 29 Oct 2026, and it closed a question this file had declared
+unanswerable.** The Gaming generation collapsed a table that the Aero and
+AORUS generations still carry in AML.
+
+The pattern, in the one case where it has been used: the 5TH announces every
+EC event through a single generic handler, `_Q45 { SMGR (WEVN, WEVS) }`, with
+the event *number* written by EC firmware. Nothing in the 5TH dump names any
+event. The Aero dump has **seventeen** separate `_Qxx` handlers, each with its
+event number as an AML literal next to the EC field it reports — so it is a
+lookup table for exactly the thing the newer firmware hides.
+
+**The rule: when the current firmware forwards a value opaquely, check whether
+an older one assigned it explicitly.** This file's standing warning that method
+IDs do not transfer across generations is about *semantics changing*; it is not
+a reason to skip reading the older dumps, and it was being applied as though it
+were. The two concerns are different: a method ID may be reused for something
+else, while a *name-to-number table* is either present or absent.
+
+**Validate the transfer with an anchor rather than assuming it.** Here the
+anchor is `0xF6`: the Aero AML says `SMGR (0xF6, KBLL)`, and `0xF6` was
+independently observed on this machine toggling with Fn+Space. One confirmed
+entry is what licenses reading the rest off the same table — without an anchor
+this would be cross-generation guessing of the kind the rest of this file warns
+against.
+
+See "A fourth event number fires on this machine" for the decode itself.
 ### WMBC echoes unknown method IDs — this breaks naive validation
 
 Both methods end with a catch-all:
@@ -2496,22 +2525,117 @@ So:
 | `0xCE` | GiMate key |
 | `0xCC` | Mode key (Fn+F7) |
 | `0xF6` | keyboard backlight level, published by the EC — see Step 6a |
-| `0xC8` | **unidentified**, see below |
+| `0xC8` | a **hotkey or button**, specific key unidentified — EC query `_Q41` on the older generation, between mute and Fn-lock. Stateless. See below |
+| `0xEF` | **the lid** — `_Q70`/`_Q71`, which also `Notify (LID0, 0x80)`. Observed as a `0x00`/`0x01` close/open pair. The kernel handles the lid itself, so there is nothing for this driver to do |
 
 *The assignment follows the press order and is worth one confirming press each
 before it is baked into a keymap.*
 
-**A fourth event number fires on this machine and nobody knows what it is —
-found 26 Oct 2026.** `Unrecognised WMI event 0xc8 (state 0x00)`, logged exactly
-**ten** times in one boot, in two clusters a couple of minutes apart and not at
-any periodic interval. It is not in the table above and no keypress has been
-correlated with it.
+**A fourth event number fires on this machine — found 26 Oct 2026, decoded
+29 Oct 2026.** `Unrecognised WMI event 0xc8 (state 0x00)`. It is a **hotkey or
+EC-button event**, and the older firmware dumps in this repo name where it
+comes from.
 
-It cannot be chased statically. `WEVN` is written by the EC's own firmware and
+~~It cannot be chased statically. `WEVN` is written by the EC's own firmware and
 the AML only forwards it — `_Q45 { SMGR (WEVN, WEVS) }` at
 `GAMING-A16-5TH-DSDT.dsl:8487` is the single caller — so there is nothing in any
-dumpable table that names `0xC8`. The next step is observational: correlate the
-clusters against lid, AC, thermal or dock transitions.
+dumpable table that names `0xC8`.~~ **Wrong, and this is the correction worth
+carrying forward.** Everything in that sentence is true *of the 5TH dump* and
+the conclusion drawn from it does not follow, because **the Aero and AORUS
+firmwares assign these event numbers in AML, one `_Qxx` handler per event.**
+The Gaming generation collapsed them into a single generic forwarder and moved
+the assignment into EC firmware; the older generation still has the table, and
+it is committed here.
+
+**The vocabulary is shared across generations, and `0xF6` proves it rather than
+merely suggesting it.** `Aero-15-Classic-DSDT.dsl:61170` is
+`_Q94 { SMGR (0xF6, KBLL) }` — and `0xF6` was independently observed on *this*
+machine toggling in step with Fn+Space and the keyboard backlight, which is how
+`max_brightness` was measured. So one entry in the old table is confirmed by
+observation on the new hardware, and the rest can be read off it.
+
+**The full Aero event vocabulary**, every `SMGR` call in that dump with its EC
+query:
+
+| Event | Query | Payload | What it is |
+|---|---|---|---|
+| `0xC1` | `_Q87` | `BTON` | Bluetooth |
+| `0xC2` | `_Q81` | `WNON` | WLAN |
+| `0xC5` | `_Q89` | `CDON` | optical drive |
+| `0xC6` | `_Q57` | `Zero` | unidentified |
+| `0xC7` | `_Q40` | `MUTE` | mute |
+| **`0xC8`** | **`_Q41`** | **`Zero`** | **unidentified — the one in question** |
+| `0xC9` | `_Q42` | `Zero` | Fn-lock (`FNKS`, per the method table) |
+| `0xCA` | `_Q33` | `PSON` | power source |
+| `0xCF` | `_Q64` | `Zero` | unidentified |
+| `0xD1` | `_Q93` | `One` | unidentified |
+| `0xEF` | `_Q70`, `_Q71` | `LSTE` | **lid** — both handlers also `Notify (LID0, 0x80)` |
+| `0xF4` | `_Q83`, `_Q84` | `One`/`Zero` | a toggle pair |
+| `0xF5` | `_Q85`, `_Q86` | `One`/`Zero` | a toggle pair |
+| `0xF6` | `_Q94` | `KBLL` | keyboard backlight — **confirmed on the 5TH** |
+
+**What is now settled about `0xC8`:**
+
+- **It is `WEVN`, the EC's own event number** — byte 0 of the payload
+  `{WEVN, WEVS, 0xBB, 0xCC}` that `_WED` returns. It is **not** an ACPI notify
+  value: that is `0xD2`, and it is the same for every event on this interface.
+  It is **not** an artifact of how the driver logs things either; the driver
+  prints byte 0 verbatim.
+- **It carries no state.** `SMGR (0xC8, Zero)` passes a constant, which is why
+  every occurrence ever logged here reads `state 0x00`. A handler for it can
+  never learn anything from byte 1.
+- **It is in a contiguous hotkey block** — `_Q40` mute, `_Q41` this, `_Q42`
+  Fn-lock — so it is a key or button, not a thermal, power or dock event.
+
+**What it is not: a boot-time event.** This section said "logged exactly ten
+times in one boot", which was accurate and reads as though it fires during
+startup. It does not. Across **15 boots** of journal history it appears in
+**three**, always minutes to hours after boot:
+
+```
+boot -14   4 events   21:27:36  21:27:40  21:27:51  21:28:07
+boot  -9  10 events   09:48:29  09:48:52 | 09:50:34 ... 09:50:58  (8 in 24 s)
+boot  -6   1 event    12:54:11
+```
+
+Twelve boots have none at all. So firmware initialisation and queued-notify
+theories are both out — it is something a person does.
+
+**The leading guess, stated as a guess: a volume key.** It sits between mute
+and Fn-lock in the query block, it is stateless the way a "something happened"
+announcement is, the eight-in-24-seconds burst has the rhythm of repeated key
+presses, and KDE's audio settings panel was open in the journal two minutes
+before that cluster. **None of that is proof** and the firmware does not name
+it — there is no volume field anywhere near `MUTE` in either old dump, and the
+`_Q41` body carries no comment.
+
+**Settling it costs one minute and needs no code.** Watch the log and press
+things:
+
+```sh
+journalctl -kf | grep -i "unrecognised WMI event"
+```
+
+Then work through the Fn row and any side buttons. The event number names
+itself the moment the right key is pressed. **`0xEF` is worth a press too** —
+closing and opening the lid should produce the `0x00`/`0x01` pair, which would
+confirm the lid decode on this hardware the same way `0xF6` confirmed the
+keyboard backlight one.
+
+**`0xEF` is the lid, and that one does not need a guess.** `_Q70` and `_Q71`
+both send `SMGR (0xEF, LSTE)` *and* `Notify (LID0, 0x80)` — the ACPI lid
+status-change notify — so the event number and the device are named together in
+the same handler. Observed here as `0xef (state 0x00)` followed by
+`0xef (state 0x01)`, sixteen minutes apart in one boot and nearly two hours in
+another, which is a lid being closed and later opened. The kernel already
+handles the lid through `LID0`, so **there is nothing for this driver to do
+with it** — it is logged because the keymap does not cover it, and that is the
+correct outcome.
+
+**A note on the ACPI path, since it is easy to get wrong from other people's
+write-ups.** The WMI device on this machine is `\_SB.PCI0.AMW0`, not
+`\_SB.PC00.AMW0`. `PC00` is Intel host-bridge naming; this firmware contains
+**zero** occurrences of it and declares `Device (PCI0)`.
 
 **It surfaced by itself, which is the point worth keeping.** The driver logs
 every event the keymap does not cover rather than dropping it, so an event
