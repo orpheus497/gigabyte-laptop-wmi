@@ -729,7 +729,7 @@ caught `0x63` and `0xE6`.
 | Index | Written by | What it holds |
 |---|---|---|
 | `0xD0` | `0xE6` | dGPU display MUX — BIOS: Peripherals → "Switchable Graphics device". Read masks with `& 0x7F`. **`0x00` = MSHybrid, `0x01` = discrete**, each measured twice in both directions, 29 Oct 2026, against the DRM connectors. Whether a third value exists is unknown; the option's own selector was never opened |
-| `0xD1` | `0xA3` | **Unidentified, and now bounded.** Read/write, purpose appears nowhere in the firmware, and **it is not USB sleep charging** — BIOS setup has no USB option at all; see the menu enumeration below |
+| `0xD1` | `0xA3` | **Unidentified.** Read/write, purpose appears nowhere in the firmware, **not USB sleep charging** (no USB option exists in setup), and **probably not Wake on LAN** — enabling it did not move the byte, though the original state went unrecorded. Reads `0x1` in every sample ever taken |
 | `0xD2`–`0xD6` | `0x63` | The five-byte block behind the misnamed `power_on_time` node |
 | `0xD9` | `0x88` | Battery LED, the persistent copy of `BLED` |
 | `0xDA` | `0x87` | Power LED, the persistent copy of `PLED` |
@@ -794,12 +794,59 @@ Three things follow, and the first two are what make this worth the space:
   BIOS flip without checking what depends on it is the same class of error as
   handing over a sweep with no restore step.
 
-  Wake on LAN is the right candidate: it is equally a device-level toggle the
-  firmware has to act on, and nothing on this machine uses it. RTC Support is
-  second — harmless to toggle, though it may affect `rtcwake`. **Network Stack
-  is the one to skip**, being the option most likely stored with the other boot
-  settings rather than here.
+  ~~Wake on LAN is the right candidate~~ — **tried 29 Oct 2026 and it did not
+  move the byte**; see "Wake on LAN is probably not `0xD1`" below for the one
+  hole in that test. **RTC Support is the next one** — harmless to toggle,
+  though it may affect `rtcwake`. **Network Stack is the one to skip**, being
+  the option most likely stored with the other boot settings rather than here.
 
+
+#### Wake on LAN is probably not `0xD1`, and the test has one hole
+
+**Tested 29 Oct 2026 by enabling "Wake on LAN Enable" in setup**, in the same
+BIOS visit that put the MUX back. `0xA3` did not move:
+
+```
+15:56  0xE6 -> 0x0    0xA3 -> 0x1    (before any BIOS visit)
+16:03  0xE6 -> 0x1    0xA3 -> 0x1    (MUX -> discrete)
+17:23  0xE6 -> 0x1    0xA3 -> 0x1
+19:47  0xE6 -> 0x0    0xA3 -> 0x1    (MUX -> MSHybrid, WoL turned ON)
+```
+
+`0xE6` tracked the MUX perfectly in both directions. `0xA3` has read `0x1` in
+every run ever taken, including before any option was touched.
+
+**The hole: the option was turned ON, and nobody recorded whether it was
+already on.** If it was already enabled then "turning it on" changed nothing,
+and a byte that does not move tells you nothing at all — the same
+both-hypotheses-predict-the-same-output trap this file keeps catching. And
+there is a coincidence worth being suspicious of: `0xA3` reads `0x1`, WoL is
+now on, and `1` is exactly what an enabled flag would read.
+
+**The check that closes it costs one command**, because the NIC's own WoL state
+is readable and the BIOS option is what seeds it:
+
+```sh
+sudo ethtool eno1 | grep -i 'Wake-on'
+#   Wake-on: g   -> magic-packet wake armed; the BIOS change DID take effect,
+#                   so 0xA3 not moving is a real negative
+#   Wake-on: d   -> disabled; the setting did not reach the NIC, and this
+#                   test measured nothing
+```
+
+**And the decisive version, if it still matters:** set the option to **off**
+and re-read. A `0xA3` of `0x0` identifies the slot outright; unchanged at `0x1`
+rules WoL out properly, whichever way it started. Worth folding into any BIOS
+visit that is happening anyway rather than making a trip for it.
+
+**Three candidates remain** — RTC Support, SVM Enable, Network Stack — and the
+standing advice holds: **not SVM** while `kvm_amd` is loaded. Nothing depends
+on identifying this slot; it is an unlabelled byte whose only motivation was
+USB charging, which closed by a different route.
+
+**Note for next time: record the option's original value before changing it.**
+The script's own instructions say so and this run did not, which is why the
+result is provisional rather than clean.
 **None of this is urgent.** No feature depends on `0xD1`; it is an unlabelled
 byte, and the only reason to chase it was USB charging, which is now closed by
 a different route.
@@ -5394,6 +5441,52 @@ case for removing it rests only on the TA-session failure above, which is
 reason enough. See "Settled: the MUX caused the arbitration, not `amd_pmf`".
 
 
+
+### The GPU power contract passes 14/14 in hybrid mode — 29 Oct 2026
+
+**The regression test that reported three failures two hours earlier now passes
+completely**, and nothing about the driver changed between those runs. Both
+causes were in the measurement, and both are now fixed or absent:
+
+```
+== the three perf_mode tiers ==
+  perf_mode 0                        50.00 W    ok
+  perf_mode 1                        60.00 W    ok
+  perf_mode 2                        70.00 W    ok
+== gpu_boost is a second axis under the tier ==
+  gpu_boost 0 at tier 2              50.00 W    ok
+  gpu_boost 1 at tier 2              70.00 W    ok
+== power_preset pins a tier against the profile ==
+  power_preset boost                 70.00 W    ok
+  low-power while pinned to boost    70.00 W    ok
+== auto re-tethers to the profile ==
+  auto, profile is low-power         50.00 W    ok
+== the profile mapping drives both axes ==
+  low-power    50.00 W  fan_mode=1   ok
+  balanced     60.00 W  fan_mode=1   ok
+  performance  70.00 W  fan_mode=0   ok
+
+  14 passed, 0 failed
+```
+
+**Two independent things were wrong before and neither was the driver.** The
+single-sample reads landed inside arbitration excursions — fixed by taking the
+minimum over a 30-second window. And the `gpu_boost` checks were measuring a
+node the firmware was skipping, because the MUX was in discrete mode — now
+detected and reported as skipped rather than failed, and in hybrid mode they
+run and pass.
+
+**This is the baseline a GUI is written against**, so it is worth stating what
+it establishes as a contract rather than as a measurement:
+
+- the three `perf_mode` tiers floor at **50 / 60 / 70 W** on mains
+- `gpu_boost` is a genuine second axis: `0` drops to 50 W from *any* tier,
+  `1` returns to the tier's own value
+- `power_preset` pinning outranks a profile switch, and `auto` re-tethers
+- a profile moves **both** axes together, GPU tier and fan mode
+
+**Run it after any BIOS update, kernel change or driver change.** A failure now
+means something real, which was not true while the sampling was unsound.
 ### Settled: the MUX caused the arbitration, not `amd_pmf` — 29 Oct 2026
 
 **The free experiment ran and gave a clean answer.** The design was to change
