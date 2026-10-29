@@ -382,7 +382,7 @@ compositor itself commonly holds the discrete GPU:
 
 ```
 pid, process_name
-2267, /usr/bin/kwin_wayland        <- detaching now takes the GPU from your session
+<pid>, /usr/bin/kwin_wayland       <- detaching now takes the GPU from your session
 ```
 
 If anything is listed, stop it first — or accept that it loses the device.

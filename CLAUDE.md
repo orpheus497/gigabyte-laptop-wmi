@@ -254,14 +254,67 @@ Three things look alarming in a naive grep and are not:
 - **`"41167"` sits in the ACPI `_BIX` BatterySerialNumber slot of both A16
   DSDTs** — and it is a firmware placeholder, not this unit's data. Three
   independent reasons, which is why this is a proof rather than a reassurance:
-  the live unit reports `2287`; the AML overwrites the package at runtime via
-  `EC0.UB1I (STAX)`, so the literal is only what the table *ships* with; and the
-  identical literal is in the public 3VH dump, from somebody else's machine.
+  the live unit reports **a different value**, which is the whole of what that
+  leg needs — read it off `/sys/class/power_supply/BAT1/serial_number` rather
+  than from here, because **the literal used to be quoted in this paragraph and
+  was removed on 29 Oct 2026**: it is this unit's own battery serial, which is
+  exactly the class of per-machine data the audit above exists to keep out. The
+  AML overwrites the package at runtime via `EC0.UB1I (STAX)`, so the shipped
+  literal is only what the table *ships* with; and the identical literal is in
+  the public 3VH dump, from somebody else's machine.
   **This is the one serial-shaped literal in the tree**, so a future serial grep
   will hit it, which is why the proof belongs here alongside the other two
   rather than being re-derived every time.
 
 Re-run the audit the same way after committing any new firmware dump.
+
+### The audit method has a hole, and it has leaked once — 29 Oct 2026
+
+**Grepping the tree for identifiers finds only the identifiers you thought of.**
+That is the same error this file names elsewhere about keyword searches — "a
+keyword search cannot prove a feature absent" — and it applies to privacy
+exactly as it applies to firmware. Both audits above were run that way, and
+both reported clean, and **one identifier was in the tree the whole time**: see
+the `_BIX` bullet, where this unit's own battery serial was quoted in prose to
+support an argument that never needed the value.
+
+**The fix is to enumerate the sources rather than the values.** The set of
+unique-and-persistent data on a Linux machine is finite, so walk the list and
+check each, instead of inventing patterns. Checked 29 Oct 2026, all clean
+except as noted:
+
+| Source | Path | Result |
+|---|---|---|
+| hostname | `hostname` | clean |
+| machine-id | `/etc/machine-id` | clean |
+| boot id | `/proc/sys/kernel/random/boot_id` | clean |
+| DMI serials ×3 | `/sys/class/dmi/id/{product,board,chassis}_serial` | clean |
+| DMI system UUID | `/sys/class/dmi/id/product_uuid` | clean |
+| asset tags ×2 | `/sys/class/dmi/id/*_asset_tag` | both literally `Default string` |
+| MAC addresses | `ip -o link` | clean |
+| filesystem UUIDs | `lsblk -no UUID` | clean |
+| disk serial | `/sys/class/nvme/nvme0/serial` | clean |
+| **battery serial** | `/sys/class/power_supply/BAT1/serial_number` | **was present — removed** |
+| IP addresses | `ip -4 -o addr` | clean |
+| SSH host keys | `/etc/ssh/ssh_host_*.pub` | clean |
+| network names | `nmcli connection show` | clean |
+| ACPI licence tables | `MSDM`, `SLIC` | never committed; `*.dat` gitignored |
+
+**Three categories that look alarming and are not**, so they do not get
+re-investigated: model name and BIOS version are *model*-level and are the
+whole point of a DMI-matching driver; PCI addresses, ACPI device paths and
+firmware line numbers are identical on every unit of a given model and BIOS;
+and measurements — temperatures, watts, RPM, clocks — identify nothing.
+
+**And the rule that actually prevents recurrence, because the table above is
+still a list somebody has to remember:** before committing, read the diff for
+**live-system output** specifically — anything pasted from a command run on
+this machine rather than read out of a firmware dump. That is the only place
+unit data can enter. Log excerpts are the sharpest case: a `journalctl` line
+carries hostname and PID in its prefix, so quote the message and drop the
+prefix. Process IDs are ephemeral and identify nothing, but they are noise in a
+document and `<pid>` reads better — one was replaced in `USAGE.md` for that
+reason on the same day.
 
 ### Method IDs present in the AMD sibling
 
