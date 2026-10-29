@@ -6,22 +6,33 @@
 # decoding a value. The only way to find out what an option controls is to
 # change it in BIOS setup and see which byte moved.
 #
-#   0xE6 -> CMOS 0xD0   the display MUX. One value is anchored: 0x00 means the
-#                       panel is on the integrated GPU, confirmed against the
-#                       DRM connectors. The rest of the encoding is unknown and
-#                       must NOT be written on a guess -- it is consumed at the
-#                       next boot, so a wrong value can route the panel to a
-#                       GPU whose driver is not up. Look for a BIOS option
-#                       named Graphics Mode, GPU Mode, MUX Switch, Display
-#                       Mode, Discrete Graphics or Hybrid.
+#   0xE6 -> CMOS 0xD0   the display MUX, and two of its values are now known:
+#                       0x00 is MSHybrid (panel on the integrated GPU) and 0x01
+#                       is discrete (panel on the discrete one), both confirmed
+#                       against the DRM connectors and boot_vga. The BIOS option
+#                       is Peripherals -> "Switchable Graphics device". Whether
+#                       a third value exists is still open -- the option's own
+#                       selector was never opened -- and anything beyond those
+#                       two must NOT be written on a guess: it is consumed at
+#                       the next boot, so a wrong value can route the panel to
+#                       a GPU whose driver is not up.
 #
-#   0xA3 -> CMOS 0xD1   purpose appears NOWHERE in the firmware. It is the only
-#                       unaccounted settings slot, which makes it the one lead
-#                       for USB sleep charging: usb_charge_s3_toggle and _s4
-#                       have no firmware method behind them, but the BIOS
-#                       setting may still live here. Look for USB Charge, Power
-#                       On USB, USB Power Share, Charging in S3/S4 or
-#                       Always-on USB.
+#   0xA3 -> CMOS 0xD1   purpose appears NOWHERE in the firmware, and it is still
+#                       the only unaccounted settings slot.
+#
+#                       It is NOT USB sleep charging. That was this slot's one
+#                       lead and it is dead: BIOS setup on FB03 has no USB
+#                       option of any kind, so there is no setting for it to be
+#                       holding. Do not go looking for USB Charge, Power On
+#                       USB, USB Power Share or Always-on USB -- they are not
+#                       in the menu.
+#
+#                       The four options in Peripherals not yet matched to a
+#                       slot are RTC Support, Wake on LAN Enable, SVM Enable
+#                       and Network Stack. At most one of them lives here. SVM
+#                       is the one worth trying first: it gates AMD-V, so it is
+#                       a real hardware toggle the firmware has to act on at
+#                       boot. Nothing depends on identifying this slot.
 #
 # Usage: sudo bash tests/test-cmos-slots.sh
 #
@@ -127,18 +138,28 @@ cmp_field panel "$p_panel" "$PANEL"
 echo
 if [ "$changed" -eq 0 ]; then
 	cat <<-'EOF'
-	Nothing moved. The option you changed lives somewhere other than these two
-	slots -- try a different one, or if BIOS setup has no graphics-mode and no
-	USB-charging option at all, both slots close as unresolvable. That is a real
-	answer: 0xE6 then stays read-only permanently, and USB sleep charging stays
-	closed with nothing depending on it.
+	Nothing moved. The option you changed is stored somewhere other than these
+	two slots -- plain NVRAM rather than this CMOS block -- which is the
+	expected result for most of them: only one slot is unaccounted for and
+	there are four unmatched options in Peripherals, so at most one of the four
+	is here.
+
+	Try another one. RTC Support, Wake on LAN Enable, SVM Enable and Network
+	Stack are the candidates; SVM first, since it gates AMD-V and the firmware
+	has to act on it at boot.
+
+	If all four come back unchanged, 0xD1 closes as unidentifiable from the
+	menu, which is a real answer and costs nothing: no feature depends on it.
 	EOF
 else
 	cat <<-'EOF'
 	Record which BIOS option you changed against the slot that moved, in
-	CLAUDE.md under "The extended-settings slot map". A second anchored value
-	for 0xE6 is what makes its encoding usable; a move in 0xA3 identifies the
-	last unaccounted slot and reopens USB sleep charging as implementable.
+	CLAUDE.md under "The extended-settings slot map".
+
+	A third anchored value for 0xE6 completes the MUX encoding -- 0x00 and 0x01
+	are already known. A move in 0xA3 finally names the last unaccounted slot,
+	which is a curiosity rather than a feature: USB sleep charging is closed
+	separately, by the menu having no USB option at all.
 	EOF
 fi
 

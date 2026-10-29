@@ -686,8 +686,8 @@ caught `0x63` and `0xE6`.
 
 | Index | Written by | What it holds |
 |---|---|---|
-| `0xD0` | `0xE6` | dGPU display MUX — BIOS: Peripherals → "Switchable Graphics device". Read masks with `& 0x7F`. **`0x00` = MSHybrid, `0x01` = discrete**, both measured 29 Oct 2026 against the DRM connectors. Whether a third value exists is unknown; the menu was not enumerated |
-| `0xD1` | `0xA3` | **Unidentified.** Read/write, and its purpose appears nowhere in the firmware |
+| `0xD0` | `0xE6` | dGPU display MUX — BIOS: Peripherals → "Switchable Graphics device". Read masks with `& 0x7F`. **`0x00` = MSHybrid, `0x01` = discrete**, both measured 29 Oct 2026 against the DRM connectors. Whether a third value exists is unknown; the option's own selector was never opened |
+| `0xD1` | `0xA3` | **Unidentified, and now bounded.** Read/write, purpose appears nowhere in the firmware, and **it is not USB sleep charging** — BIOS setup has no USB option at all; see the menu enumeration below |
 | `0xD2`–`0xD6` | `0x63` | The five-byte block behind the misnamed `power_on_time` node |
 | `0xD9` | `0x88` | Battery LED, the persistent copy of `BLED` |
 | `0xDA` | `0x87` | Power LED, the persistent copy of `PLED` |
@@ -697,18 +697,67 @@ inside its LED case, once per branch, and never read back — the live `EC0.BLED
 / `EC0.PLED` field is what the EC acts on and the CMOS byte is what survives a
 boot.
 
-**`0xD1` is the only genuinely unknown slot**, which makes it the sole remaining
-candidate for a BIOS-level toggle such as USB sleep charging. Identifying it
-costs nothing and no code: read `0xA3`, change the relevant option in BIOS
-setup, read `0xA3` again. It piggybacks on any reboot that is happening anyway.
+**`0xD1` is the only genuinely unknown slot**, and the USB hypothesis for it is
+**dead — 29 Oct 2026.** It was the sole remaining candidate for a BIOS-level
+toggle such as USB sleep charging, on the reasoning that a setup option has to
+be stored in extended CMOS somewhere. The reasoning was sound; the premise was
+not. **BIOS setup on FB03 has no USB option of any kind.** The Peripherals menu
+was photographed in full:
+
+```
+Peripherals
+  Trusted Computing
+  Onboard Device Configuration        RTC Support
+                                      Wake on LAN Enable
+                                      SVM Enable
+  NVMe Configuration
+  Switchable Graphics device          [MSHybrid]
+  Battery LED Enable/Disable
+  Power LED Enable/Disable
+  Network Stack
+```
+
+Three things follow, and the first two are what make this worth the space:
+
+- **USB sleep charging closes for good on this machine.** Not "unidentified" —
+  **absent from the firmware's own settings menu**, which is a stronger
+  negative than the missing `0x7A`/`0x7B` methods on their own. There is no
+  option to flip, so there is nothing `0xD1` could be holding for it, and the
+  two `usb_charge_*` nodes have no feature behind them by any route. See "The
+  four nodes that read nothing".
+- **The LED entries corroborate the slot map independently.** "Battery LED
+  Enable/Disable" and "Power LED Enable/Disable" are exactly the two settings
+  `0x88`/`0x87` persist to `0xD9`/`0xDA`, and they are the only two rows in
+  this table whose BIOS counterpart had never been seen. The map was derived
+  from AML alone; the menu agrees with it.
+- **The remaining `0xD1` candidates are the four options not yet accounted
+  for**: RTC Support, Wake on LAN Enable, SVM Enable, Network Stack. Only one
+  slot is unidentified and four options are unmatched, so at most one of them
+  lives there and the other three are stored elsewhere — plain NVRAM rather
+  than this CMOS block. Identifying it still costs nothing and no code: read
+  `0xA3`, flip one of those four, read `0xA3` again. **SVM is the one worth
+  trying first** (it gates AMD-V, so it is a real hardware toggle the firmware
+  must act on at boot) and **Network Stack the one to avoid** — turning PXE off
+  and on is harmless, but it is the option most likely to be stored with the
+  other boot settings rather than here.
+
+**None of this is urgent.** No feature depends on `0xD1`; it is an unlabelled
+byte, and the only reason to chase it was USB charging, which is now closed by
+a different route.
 
 ### The four nodes that read nothing — and they are four different cases
 
 **Enumerated 26 Oct 2026, and the point is that they are not one problem.**
 Four driver attributes sit on method IDs this firmware does not implement, and
 a blanket "four inert nodes" is the wrong summary: one is **redundant**, one is
-**impossible**, and two are **open with a concrete next step**. The verdicts
+**impossible**, and two were **open with a concrete next step**. The verdicts
 differ and so should the work.
+
+**All four are closed as of 29 Oct 2026**, the last two by the BIOS menu
+enumeration under "The extended-settings slot map": there is no USB option in
+setup at all, so the `usb_charge_*` pair has no feature behind it by any route.
+The four-way split below is the reasoning that got each one there and is worth
+keeping, because the verdicts were reached four different ways.
 
 They are also not inventions. All six IDs behind them exist on the older
 Gigabyte firmware the driver grew up on, and on neither A16 dump — so these are
@@ -763,19 +812,29 @@ firmware's own `0xF7` marker in byte 0 separates them. Both tests now live in
 `gigabyte_laptop_light_sensor_method()`, shared by `probe()` and `is_visible()`
 so the two cannot drift apart.
 
-**`usb_charge_s3_toggle` / `usb_charge_s4_toggle` — open, with exactly one
-lead.** `USB_SLEEP 0x7A` and `USB_HIBERNATE 0x7B` are both absent, and there is
-no live EC field for the feature either: `EC0.USBC`, 8 bits at `:8117`, has one
-reference — its own declaration, the same dead-slot pattern as `ALST`. `USB1`
-and `USB3` at `:4199-4201` are a red herring; they are PCI interrupt routing,
-written by `INTC` alongside `PIRC` at `:4266-4267`.
+**`usb_charge_s3_toggle` / `usb_charge_s4_toggle` — closed 29 Oct 2026. The
+feature does not exist on this machine.** It had exactly one lead and the lead
+is dead.
 
-**The lead is CMOS slot `0xD1` via command `0xA3`**, from the slot map above: it
-is the only extended-settings index in this firmware whose purpose appears
-nowhere in it, which is exactly the shape of a BIOS-menu toggle. Sleep-charging
-is a setup option on these machines, and a setup option is stored in extended
-CMOS. Identify it the cheap way — read `0xA3`, flip the BIOS option, read it
-again — before writing a line of code against it.
+The firmware facts are unchanged. `USB_SLEEP 0x7A` and `USB_HIBERNATE 0x7B` are
+both absent, and there is no live EC field for the feature either: `EC0.USBC`,
+8 bits at `:8117`, has one reference — its own declaration, the same dead-slot
+pattern as `ALST`. `USB1` and `USB3` at `:4199-4201` are a red herring; they
+are PCI interrupt routing, written by `INTC` alongside `PIRC` at `:4266-4267`.
+
+~~**The lead is CMOS slot `0xD1` via command `0xA3`**~~ — that was the only
+remaining candidate, on the reasoning that a BIOS-menu toggle has to be stored
+in extended CMOS somewhere, and that sleep charging is a setup option on these
+machines. **It is not a setup option on this one.** BIOS setup on FB03 has no
+USB entry of any kind; the Peripherals menu is enumerated in full under "The
+extended-settings slot map".
+
+**That is a stronger negative than the missing methods were**, which is why it
+closes the question rather than parking it. Two absent WMI methods only say the
+driver's route is gone; an absent BIOS option says the firmware does not
+implement the behaviour at all, so there is nothing for any route to reach.
+**The two nodes are already hidden at load** by the `is_visible` gate — the
+right outcome, and now for a confirmed reason rather than a provisional one.
 
 ### `DPMF` is the display-MUX flag, and it gates `gpu_boost` — 29 Oct 2026
 
@@ -860,15 +919,19 @@ Note the DRM card numbers renumber across the switch (`card0`/`card1` became
 `card1`/`card2`), so **never identify a card by its index** — match on the
 driver name, which is what the test script does.
 
-**Whether a third value exists is unknown.** The menu was photographed showing
-MSHybrid but its full option list was not enumerated, so a "dGPU only" or
-"dynamic" third setting may exist. Reading `0xE6` from it would cost one more
-reboot and would complete the table.
+**Whether a third value exists is unknown.** The Peripherals menu itself has
+since been enumerated in full -- see "The extended-settings slot map" -- but
+that is the list of *options*, not the list of *values* behind this one. The
+option was photographed reading `MSHybrid` without its selector open, so a
+"dGPU only" or "dynamic" third setting may still exist. Reading `0xE6` from it
+would cost one more reboot and would complete the table.
 
 **`0xA3` did not move**, which is a clean negative for the other half: the
-option changed was the graphics one, so slot `0xD1` remains unidentified and
-USB sleep charging stays closed. A BIOS visit that changes a *USB* option is
-what would settle that.
+option changed was the graphics one, so slot `0xD1` remains unidentified.
+~~A BIOS visit that changes a *USB* option is what would settle that.~~
+**There is no USB option to change** — the Peripherals menu was photographed in
+full on the same visit and contains none, which closes USB sleep charging by a
+better route than `0xD1` ever could. See "The extended-settings slot map".
 
 **The EC can do the detach and attach by itself, with no WMI involved.** Found
 on both Gaming dumps:
@@ -2029,12 +2092,12 @@ Both commits build clean with `-Wall -Wextra`.
 | 15 | **The dGPU never reaches D3cold.** `nvidia_drm.modeset=1` makes it a KMS device with an HDMI connector, so the compositor holds it open; it idles at 3.1 W in P8 instead of powering off. Not a driver defect — but it is what decides whether the detach feature is worth anything (row 12) | low |
 | ~~7~~ | ~~`perf_mode`'s APU-power half via `ECPT`~~ **answered 29 Oct 2026 — it DOES control APU package power.** Under a `stress-ng matrixprod` load the package stepped **64 → 65 → 79 W** across modes 0/1/2, matching the firmware's `ECPT` sPPT/fPPT figures of 65/65/80 W exactly. The earlier "no limit bound" result came from a load that drew 62 W and never reached the 65 W ceiling. See "`perf_mode` controls APU power after all" | low |
 | ~~17~~ | ~~`gpu_boost` on AC~~ **done 29 Oct 2026 — it is a real second power axis**, and the `ACBT` decode predicted it exactly: `gpu_boost 0` → 50 W, `1` → back to the tier's value, 4/4 predictions correct | low |
-| 8 | **`amd_pmf.force_load=1`** — one kernel parameter and a reboot, fully reversible. Settles whether APMF binds and what a second `platform_profile` handler does to the aggregate | medium |
+| ~~8~~ | ~~**`amd_pmf.force_load=1`**~~ **done 29 Oct 2026 — APMF binds, and two `platform_profile` handlers coexist without the aggregate going `custom`.** The cost is that the GPU power limit stopped being a stable number; see "`amd_pmf` binds, and two handlers coexist" | medium |
 | ~~10~~ | ~~dGPU attach/detach — fix the `0x51` bounds~~ **done 29 Oct 2026** — the node takes the full 0-4 and the detach/restore pair is whole again; detach is logged, not refused, and the firmware supplies the interlock. See "`DPMF` is the display-MUX flag" | low |
 | 13 | **Exercise the detach and restore on hardware.** `_EJ0` is present and Linux sees the card as ejectable, so the mechanism is real; what is untested is whether the out-of-tree nvidia driver unbinds and re-probes cleanly. Stop GPU workloads first, recover with `4` or a PCI rescan | medium |
 | ~~A2~~ | ~~Hide nodes whose methods the firmware lacks~~ **done 29 Oct 2026** — all four of `battery_cycle`, `usb_charge_s3_toggle`, `usb_charge_s4_toggle` and `light_sensor` are omitted at load rather than reporting a permanent `0`. The rule is now uniform: **a node that exists means the feature exists** | low |
 | ~~11~~ | ~~MUX encoding via `0xE6`~~ **done 29 Oct 2026 — two values measured.** `0x00` = MSHybrid (panel on iGPU), `0x01` = discrete (panel on dGPU), confirmed by the CMOS byte, the connected eDP and `boot_vga` all moving together. BIOS option: Peripherals → "Switchable Graphics device". A possible third value is unenumerated | low |
-| 18 | **The machine is currently in discrete mode, and that makes `gpu_boost` inert — testable now.** `Case (0x51)` sits inside `If (DPMF != 0x02)` and the panel is on the dGPU, so the firmware should skip the whole routine. Sweeping `gpu_boost` 0/1 and seeing `enforced.power.limit` *not* move is the direct confirmation of the `DPMF` decode, and the window closes as soon as the MUX goes back | low |
+| 18 | **`gpu_boost` should be inert in discrete mode — half-confirmed, one write away from settled.** `Case (0x51)` sits inside `If (DPMF != 0x02)` and the panel is on the dGPU today. Live reading at `perf_mode 1`: a flat **60 W across 25 samples**, which is the tier — so `perf_mode` is unaffected (`Case (0xED)` has no `DPMF` gate, only an `ACST` branch, checked in the AML). The remaining write is `gpu_boost 0`: **50 W means it still works, 60 W means the firmware skipped the case.** Needs the min-of-window method, not a single sample | low |
 | 12 | **Is detaching the dGPU worth anything?** Runtime D3 already works fine-grained on this card, and Linux already offers `pci .../remove` + `rescan`. Measure the power difference before building a firmware path that duplicates them | low |
 | ~~9~~ | ~~Does `WMBC 0xE1` lag or freeze under load?~~ **answered 29 Oct 2026 — it lags, by minutes.** `temp1` held at 66 °C for **120 consecutive samples** while `k10temp` swung 78→86→65, then moved once in the following 60 s. Not frozen, heavily damped. The EC's own fan control is unaffected and tracked the load correctly | low |
 
@@ -4844,6 +4907,127 @@ limit takes a few seconds to settle, so a value read immediately after a write
 reports the *previous* one. And `perf_mode` has no read method, so after a raw
 `debug_method_write` the node reports a stale number until it is written
 through the node itself.
+
+### `enforced.power.limit` drifts on its own — 29 Oct 2026
+
+**Every GPU power figure in this file was taken as a single sample, and that
+method is unsound once Dynamic Boost is arbitrating.** Measured with
+`perf_mode=1`, `gpu_boost=1`, `power_preset=auto` and **nothing being
+written**:
+
+```
+t= 5s  60 W     t=20s  75 W     t=35s  75 W
+t=10s  60 W     t=25s  75 W     t=40s  60 W
+t=15s  60 W     t=30s  75 W
+```
+
+The limit rose 15 W unprompted, held for twenty seconds, and fell back. So
+`enforced.power.limit` is **the currently arbitrated limit, not a setting**, and
+a single read reports wherever arbitration happens to be at that instant.
+
+**This explains a result that looked like a regression and was not.** A
+`test-gpu-power.sh` run reported `11 passed, 3 failed`, with
+`perf_mode 1 -> 75 W` and `perf_mode 2 -> 85 W` failing early — and then the
+*same tiers* passing at 60 W and 70 W later in the same run, reached through
+the profile path. Nothing changed between them except the moment of sampling.
+85 W is `power.max_limit`, which is where an excursion tops out.
+
+**The right statistic is the minimum over a window**, because arbitration
+raises the limit above the tier's base and never below it, so the floor *is*
+the tier. `tests/test-gpu-power.sh` now samples for `LIMIT_SAMPLES` seconds and
+takes the minimum, with the window deliberately longer than the ~20 s
+excursion observed above.
+
+**What woke it up is `amd_pmf` binding.** The earlier hybrid-mode measurements
+were repeatable to the watt across several runs — 4/4 predictions on the
+`ACBT` decode — because arbitration was quiet with no second power manager
+present. That is why the decode held then and why single samples were adequate
+then; neither is true now.
+
+**So the `ACBT` decode is not withdrawn, but its evidence is weaker than it
+looked.** The tiers still floor at 50/60/70 W, which is what the formula
+predicts and what the min-of-window readings give. What can no longer be
+claimed is that a one-shot read of this value measures anything.
+
+**The drift is intermittent, not continuous — measured the same day, same
+configuration.** A 25-sample window taken later with `amd_pmf` still bound, the
+MUX still in discrete and nothing being written gave **60 W on every single
+sample.** So arbitration is quiet much of the time and excursions come in
+bursts; the earlier run caught one and this one did not.
+
+**That makes the min-of-window method necessary rather than merely tidy.** A
+quiet window and a drifting window are indistinguishable from inside a single
+reading, so there is no way to know which kind you are in — which means every
+reading has to be taken as if it might be the drifting kind. What a quiet
+window does *not* do is license going back to single samples.
+
+### `amd_pmf` binds, and two handlers coexist — 29 Oct 2026
+
+Row 8 is answered. `amd_pmf.force_load=1` plus a reboot and the driver binds:
+
+```
+/sys/devices/platform/AMDI0100:00/driver -> ../../../bus/platform/drivers/amd-pmf
+
+gigabyte_laptop   profile=balanced   choices=low-power quiet balanced performance
+amd-pmf           profile=balanced   choices=low-power balanced performance
+aggregate         balanced
+```
+
+**They agree, so the aggregate is a real profile rather than `custom`.** That
+was the failure mode this file predicted and designed around: the aggregate is
+the intersection of both handlers' choices, so `quiet` is now offered by one
+handler and not the other, and the aggregate reads `custom` the moment they
+disagree. They do not disagree today because `tuned` drives both through the
+same legacy path.
+
+**`test-gpu-power.sh` refuses to run against a `custom` aggregate**, which was
+written before `amd_pmf` existed here and is now a live guard rather than a
+hypothetical one.
+
+**The cost is the arbitration above.** Binding `amd_pmf` gave the machine a
+second power manager, and the GPU limit stopped being a stable number. That is
+the trade to weigh before leaving it enabled: it is one `grubby --remove-args`
+and a reboot to undo.
+
+### In discrete mode: `perf_mode` still works, `gpu_boost` is the one gated
+
+**The machine is in discrete MUX mode as of 29 Oct 2026** — panel on the
+nvidia eDP, `boot_vga` on the dGPU — which is the one configuration where the
+firmware's own `DPMF` gate can be observed doing something. It will stay that
+way until the BIOS option is put back, so this is a window rather than a
+permanent state.
+
+**`perf_mode` is unaffected, and that is read off the AML rather than assumed.**
+`Case (0xED)` has no `DPMF` test anywhere in it; it branches on
+`EC0.ACST` alone, which is the AC/DC split. Only `Case (0x51)` is wrapped in
+`If ((DPMF != 0x02))`. Confirmed live at `perf_mode 1` on AC: **60 W flat
+across 25 consecutive samples**, which is exactly the mode-1 tier, so the
+tier is still being programmed and consumed in discrete mode.
+
+**`gpu_boost` is the remaining question, and one write settles it.** With the
+tier at 60 W:
+
+| `gpu_boost 0` reads | Meaning |
+|---|---|
+| **50 W** | the write still lands — `DPMF` is not 2, or the gate does not do what the AML says |
+| **60 W** | the firmware skipped the whole case — the `DPMF` decode is confirmed |
+
+**Take the minimum over a window of at least 25 s, not a single sample.** This
+is the measurement the arbitration finding above invalidates, and it has
+already produced one wrong conclusion in this project: a single-sample
+observation of the limit going from **75 W to 60 W** after writing
+`gpu_boost 0` was read as "the node still works in discrete mode, so the
+prediction was wrong". **It is the opposite.** 75 W is an arbitration
+excursion above the 60 W tier, and 60 W *is* the tier — which is what *inert*
+predicts. A working `gpu_boost 0` would have given 50 W. So that reading
+supports the gate rather than refuting it, and the only reason it looked like a
+refutation is that it compared a drifted value against a settled one.
+
+**Why this is worth a window of effort at all**: the hybrid-mode sweep got
+4/4 predictions right for `gpu_boost` (row 17), so the node demonstrably works
+when `DPMF != 2`. A clean negative in discrete mode is therefore a direct test
+of the `DPMF` decode itself, not just of the node — and the decode is what the
+whole MUX section rests on.
 
 ### Decoded: `ACBT` is the boost headroom, in ⅛ W — 29 Oct 2026
 

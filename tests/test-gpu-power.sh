@@ -28,6 +28,10 @@ P=/sys/devices/platform/gigabyte_laptop
 PROFILE=/sys/firmware/acpi/platform_profile
 SETTLE=6           # the enforced limit takes several seconds to update;
                    # reading sooner reports the PREVIOUS value
+LIMIT_SAMPLES=12   # seconds of sampling per reading, minimum taken -- see
+                   # limit(). Must outlast an arbitration excursion, which was
+                   # measured at around twenty seconds, so this is deliberately
+                   # long rather than a token average.
 
 die() { echo "$*" >&2; exit 1; }
 say() { printf '\n== %s ==\n' "$*"; }
@@ -39,7 +43,27 @@ command -v nvidia-smi >/dev/null || die "needs nvidia-smi to read the power limi
 [ "$(cat /sys/class/power_supply/ACAD/online 2>/dev/null)" = 1 ] || \
 	die "not on AC -- the GPU power path is firmware-blocked on battery"
 
-limit() { nvidia-smi --query-gpu=enforced.power.limit --format=csv,noheader; }
+limit_now() { nvidia-smi --query-gpu=enforced.power.limit --format=csv,noheader; }
+
+# enforced.power.limit is the ARBITRATED limit, not a static setting. Measured
+# 29 Oct 2026 with amd_pmf bound and nothing being written: it sat at 60 W,
+# rose to 75 W unprompted for twenty seconds, and fell back to 60 W. A single
+# sample therefore reports wherever Dynamic Boost happens to be at that
+# instant, which is how three checks "failed" in a run whose later checks
+# passed on the very same tiers.
+#
+# The minimum over a window is the right statistic: arbitration raises the
+# limit above the tier's base and never below it, so the floor is the tier.
+limit() {
+	local i v lo=""
+	for i in $(seq "$LIMIT_SAMPLES"); do
+		v=$(limit_now); v=${v%% *}
+		[ -z "$lo" ] && lo=$v
+		awk -v a="$v" -v b="$lo" 'BEGIN{exit !(a<b)}' && lo=$v
+		sleep 1
+	done
+	printf '%s W' "$lo"
+}
 
 PROFILE_WAS=$(cat "$PROFILE")
 

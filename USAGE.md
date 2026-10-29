@@ -461,6 +461,12 @@ created there.** Both method IDs are absent from that generation, and there is
 no live controller field behind the feature either. The driver checks at load
 time and omits both nodes rather than publishing toggles that always read `0`.
 
+**It is not a driver gap — the feature is not in the firmware at all.** BIOS
+setup on this generation has no USB option of any kind, so there is nothing to
+enable by any route: not through this driver, not through a BIOS setting, and
+not through a vendor tool. Confirmed on a `GA65TH` running BIOS FB03 by reading
+the whole Peripherals menu.
+
 ## Keyboard backlight
 
 Exposed as an **LED class device**, not as a node under the platform directory:
@@ -617,6 +623,28 @@ on battery.** Measured 29 Oct 2026 on AC, reading
 A power limit is a setting, not a measurement, so it moves at idle — the sweep
 needs no load. Allow a few seconds after each write before reading back; the
 limit does not update instantly.
+
+**Read the limit as a minimum over a window, not as a single sample.**
+`enforced.power.limit` is the limit Dynamic Boost is *currently* arbitrating,
+not the tier that was selected, and it moves on its own. Measured on this
+machine with nothing being written: 60 W for fifteen seconds, then 75 W for
+twenty, then back to 60 W. Sampling once lands wherever arbitration happened to
+be at that instant.
+
+The tier is the **floor**, because arbitration only ever raises the limit above
+the selected base. So sample for 25 seconds or more and take the smallest value:
+
+```sh
+for i in $(seq 25); do
+	nvidia-smi --query-gpu=enforced.power.limit --format=csv,noheader
+	sleep 1
+done | sort -n | head -1
+```
+
+This matters most on a machine where `amd_pmf` is loaded, which adds a second
+power manager and is what woke the arbitration up here. Readings taken before
+that were repeatable to the watt. `tests/test-gpu-power.sh` does this sampling
+itself.
 
 **On battery it does nothing**, and that half is genuinely blocked below this
 driver. `nvidia-powerd` reports `DC power limits table is not supported` and
