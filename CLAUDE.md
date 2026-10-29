@@ -1499,17 +1499,39 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   worth a comment if either is ever touched.
 - **`gpu_boost` value 3 is a dGPU *eject* request, not a boost level.**
   ~~And the range check lets it through on any unit where the ejector probe
-  does not fire.~~ **Fixed 29 Oct 2026: the cap is now `mode > 2`,
-  unconditional**, so both 3 and its restore are refused on every model and the
-  `has_dgpu_ejector` test is gone from the handler. The rest of this entry is
-  the analysis that produced the fix and is kept for it.
+  does not fire.~~ **Fixed 29 Oct 2026: the node now accepts the full 0-4 the
+  firmware implements**, the `has_dgpu_ejector` test is gone from the handler,
+  and a detach is logged rather than refused. The rest of this entry is the
+  analysis that produced the fix and is kept for it.
 
-  Three reasons the cap sits at 2 rather than being made conditional, all from
-  firmware rather than preference: `has_dgpu_ejector` is derived from DMI and
-  cannot track which firmware carries the eject branch; 3 and 4 are a matched
-  pair, so leaving only the destructive half reachable was the actual defect;
-  and on AORUS firmware values 2 and 3 both set `NPCF.DTGP` with the same
-  notify, so refusing 3 loses nothing there.
+  **The defect was the asymmetry, not the feature.** A first attempt capped at
+  2 instead, which removed working hardware support from a driver whose whole
+  purpose is to expose it. That is recorded rather than quietly corrected
+  because the reasoning was circular: it inherited upstream's
+  `// Disable dGPU ejector mode for now` as though it were a finding, when it
+  is their caution about something they had not investigated. **This project's
+  default is to expose what the hardware does**, and a safety argument has to
+  clear a higher bar than "upstream was wary".
+
+  **Value 3 is a real, kernel-serviced mechanism, confirmed 29 Oct 2026.**
+  `Notify (PEGP, 0x03)` is `ACPI_NOTIFY_EJECT_REQUEST`, and this firmware
+  provides `_EJ0` — not in any committed dump, so it lives in an SSDT we do not
+  hold, but Linux found it and exposes the card as ejectable:
+
+  ```
+  /sys/bus/acpi/devices/LNXVIDEO:00/path  ->  \_SB_.PCI0.GPP0.PEGP
+  /sys/bus/acpi/devices/LNXVIDEO:00/eject     present
+  physical_node                           ->  0000:01:00.0  (the RTX 5050)
+  ```
+
+  It is the **only** ejectable ACPI device on the machine. So the kernel
+  responds with an orderly offline-and-unbind, not a surprise removal.
+
+  **The interlock is the firmware's and needs nothing from us**: the case body
+  sits inside `If (DPMF != 0x02)`, so a detach is refused while the panel is on
+  the dGPU. What the firmware does *not* check is whether anything is using the
+  GPU, which is why the driver logs the detach and `USAGE.md` documents the
+  sequence and the recovery.
 
   Found 24 Oct 2026 by reading `Case (0x51)` against the handler.
   `WMBD 0x51` value 3 is `Notify (^^GPP0.PEGP, 0x03) // Eject Request`, and
@@ -1807,7 +1829,8 @@ Both commits build clean with `-Wall -Wextra`.
 | 6b | RGB **colour** over `/dev/hidraw2` — not started, no precedent on this hardware. Open-ended research, not a blocker | high |
 | 7 | **`perf_mode`'s APU-power half via `ECPT`** — opened 24 Oct 2026. Sweep 0→1→2 under sustained AC load and watch package power and all-core clock. Needs no new code and no reverse engineering; the highest-value experiment left. See "`perf_mode` has a second half" | low |
 | 8 | **`amd_pmf.force_load=1`** — one kernel parameter and a reboot, fully reversible. Settles whether APMF binds and what a second `platform_profile` handler does to the aggregate | medium |
-| ~~10~~ | ~~dGPU attach/detach — fix the `0x51` bounds~~ **done 29 Oct 2026** — cap is unconditional at 2, so the eject and its restore are both refused on every model rather than the destructive half alone being reachable. See "`DPMF` is the display-MUX flag" | low |
+| ~~10~~ | ~~dGPU attach/detach — fix the `0x51` bounds~~ **done 29 Oct 2026** — the node takes the full 0-4 and the detach/restore pair is whole again; detach is logged, not refused, and the firmware supplies the interlock. See "`DPMF` is the display-MUX flag" | low |
+| 13 | **Exercise the detach and restore on hardware.** `_EJ0` is present and Linux sees the card as ejectable, so the mechanism is real; what is untested is whether the out-of-tree nvidia driver unbinds and re-probes cleanly. Stop GPU workloads first, recover with `4` or a PCI rescan | medium |
 | ~~A2~~ | ~~Hide nodes whose methods the firmware lacks~~ **done 29 Oct 2026** — `battery_cycle`, `usb_charge_s3_toggle`, `usb_charge_s4_toggle` are now omitted at load rather than reporting a permanent `0`. `light_sensor` is **not** gated and is the remaining candidate | low |
 | 11 | **MUX encoding via `0xE6`** — one value anchored (`0x00` = panel on iGPU). Identify the rest from a known state before ever writing it; a wrong value is consumed at the next boot and can black the panel | **high if written** |
 | 12 | **Is detaching the dGPU worth anything?** Runtime D3 already works fine-grained on this card, and Linux already offers `pci .../remove` + `rescan`. Measure the power difference before building a firmware path that duplicates them | low |
@@ -3287,7 +3310,7 @@ Sorted by how likely each is to be accepted, for when that time comes:
 | Candidate | Why it should go up |
 |---|---|
 | `gpu_boost_store()` oops (#45) | Dereferenced `gigabyte` before assigning it; any write oopsed the kernel |
-| `gpu_boost` mode-3 eject bound | **Fixed 29 Oct 2026 — the cap is now unconditional at 2.** Was: `mode >= 3` blocked only when `has_dgpu_ejector` is set, then `if (mode > 3)` permitted 3 — a dGPU **eject request** — while rejecting 4, its restore. Argue it as a matched pair the handler split, not as a reachable bug. See Hazards |
+| `gpu_boost` split detach/restore pair | **Fixed 29 Oct 2026 — the node now takes the full 0-4 the firmware implements.** Was: `mode >= 3` blocked only when `has_dgpu_ejector` is set, then `if (mode > 3)` permitted 3 — a dGPU eject — while rejecting 4, its restore. The defect was the asymmetry, not the feature. See Hazards |
 | Typed read refuses a BUFFER | An unimplemented ID echoes its argument into an `int` and returns success, so an absent method reads as a genuine `0`. Five lines, and it fixes a live `0xFA` silent-fan misdetection on every model outside the three early-exit DMI families |
 | Duty clamp (#46) | Duties above `FAN_DUTY_MAX` stop the fans on an AERO 17-XA |
 | Void-WMBD tolerance | `set_devstate()` reported `-EINVAL` for a third of this firmware's setters; see below |

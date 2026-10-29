@@ -325,30 +325,70 @@ Aero/AORUS laptops support boosting the discrete GPU's power limit. Even though 
 
 Laptops with RTX 3000 series GPUs or newer have three different modes, while older models have one.
 
-**On Gigabyte Gaming (2025+) firmware this node means something different, and
-the driver's range does not match it.** Reading the firmware for that
-generation, the accepted values are:
+**On Gigabyte Gaming (2025+) firmware this node does more than set a boost
+level.** Reading the firmware for that generation, the accepted values are:
 
 | Value | What the firmware does |
 |---|---|
 | `0` | disable the NPCF boost state |
 | `1` | enable it |
 | `2` | **nothing — no branch exists for it** |
-| `3` | **request a dGPU eject** (detach the discrete GPU from the PCI bus) |
+| `3` | **detach the discrete GPU** — an ACPI eject request the kernel services with an orderly unbind |
 | `4` | restore the discrete GPU and rescan the bus |
 
-**The driver accepts 0, 1 and 2 only.** Values 3 and 4 are a matched
-detach/restore pair rather than boost levels, and both are refused on every
-model — ejection is deliberately not implemented, so the restore has nothing to
-undo. The cap is unconditional and does not depend on model detection.
+**The driver accepts the full 0-4 range.** Values 3 and 4 are a matched
+detach/restore pair rather than boost levels, and both are available.
 
-And the whole routine is **gated on the display MUX**: it runs only while the internal panel is driven by the integrated GPU,
-which the firmware enforces itself so that you cannot detach the GPU drawing
-your screen. Check which GPU owns the panel with:
+### Detaching and restoring the discrete GPU
+
+Value 3 is not a blunt power cut. `Notify (PEGP, 0x03)` is
+`ACPI_NOTIFY_EJECT_REQUEST`, the standard signal a laptop sends when a device
+is being removed, and Linux responds by **offlining the device and unbinding
+its driver in order** before calling the firmware's `_EJ0`. On a GAMING A16
+5TH the kernel recognises the card as ejectable and says so:
+
+```sh
+cat /sys/bus/acpi/devices/LNXVIDEO:00/path
+# \_SB_.PCI0.GPP0.PEGP          <- the discrete GPU
+ls  /sys/bus/acpi/devices/LNXVIDEO:00/eject
+# present -- the firmware provides _EJ0
+```
+
+**The firmware enforces the interlock that matters.** The whole routine is
+gated on the display MUX and runs only while the internal panel is driven by
+the integrated GPU — you cannot detach the GPU that is drawing your screen,
+and the firmware refuses rather than trusting the caller. Check which GPU owns
+the panel with:
 
 ```sh
 grep -l '^connected$' /sys/class/drm/card*-eDP-*/status
+# .../card1-eDP-1/status with card1 = amdgpu -> panel on the iGPU, detach allowed
 ```
+
+**What the firmware does not check is whether anything is using the GPU.**
+That part is yours. Stop GPU workloads first — a detach while something is
+rendering relies on the graphics driver handling removal gracefully, which is
+not guaranteed for out-of-tree drivers:
+
+```sh
+nvidia-smi                      # confirm no processes are using it
+echo '3' | sudo tee /sys/devices/platform/gigabyte_laptop/gpu_boost
+```
+
+**Restoring it**, either way works:
+
+```sh
+echo '4' | sudo tee /sys/devices/platform/gigabyte_laptop/gpu_boost
+# or, if the driver is not loaded:
+echo '1' | sudo tee /sys/bus/pci/rescan
+```
+
+Both the detach and the restore are logged to the kernel ring buffer, so
+`dmesg | tail` shows what happened.
+
+**If the MUX is switched to discrete**, `DPMF` becomes 2, the firmware skips
+the entire routine, and *every* value of this node — including the ordinary
+boost levels 0 and 1 — silently does nothing.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/gpu_boost`
 

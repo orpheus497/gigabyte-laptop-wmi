@@ -1360,26 +1360,43 @@ static ssize_t gpu_boost_store(struct device *dev, struct device_attribute *attr
 	// TODO: Check for AORUS laptops with 4 modes
 
 	/*
-	 * Cap at 2 unconditionally. On Gigabyte Gaming firmware WMBD 0x51 is not
-	 * a boost level above 2: value 3 is Notify (GPP0.PEGP, 0x03), a dGPU
-	 * eject request, and value 4 is the matching restore -- PEGP._ON() plus
-	 * a bus rescan. They are a pair. Ejection is deliberately not
-	 * implemented here, so the restore has nothing to undo and is capped
-	 * with it rather than being the only one of the two left reachable.
+	 * The full 0-4 range the firmware implements. The upper two values are
+	 * not boost levels: on Gigabyte Gaming firmware WMBD 0x51 dispatches as
 	 *
-	 * The cap is not conditional on has_dgpu_ejector, which the old check
-	 * was: that flag comes from DMI, not from the firmware, so it cannot be
-	 * relied on to track which firmware carries the eject branch. The old
-	 * shape also rejected 4 while permitting 3, which is backwards.
+	 *   0  NPCF.ACBT = 0       boost off
+	 *   1  NPCF.ACBT = LCBT    boost on
+	 *   2  no branch on this generation
+	 *   3  Notify (GPP0.PEGP, 0x03) -- ACPI_NOTIFY_EJECT_REQUEST. The kernel
+	 *      offlines the dGPU, unbinds its driver and calls _EJ0, which this
+	 *      firmware provides: Linux exposes the device as ejectable at
+	 *      /sys/bus/acpi/devices/LNXVIDEO:00, path \_SB.PCI0.GPP0.PEGP.
+	 *   4  PEGP._ON(), WMOF = 0, Notify (PCI0, 0) -- restore and rescan.
 	 *
-	 * Capping at 2 costs nothing on the older ranges. On AORUS firmware
-	 * values 2 and 3 both set NPCF.DTGP and fire the same notify, so 3 is
-	 * redundant there rather than useful.
+	 * 3 and 4 are a matched detach/restore pair and both are exposed. The
+	 * old code permitted 3 and rejected 4, leaving the destructive half
+	 * reachable and the recovery unreachable; it also gated 3 on
+	 * has_dgpu_ejector, which is derived from DMI rather than from the
+	 * firmware and so cannot track which firmware carries the eject branch.
+	 *
+	 * The interlock that matters is in the firmware and applies whatever we
+	 * do: the whole case body sits inside If (DPMF != 0x02), so a detach is
+	 * refused outright while the internal panel is being driven by the dGPU.
+	 * You cannot eject the GPU drawing your screen.
+	 *
+	 * What the firmware does not check is whether anything is *using* the
+	 * GPU. That is the caller's business, so a detach is logged rather than
+	 * refused -- refusing it would hide hardware this driver exists to
+	 * expose. USAGE.md documents the sequence and the recovery.
 	 */
-	if (mode > 2) {
+	if (mode > 4) {
 		pr_err("Invalid boost mode\n");
 		return -EINVAL;
 	}
+
+	if (mode == 3)
+		pr_info("dGPU detach requested; restore with 'echo 4' or a PCI rescan\n");
+	else if (mode == 4)
+		pr_info("dGPU restore requested\n");
 
 	ret = gigabyte_laptop_set_devstate(GPU_QBOOST, mode, &output);
 	if (ret)
