@@ -1872,6 +1872,42 @@ covers the `Release: 2` bump, the `Obsoletes` bounds, `Source1:
 gigabyte-laptop.conf`, the `%{_builddir}` fix and the new `%post`/`%preun`
 scriptlets. Treat a red build here as a real regression, not CI noise.
 
+**And it is RPM only — the Debian and Arch packaging is untested by anything.**
+There are **zero** occurrences of `debian`, `dpkg`, `pbuilder` or `sbuild`
+anywhere under `.github/`, and the one composite action is `build-rpm`. So the
+three trees in `pkg-files/` get wildly unequal coverage: `rpm` is built in mock
+on three releases, while `debian/` (8 files, `postinst` and `prerm` among them)
+and `archlinux/PKGBUILD` are never parsed, let alone built.
+
+**That is not hypothetical — it is how the `prerm` bug survived.** A missing
+space before a `]` meant `dkms remove` was skipped on every Debian remove and
+upgrade, and it sat there through upstream and through every green run on this
+fork, because nothing in CI has ever read that file. It was found by a review
+bot and then confirmed by **running the line**, which is the only check that
+exists for this half of the packaging. See the upstreaming list.
+
+**So the rule generalises past the compiler:** a green run means *the RPM spec
+is well-formed*. It says nothing about the driver building, and nothing at all
+about Debian or Arch.
+
+**But do not reach for `sh -n` as the remedy — it does not catch this, and a
+first version of this very paragraph recommended it.** Checked 30 Oct 2026
+against the buggy upstream file itself: `sh -n` **passes**. `[` is an ordinary
+command, so `[ "$x"]` is syntactically a command with one argument and the
+parser has no complaint; `[` rejects it at *runtime*, which is why the only
+thing that ever surfaced it was executing the line. Both maintainer scripts and
+the PKGBUILD parse clean today, and that fact is worth exactly nothing as
+reassurance.
+
+`shellcheck` is the tool that would plausibly catch it — it has a dedicated
+code for a missing space before `]` — but **it is not installed here and this
+was not verified**, so do not record it as proven. What is proven is that a
+parse check cannot find a runtime-only argument bug, and that **recommending a
+check without testing it against the bug it is meant to find is the same
+failure mode as a guard written and never exercised** — see the `readlink -f`
+episode under PR #4's review, where a refusal that could not fire was committed
+in the same change as a fix for a refusal that only advised.
+
 #### What actually triggers each workflow — and the `--tags` hazard
 
 Read out of the workflow files rather than inferred, 26 Oct 2026:
