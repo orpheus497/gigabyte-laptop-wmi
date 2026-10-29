@@ -1636,16 +1636,40 @@ learned the hard way:
   - *"fewer than 10 stars"* — the free tier does not auto-review small repos.
     The fork has **0** stars, checked 26 Oct 2026, so this one is not close to
     lapsing.
-  - ~~*"Auto reviews are disabled on base/target branches other than the
-    default branch"* — the fork's default branch is `master`, so any PR based
-    on the integration branch is skipped.~~ **Half stale as of 26 Oct 2026:
-    the fork's default branch is now `a16-5th-gmate`**, so a PR targeting the
-    integration branch is no longer skipped *for this reason*. It was a real
-    observation at the time — seen on PR #2
-    (`a16-5th <- a16-5th-kbd-charge-uevent`) — and the practical outcome is
-    unchanged because the star-count rule still forces a manual trigger. Worth
-    correcting anyway: a stale *reason* behind a correct *conclusion* is how
-    the conclusion survives the day the reason stops being true.
+  - *"Auto reviews are disabled on base/target branches other than the default
+    branch"* — **live again as of 29 Oct 2026, pointing the other way.** This
+    bullet was struck through on 26 Oct as retired, and it was not: it is a
+    rule about *the base not being the default branch*, and which PRs that
+    catches flipped when the default branch moved.
+
+    | Date | Default branch | What gets skipped |
+    |---|---|---|
+    | 22 Oct | `master` | a PR **to** the integration branch — seen on PR #2 |
+    | 29 Oct | `a16-5th-gmate` | a PR **to `master`** — seen on PR #4 |
+
+    Both verified against the API rather than assumed:
+    `default_branch` is `a16-5th-gmate`, PR #4's base is `master`, and
+    CodeRabbit edited its summary in place to say *"Review skipped"* on the
+    `cf23ff1` push.
+
+    **This collides with the review-surface strategy**, which is the part that
+    matters. PR #1 and PR #4 both target `master` precisely because the
+    never-merge rule makes it a safe place to read a full diff — and that is
+    now exactly the base that gets auto-skipped. PR #4's 20 findings arrived
+    only because an `@coderabbitai review` comment was posted by hand a few
+    seconds after it was opened.
+
+    **So a push to a `master`-based PR is never reviewed, and silence is not a
+    clean bill of health.** Trigger every review by hand, and read the summary
+    comment for the "Review skipped" banner before believing an empty result —
+    the bot *edits the existing comment in place* rather than adding a new one,
+    so nothing arrives to announce it.
+
+    The lesson the 26 Oct note was reaching for still holds and is sharper
+    now: **a stale reason behind a correct conclusion is how the conclusion
+    survives the day the reason stops being true** — and striking a rule
+    through as "no longer applies" is itself a claim with a shelf life. The
+    rule never changed. Our configuration did, twice.
 
   Either way: the 🔍 Trigger review checkbox or an `@coderabbitai review`
   comment. Pushes do not auto-review.
