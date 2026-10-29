@@ -589,14 +589,28 @@ it rather than the mode actually in effect. It starts at `0` when the driver
 loads, whatever the firmware is doing. The firmware also resets the mode on
 every boot.
 
-**On a Gigabyte Gaming A16 (`GA65TH`, BIOS FB03) the write lands but nothing
-applies it.** The WMI call succeeds and the firmware sets its NPCF values, but
-the GPU's power limit does not move: `nvidia-powerd` cannot initialise, because
-the SBIOS does not hand over the power-limit table it needs
-(`Failed to get SysPwrLimitGetInfo`). The limit stays capped below the VBIOS
-default and `nvidia-smi -pl` is refused as well, since the platform owns TGP on
-laptop GPUs. Nothing in this driver can change that; check whether a BIOS or
-driver update has fixed it with `journalctl -u nvidia-powerd -b | head`.
+**On a Gigabyte Gaming A16 (`GA65TH`, BIOS FB03) this works on mains and not
+on battery.** Measured 29 Oct 2026 on AC, reading
+`nvidia-smi --query-gpu=enforced.power.limit`:
+
+| `perf_mode` | GPU power limit |
+|---|---|
+| `0` eco | **50 W** (the VBIOS default) |
+| `1` balanced | **60 W** |
+| `2` boost | **70 W** |
+
+A power limit is a setting, not a measurement, so it moves at idle — the sweep
+needs no load. Allow a few seconds after each write before reading back; the
+limit does not update instantly.
+
+**On battery it does nothing**, and that half is genuinely blocked below this
+driver. `nvidia-powerd` reports `DC power limits table is not supported` and
+`Client (presumably SBIOS) has requested to disable Dynamic Boost DC
+controller` — the firmware withholds the battery power-limit table, so there
+is nothing for the daemon to apply. Check with
+`journalctl -u nvidia-powerd -b | head`. `nvidia-smi -pl` is refused in both
+cases, because the platform owns the power limit on laptop GPUs; that is
+normal and is why this node exists.
 
 **Only the GPU half of that is settled.** The same method also programs the
 **APU's own power limits** through a separate controller channel that does not

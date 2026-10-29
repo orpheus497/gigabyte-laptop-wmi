@@ -77,7 +77,7 @@ Two consequences:
   hits the same `Default` in `WMBD` and simply does not land. So on a
   generation lacking `0xE7`, `0xED` or `0x7D`, the nodes appear and do nothing
   — which is the same outcome as on this machine, where `0xED` is write-only
-  and the TGP path is firmware-blocked. The one real risk would be a method ID
+  (its *GPU* effect is real on mains; see row 14). The one real risk would be a method ID
   that means something *different* on another generation, and nothing seen so
   far suggests the Gaming block is reused that way.
 - **Method IDs are not safe across gens.** `0xED`, `0xE7` and `0x7D` arrived
@@ -1907,13 +1907,14 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~0~~ | ~~DKMS install, load, verify hwmon channels appear~~ **done** | low |
 | ~~1~~ | ~~Clamp the `memcpy`; make optional probe reads non-fatal~~ **done** | low |
 | ~~1b~~ | ~~Extend `debug_method` to take an argument~~ **done** | low |
-| ~~2~~ | ~~Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel~~ **done** — all three confirmed; GPU TGP closed as firmware-blocked | medium |
+| ~~2~~ | ~~Validate `0xED` / `0xE7` / `0x7D` on `GA65TH` by sentinel~~ **done** — all three confirmed. ~~GPU TGP closed as firmware-blocked~~ **withdrawn 29 Oct 2026: `perf_mode` drives GPU power on AC, 50/60/70 W. Only the DC path is blocked** — see row 14 | medium |
 | ~~3~~ | ~~`platform_profile` handler~~ **done** — over fan policy, not GPU power | low |
 | ~~4~~ | ~~Writable `pwm1`/`pwm2`~~ **closed 23 Oct 2026 — unreachable on this EC.** Four mechanisms tried and rejected, the last one verifiably inert. Read scaling kept. See "Step 4 is closed" | medium |
 | ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** — both keys scan in; GiMate reports `KEY_PROG1` and is bindable, Mode is consumed by the kernel and cycles `fan_preset` | low |
 | ~~6a~~ | ~~`0xF6`/`KBLL` keyboard brightness~~ **done** — LED class device, `max_brightness` 1 measured from the EC's own events | low |
 | ~~6b~~ | ~~RGB **colour** over `/dev/hidraw2`~~ **closed 29 Oct 2026 — not applicable.** GIGABYTE specs the `GA65H`/`5TH` keyboard as single-colour **blue**; the firmware has no colour fields; `max_brightness` is 1. There is nothing to drive. See "this keyboard has no colour to drive" | — |
-| 14 | **GPU TGP on AC — reopened 29 Oct 2026.** `enforced.power.limit` reads 60 W against a 50 W default on mains, which is arbitration working. The documented "firmware-blocked" verdict came from readings taken on DC or unannotated. Sweep `perf_mode` 0→1→2 **on AC** watching the enforced limit | low |
+| ~~14~~ | ~~GPU TGP on AC~~ **done 29 Oct 2026 — `perf_mode` controls GPU power on mains.** 0→50 W, 1→60 W, 2→70 W against a 50 W default. The "firmware-blocked" verdict was drawn from readings taken on DC or unannotated. Only the DC path is blocked | low |
+| 16 | **Should `platform_profile` drive `perf_mode` again?** Step 3 was redesigned over fan policy *because* `perf_mode` was believed inert. It is not. Profiles could now set GPU power as well as fan policy, which is what the original design intended. A design decision, not a bug | low |
 | 15 | **The dGPU never reaches D3cold.** `nvidia_drm.modeset=1` makes it a KMS device with an HDMI connector, so the compositor holds it open; it idles at 3.1 W in P8 instead of powering off. Not a driver defect — but it is what decides whether the detach feature is worth anything (row 12) | low |
 | 7 | **`perf_mode`'s APU-power half via `ECPT`** — opened 24 Oct 2026. Sweep 0→1→2 under sustained AC load and watch package power and all-core clock. Needs no new code and no reverse engineering; the highest-value experiment left. See "`perf_mode` has a second half" | low |
 | 8 | **`amd_pmf.force_load=1`** — one kernel parameter and a reboot, fully reversible. Settles whether APMF binds and what a second `platform_profile` handler does to the aggregate | medium |
@@ -1987,8 +1988,11 @@ Two behaviours worth knowing, both normal:
   the only route the EC leaves open.
 
 Step 2 gated everything GPU-related and is **settled**: all three methods
-validated, and GPU TGP closed as firmware-blocked, so nothing further sits behind
-that gate. With Step 4 closed too, ~~**Step 6b is the only work left**~~ — that
+validated. ~~GPU TGP closed as firmware-blocked, so nothing further sits behind
+that gate.~~ **Withdrawn 29 Oct 2026** — `perf_mode` drives GPU power on mains
+(50/60/70 W) and only the battery path is blocked, so plenty sat behind that
+gate and was never looked at. With Step 4 closed too, ~~**Step 6b is the only
+work left**~~ — that
 was true for about a day and has been restated wrongly twice since, each time by
 naming the rows that happened to be open. **Read the open work off the Phase 3
 table, which is the only place it is maintained.** Step 6b remains open-ended
@@ -3724,8 +3728,11 @@ Four consequences for Step 4:
 
 - `0x51` is `SetNvPowerConfig`: `0` sets `NPCF.ACBT = 0`, `1` restores
   `ACBT = LCBT`, both with `Notify (NPCF, 0xC0)`. So `gpu_boost` sits on the
-  **same NPCF path** already closed as firmware-blocked, which tightens that
-  conclusion rather than reopening it. Reported, not verified here.
+  **same NPCF path** as `perf_mode`. ~~Already closed as firmware-blocked,
+  which tightens that conclusion rather than reopening it.~~ **Inverted
+  29 Oct 2026**: that path is now known to *work* on mains, so this makes
+  `gpu_boost` values 0 and 1 worth sweeping on AC exactly as `perf_mode` was —
+  they may move the enforced limit too. Reported, not verified here.
 - Their `0xED` NPCF tables (`ATPP`/`ACBT`/`AMAT` in ⅛ W units, mode 2 → 85 W)
   corroborate the decoded chain `0xED` → NPCF → `Notify 0xC0` → `nvidia-powerd`
   exactly. The **values are RTX 5070 SKU-class guesses and untested**; this unit
@@ -3810,6 +3817,16 @@ logged "not supported"; `tuned-adm profile <name>` re-applies.
 The original design — `platform_profile` over `perf_mode` + `dynamic_boost` —
 became inert when GPU TGP turned out to be unreachable. Replaced with fan
 policy, which works entirely inside the EC:
+
+> **The premise behind that replacement is dead, 29 Oct 2026.** `perf_mode`
+> *does* reach GPU power on mains — 50/60/70 W across the three modes — so the
+> original design was never inert, it was never tested on AC. **What shipped is
+> still correct and stays**: fan policy works on battery and on mains, and the
+> `fan_preset` precedence rules built on top of it are sound. What is now open
+> is whether a profile switch should *also* set `perf_mode`, which would make
+> the desktop's power selector change GPU power as the original design
+> intended. That is Phase 3 row 16, a design decision rather than a defect, and
+> nothing below is wrong — only its stated reason for existing.
 
 | Profile | `fan_mode` |
 |---|---|
@@ -4240,10 +4257,39 @@ the missing annotation as a defect in the record and then reasoned from the
 numbers anyway, which is the lesson worth keeping: **an un-annotated power
 reading on a machine whose firmware branches on `EC0.ACST` is not evidence.**
 
-**The experiment that was never run** is now row 14: sweep `perf_mode` 0→1→2
-**on AC**, watching `enforced.power.limit` rather than package power. A setting
-shows at idle, so this needs no load — which is why it costs almost nothing and
-should happen before the APU sweep below rather than after it.
+**The sweep ran the same day and `perf_mode` controls GPU power on AC.** Clean
+ladder, at idle, no load required:
+
+```
+baseline            60.00 W
+perf_mode 0   ->    50.00 W     (= power.default_limit)
+perf_mode 1   ->    60.00 W
+perf_mode 2   ->    70.00 W
+perf_mode 3   ->    70.00 W     (written raw via debug_method_write)
+```
+
+**So "GPU TGP is firmware-blocked" is dead as a general statement.** The DC
+path is blocked; the AC path has been working the whole time, and the only
+reason it was written off is that nobody took a reading on mains with the
+state recorded. That is the second conclusion in this project overturned by an
+un-annotated measurement, after `temp2`.
+
+**Mode 3 adds nothing on the GPU side** — identical to mode 2 at 70 W. That
+answers the question "`perf_mode` value 3 exists in this firmware; the node
+caps at 2" for the GPU, and it is why the cap **stays at 2**: there is now a
+measured reason rather than an arbitrary one, which is exactly what that
+section said was missing. It is not fully settled, because mode 2 and mode 3
+differ in the firmware — mode 2 reads a power class with `ECPL()` and switches
+`ATPP` on the result where mode 3 pins `ATPP = 0xC8` — so a difference could
+still show on the **APU** side, which the `ECPT` sweep has yet to measure.
+Revisit only with that data.
+
+**Two methodological notes worth keeping.** The limit does not update
+instantly: allow a few seconds after each write before reading, or a reading
+taken immediately after a restore reports the *previous* value and looks like
+a failed restore. And `perf_mode` has no read method, so after a raw
+`debug_method_write` the node reports a stale value until it is written
+through properly — finish any raw sweep by writing the node itself.
 
 ### The dGPU never powers down, and the desktop is on the iGPU — 29 Oct 2026
 
@@ -4346,6 +4392,26 @@ not by raising the sysfs range check first. If mode 3 behaves, raise the check
 to 3 and correct the node's comment block; if it does not, record 0–2 as the
 real range *with* the firmware reason, which is what is missing today.
 
+**Tested 29 Oct 2026, exactly that way, and the cap stays at 2 — now for a
+measured reason.** Written raw with `echo '0xED 3' > debug_method_write` during
+the AC sweep, mode 3 produced **70 W, identical to mode 2.** On the GPU side it
+is a duplicate, so raising the range would add a value that does nothing
+visible and a fourth name to every consumer's UI for no gain.
+
+**Not fully closed, and the remaining difference is on the other half.** The
+firmware distinction is real — mode 2 reads a power class with `ECPL()` and
+switches `ATPP` on the result, where mode 3 pins `ATPP = 0xC8` — so the two
+could still diverge on **APU** package power, which `enforced.power.limit`
+cannot see. The `ECPT` sweep is what would show it. Until then the honest
+statement is: **no GPU-side difference measured, APU side untested, cap stays
+at 2 with this recorded as the reason.**
+
+`restore` note from the same run, because it cost a confusing reading: the
+limit takes a few seconds to settle, so a value read immediately after a write
+reports the *previous* one. And `perf_mode` has no read method, so after a raw
+`debug_method_write` the node reports a stale number until it is written
+through the node itself.
+
 ### `dynamic_boost` round-trips, direction still unknown
 
 `0 -> 1 -> 0` reads back correctly, so the node and the inversion are right.
@@ -4370,8 +4436,9 @@ run, and it is the only route to the direction question that does not go through
 - CPU power management is out of scope. `amd-pstate-epp` with `dynamic_epp` and
   `prefcore` already works; this driver must not touch it. ~~The gap is GPU TGP
   and fan policy.~~ **Both of those closed**: fan policy shipped as the
-  `platform_profile` handler plus the `fan_preset` ring, and GPU TGP is
-  firmware-blocked. The gap now is the **APU package power** that `0xED` writes
+  `platform_profile` handler plus the `fan_preset` ring, and ~~GPU TGP is
+  firmware-blocked~~ **GPU TGP works on mains through `perf_mode`, 50/60/70 W —
+  only the battery path is blocked**. The gap now is the **APU package power** that `0xED` writes
   through `ECPT` — which is adjacent to CPU power management but is a
   platform/EC limit rather than a governor setting, so it does not conflict with
   leaving `amd-pstate-epp` alone.
