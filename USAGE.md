@@ -514,10 +514,14 @@ echo '1' | sudo tee /sys/bus/pci/rescan
 Then check whether the driver came back, rather than assuming it did:
 
 ```sh
-cat /sys/bus/pci/devices/0000:01:00.0/driver 2>/dev/null \
-	|| basename "$(readlink /sys/bus/pci/devices/0000:01:00.0/driver)" \
-	|| echo UNBOUND
+D=/sys/bus/pci/devices/0000:01:00.0/driver
+if [ -L "$D" ]; then basename "$(readlink "$D")"; else echo UNBOUND; fi
 ```
+
+(Test the symlink; do not try to read it. `driver` is a symlink to a
+directory, so `cat` cannot print it, and `basename ""` on an absent link
+succeeds with empty output — which would swallow the `UNBOUND` branch and
+print a blank line instead.)
 
 If it reads `UNBOUND`, reboot. A reboot may itself be slow if anything is
 already wedged, so use `sudo systemctl reboot`, and `sudo reboot -f` if that

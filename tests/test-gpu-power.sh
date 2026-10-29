@@ -168,13 +168,28 @@ restore() {
 	put_back "$PROFILE_WAS"    "$PROFILE"        platform_profile
 	sleep "$SETTLE"
 
-	# Restoring the preset and the profile usually restores the mode with them,
-	# because with the preset on auto the profile decides the mode and with it
-	# pinned the preset decides. One case escapes that: a freshly loaded driver
-	# has the preset on auto and the mode read from the firmware, which need
-	# not be the mode the profile maps to. Writing it back explicitly covers
-	# that, and is a no-op whenever the two already agree.
-	if [ "$(cat "$P/fan_mode")" != "$FAN_MODE_AT_START" ]; then
+	# Write fan_mode back ONLY for a custom mode (3+), and never for 0-2.
+	#
+	# fan_mode_store() pins fan_preset from the mode it is given:
+	# fan_mode_presets[] covers 0-2 (normal/silent/gaming), and anything above
+	# that falls back to FAN_PRESET_AUTO. So the two states cannot both be
+	# written blindly, and the ordering decides which one survives:
+	#
+	#   saved preset  saved mode   what restores both
+	#   ------------  ----------   -------------------------------------------
+	#   pinned        0-2          the preset write above; it sets the mode
+	#   auto          0-2          the preset write above ONLY -- writing the
+	#                              mode would pin the preset and hand fan
+	#                              policy back to nobody
+	#   auto          3+ custom    the mode write; mode 3+ sets preset = auto
+	#                              itself, so both land
+	#
+	# An earlier version wrote the mode whenever it differed, which undid the
+	# preset restore two lines above and exited with the preset pinned. The
+	# preset is the POLICY -- who owns the fans -- and a mode derived under
+	# `auto` is the profile's to re-pick, so the preset is the one to protect.
+	if [ "$FAN_MODE_AT_START" -ge 3 ] 2>/dev/null &&
+	   [ "$(cat "$P/fan_mode" 2>/dev/null)" != "$FAN_MODE_AT_START" ]; then
 		put_back "$FAN_MODE_AT_START" "$P/fan_mode" fan_mode
 		sleep 1
 	fi

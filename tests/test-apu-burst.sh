@@ -163,10 +163,28 @@ cleanup() {
 	echo "$PRESET_WAS"        > "$S/fan_preset"   2>/dev/null
 	echo "$POWER_PRESET_WAS"  > "$S/power_preset" 2>/dev/null
 	sleep 3
-	# Last, and only if it did not come back on its own: writing fan_mode moves
-	# fan_preset with it, so doing this unconditionally would undo the preset
-	# restore above.
-	if [ "$(cat "$S/fan_mode" 2>/dev/null)" != "$FAN_MODE_WAS" ]; then
+	# Write fan_mode back ONLY for a custom mode (3+), and never for 0-2.
+	#
+	# fan_mode_store() pins fan_preset from the mode it is given:
+	# fan_mode_presets[] covers 0-2 (normal/silent/gaming), and anything above
+	# that falls back to FAN_PRESET_AUTO. So the two states cannot both be
+	# written blindly, and the ordering decides which one survives:
+	#
+	#   saved preset  saved mode   what restores both
+	#   ------------  ----------   -------------------------------------------
+	#   pinned        0-2          the preset write above; it sets the mode
+	#   auto          0-2          the preset write above ONLY -- writing the
+	#                              mode would pin the preset and hand fan
+	#                              policy back to nobody
+	#   auto          3+ custom    the mode write; mode 3+ sets preset = auto
+	#                              itself, so both land
+	#
+	# An earlier version wrote the mode whenever it differed, which undid the
+	# preset restore two lines above and exited with the preset pinned. The
+	# preset is the POLICY -- who owns the fans -- and a mode derived under
+	# `auto` is the profile's to re-pick, so the preset is the one to protect.
+	if [ "$FAN_MODE_WAS" -ge 3 ] 2>/dev/null &&
+	   [ "$(cat "$S/fan_mode" 2>/dev/null)" != "$FAN_MODE_WAS" ]; then
 		echo "$FAN_MODE_WAS" > "$S/fan_mode" 2>/dev/null
 		sleep 1
 	fi

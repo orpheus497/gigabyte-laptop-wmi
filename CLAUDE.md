@@ -433,9 +433,32 @@ every remaining ref, local and remote       clean
 **The verification enumerated refs rather than branches**, which is the same
 correction the audit method needed one level up: `git for-each-ref refs/heads
 refs/remotes` and a literal search against each. That covers `upstream/*` and
-`a16/*` as well — the two other forks this checkout tracks — and all of them
-come back clean, so the serial is not reachable from any ref this clone can
-see.
+`a16/*` as well — the two other forks this checkout tracks — and every one
+comes back clean.
+
+**Clean *at the tip*. Not absent from history, and a sentence here said
+otherwise — corrected 29 Oct 2026.** This paragraph originally ended "so the
+serial is not reachable from any ref this clone can see." **That is false.**
+The serial survives in **16 commits**, and those commits are reachable from
+`a16-5th-gmate` — which is the whole point of the decision recorded above, that
+history keeps it. The two statements that are true:
+
+| Question | Answer |
+|---|---|
+| Is it in the current content of any ref? | **No.** Every tip, local and remote, is clean |
+| Is it reachable through history? | **Yes** — 16 commits, from `a16-5th-gmate` |
+
+**The error is the one this file has a whole section about**, which is what
+makes it worth the space rather than a quiet edit: a tip check was run and a
+*reachability* claim was written from it. "Audit history, not just the tree" is
+recorded two screens above, and the sentence violating it was written in the
+paragraph documenting that very lesson. **Checking the right thing and then
+describing it as something stronger is its own failure mode**, separate from
+checking the wrong thing — and a privacy record that overstates its own scope
+is worse than one that states a narrower scope honestly.
+
+Nothing about the decision changes. What changes is that the record no longer
+claims more than it checked.
 
 **The remaining audit gap is closed too.** The four root-only DMI identifiers
 — `product_serial`, `board_serial`, `chassis_serial`, `product_uuid` — were
@@ -1571,14 +1594,16 @@ Three consequences worth knowing:
   already been made once, immediately after the merge.
   `a16-5th-kbd-charge-uevent` carries the identical trap for the same reason.
 
-  **And the checkout has been sitting in exactly that state since 26 Oct 2026**
-  — on `p4-rem-a15`, at `7a54031`, with `git rev-parse --abbrev-ref '@{u}'`
-  answering `fatal: no upstream configured`. It is content-identical to
-  `a16-5th-gmate`, which is what makes it invisible: everything builds, every
-  diff looks right, and a commit landing there is not on the integration
-  branch and is not pushed anywhere. The check is the same one-liner this
-  bullet already prescribes, which is the whole point of recording the
-  recurrence rather than just the branch.
+  **The checkout sat in exactly that state from 26 to 29 Oct 2026, and it is
+  over** — it was on `p4-rem-a15`, at `7a54031`, with
+  `git rev-parse --abbrev-ref '@{u}'` answering
+  `fatal: no upstream configured`. That branch is deleted and the checkout is
+  on `a16-5th-gmate`; see the status under the table. The episode is kept
+  because of *why* it was invisible: `p4-rem-a15` was content-identical to the
+  integration branch, so everything built, every diff looked right, and a
+  commit landing there would have been on no pushed branch at all. The check
+  is the same one-liner this bullet already prescribes, which is the whole
+  point of recording the recurrence rather than just the branch.
 - **Neither retired branch may be deleted**, which is why both are in the table
   rather than on a cleanup list: **they are the sole surviving refs for history
   this file cites.** `920ca3b` and `75f870d` are reachable only from those two;
@@ -4294,6 +4319,75 @@ same commit as a fix for a guard that advised instead of refusing.
 | `notify.c` timeout-read race | Real but microseconds wide, and the suggested fix risks announcing ordinary sysfs writes, which the header forbids. The reviewer labels its own tradeoff "Poor tradeoff" |
 | `notify.c` `execlp` PATH warning (ast-grep) | Not a privilege boundary: a user-session binary running as the user, who can already run anything. `execlp` over `system()` is a deliberate recorded choice |
 | `test-gpu-power.sh` preset/mode both-states | Correctly identifies a genuine tension and asks for a decision rather than a fix. The choice is documented in the restore comment |
+
+### The second review round: four findings, three of them my own — 29 Oct 2026
+
+**A manual trigger on `0cb18fc` produced a real review** (the first two
+triggers were skipped; see the auto-review bullet). Four amber findings, and
+**three were defects introduced by the fixes in the first round** — which is
+the useful thing about this round, not the count.
+
+- **The `fan_mode` restore undid the `fan_preset` restore two lines above it.**
+  Round one fixed "the test does not restore `fan_mode`" by writing the mode
+  back. But `fan_mode_store()` **pins `fan_preset` from the mode**:
+  `fan_mode_presets[]` covers 0-2 and anything above falls back to
+  `FAN_PRESET_AUTO`. So a machine that started on `auto` came back with the
+  preset *pinned*, which hands fan policy to nobody — the profile stops owning
+  the fans.
+
+  **I fixed one half of a coupled pair and broke the other, having declined a
+  finding that described exactly this.** `test-gpu-power.sh:179` said the two
+  states cannot both be restored and asked for a decision; I filed it as
+  "documented" and then created the same bug next door. The reviewer was
+  consistent; I was not.
+
+  The rule, now in both scripts and verified over all 15 reachable
+  combinations:
+
+  | saved preset | saved mode | what restores both |
+  |---|---|---|
+  | pinned | 0-2 | the preset write alone — it sets the mode |
+  | `auto` | 0-2 | the preset write **alone**; writing the mode would pin it |
+  | `auto` | 3+ custom | the mode write — mode 3+ sets the preset to `auto` itself |
+
+  **The preset is the policy and the mode under `auto` is derived**, so the
+  preset is the one to protect. A mode write is only ever needed, and only
+  ever safe, for a custom mode.
+
+- **A `USAGE.md` snippet I wrote printed a blank line where it promised
+  `UNBOUND`.** The bot caught it by *running* it. `driver` is a symlink to a
+  directory, so `cat` cannot read it; the fallback `basename "$(readlink ...)"`
+  then **succeeds with empty output** when the link is absent, so the
+  `|| echo UNBOUND` branch never fires. Replaced with an explicit
+  `[ -L ... ]` test, which also avoids the `&&`/`||` chain. **A documented
+  check that cannot emit its documented answer is worse than no check**, since
+  the reader is told to act on the output.
+
+- **A privacy claim overstated its own scope, and this is the one to
+  remember.** The 29 Oct audit paragraph ended "the serial is not reachable
+  from any ref this clone can see." **False** — it is in 16 commits reachable
+  from `a16-5th-gmate`, which is exactly what the recorded decision
+  *intends*. A **tip** check was run and a **reachability** claim was written
+  from it.
+
+  That is the error this file devotes a whole section to — "Audit history, not
+  just the tree" — committed in the paragraph documenting that very lesson.
+  **Checking the right thing and then describing it as something stronger is
+  its own failure mode**, distinct from checking the wrong thing, and in a
+  privacy record it is the more dangerous of the two: a narrower honest claim
+  invites the follow-up check, an overstated one closes it.
+
+- **A stale "current state" sentence**, since fixed: a paragraph still said
+  the checkout "has been sitting" on `p4-rem-a15` with no end date, while the
+  table above it recorded that branch deleted. Both halves had been true on
+  different days.
+
+**The pattern across both rounds is worth naming.** Round one: two of the
+findings were bugs I had introduced hours earlier. Round two: three were bugs
+my round-one *fixes* introduced. **A fix is a change, and a change needs the
+same adversarial reading as the code it replaces** — the review found things my
+own re-reading did not, every time, and twice it found them by executing the
+thing rather than reading it.
 
 **One decline was reversed on a second pass, and it was the right call.** The
 `test-cmos-slots.sh` finding was filed as low-value procedure text — and the
