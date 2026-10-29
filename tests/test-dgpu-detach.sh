@@ -138,10 +138,20 @@ restore() {
 	fi
 
 	say "restoring the GPU"
-	# The error is NOT suppressed. A failing write here is the single most
-	# important thing this test can report, because it means the firmware
-	# route back is unavailable and recovery needs the PCI rescan below.
-	if ! echo 4 > "$P/gpu_boost" 2>&1; then
+	# The error is NOT suppressed -- no 2>/dev/null, and no 2>&1 either. A
+	# failing write here is the single most important thing this test can
+	# report, because it means the firmware route back is unavailable and
+	# recovery needs the PCI rescan below.
+	#
+	# This line used to end `2>&1`, which was worse than suppressing it: `>`
+	# points stdout at the sysfs node, and `2>&1` then points stderr at the
+	# SAME node, so bash's "write error" message was being written INTO
+	# gpu_boost. Harmless in practice -- the node parses with kstrtouint and
+	# rejects a message beginning with "bash" -- but it defeated the intent
+	# stated right here, and a message that happened to start with a digit
+	# would have landed a value. Bare stderr goes to the terminal, which is
+	# what this comment always claimed.
+	if ! echo 4 > "$P/gpu_boost"; then
 		echo "  gpu_boost 4 FAILED -- the firmware restore did not run."
 		echo "  Check dmesg for an ACPI error naming PEGP._ON."
 		RESTORE_OK=0
@@ -432,6 +442,16 @@ elif [ "$(gpu_present)" = yes ]; then
 		Most likely the firmware refused it: check the panel line above --
 		a detach is refused while the panel is on the discrete GPU.
 		EOF
+		# Nothing was ejected, so there is nothing to restore. Clearing the
+		# flag is what stops restore() sending gpu_boost 4 to a card that is
+		# still attached and bound -- a write measured to abort WMBD on an
+		# unresolved PEGP._ON and put an ACPI BIOS Error in the kernel log.
+		#
+		# The earlier fix covered the write FAILING. This is the other half:
+		# the write succeeded and had no effect, which the firmware's own
+		# DPMF gate does silently. Both need the flag down, and only one had
+		# been thought through.
+		DETACHED=0
 	fi
 fi
 

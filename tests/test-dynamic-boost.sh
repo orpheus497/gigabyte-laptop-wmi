@@ -94,11 +94,28 @@ sample() {
 
 BOOST_WAS=$(cat "$P/dynamic_boost")
 restored=0
+RESTORE_OK=1
+# Same helper and RESTORE_OK convention as test-gpu-power.sh and
+# test-apu-burst.sh, so all three scripts report a failed restore the same way.
+# This one used to discard the status and stderr and print "== restored ==="
+# regardless, which left dynamic_boost wherever the last window put it while
+# the output said otherwise.
+put_back() {   # put_back <value> <path> <label>
+	if ! echo "$1" > "$2" 2>/dev/null; then
+		echo "  RESTORE FAILED: $3 could not be set back to '$1'" >&2
+		RESTORE_OK=0
+	fi
+}
 restore() {
 	[ "$restored" -eq 1 ] && return
 	restored=1
-	echo "$BOOST_WAS" > "$P/dynamic_boost" 2>/dev/null
-	printf '\n== restored ==\n  dynamic_boost=%s perf_mode=%s gpu_boost=%s\n' \
+	put_back "$BOOST_WAS" "$P/dynamic_boost" dynamic_boost
+	if [ "$RESTORE_OK" -eq 1 ]; then
+		printf '\n== restored ==\n'
+	else
+		printf '\n== RESTORE INCOMPLETE -- check the values below by hand ==\n' >&2
+	fi
+	printf '  dynamic_boost=%s perf_mode=%s gpu_boost=%s\n' \
 		"$(cat "$P/dynamic_boost")" "$(cat "$P/perf_mode")" "$(cat "$P/gpu_boost")"
 }
 trap restore EXIT
@@ -120,11 +137,22 @@ printf '  min %s  max %s  distinct values %s\n' "$a1_lo" "$a1_hi" "$a1_n"
 # B1, B0
 for v in 1 0; do
 	say "window $(( v == 1 ? 2 : 3 ))/4: dynamic_boost = $v"
-	echo "$v" > "$P/dynamic_boost" || { echo "  write FAILED"; continue; }
+	# STOP on a failed write rather than carrying on. The old `continue` left
+	# n_$v, lo_$v and hi_$v unset for that window, and the verdict below then
+	# compared a window that was never measured -- the worst possible outcome
+	# for a test whose whole job is distinguishing which setting moved the
+	# limit. If the value cannot be set, there is nothing to measure.
+	if ! echo "$v" > "$P/dynamic_boost"; then
+		die "could not write dynamic_boost=$v -- no window to measure, aborting"
+	fi
 	sleep "$SETTLE"
 	read -r lo hi n <<< "$(sample "$WINDOW")"
 	printf '  min %s  max %s  distinct values %s\n' "$lo" "$hi" "$n"
-	eval "n_$v=$n; lo_$v=$lo; hi_$v=$hi"
+	# printf -v rather than eval: these are integers from sample() so eval was
+	# not an injection risk, but it needs no interpreter pass at all.
+	printf -v "n_$v"  '%s' "$n"
+	printf -v "lo_$v" '%s' "$lo"
+	printf -v "hi_$v" '%s' "$hi"
 done
 
 # A2 -- the control. This is the window that makes the test mean anything:
@@ -132,7 +160,14 @@ done
 # proves nothing on its own. Only a RETURN of the wandering once the original
 # setting is restored shows that the setting was what stopped it.
 say "window 4/4: CONTROL -- back to as-found (dynamic_boost=$BOOST_WAS)"
-echo "$BOOST_WAS" > "$P/dynamic_boost"
+# Check this write too. The control is the window that makes the whole test
+# mean anything -- every verdict below gates on a2_n -- so a silent failure
+# here would leave window 4 measuring whatever window 3 set, and the result
+# would read as "the wandering did not return" when nothing was restored.
+if ! echo "$BOOST_WAS" > "$P/dynamic_boost"; then
+	die "could not restore dynamic_boost=$BOOST_WAS for the control window;
+no verdict is possible without it"
+fi
 sleep "$SETTLE"
 read -r a2_lo a2_hi a2_n <<< "$(sample "$WINDOW")"
 printf '  min %s  max %s  distinct values %s\n' "$a2_lo" "$a2_hi" "$a2_n"

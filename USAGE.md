@@ -249,14 +249,20 @@ As of version 0.2.0, the accepted range is 0-255. Earlier versions require fulfi
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/fan_custom_speed`
 
-**Example:** To set the custom fan speed to 50 percent:
+**Example** — the two accepted ranges. **Neither value is a percentage of fan
+speed on Gigabyte Gaming (2025+) firmware**; see the caution below before
+using either.
 
 ```sh
-# Version 0.2.0+
+# Version 0.2.0+          midpoint of the 0-255 range upstream documents
 echo '128' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_custom_speed
-# Before version 0.2.0
-echo '50' | sudo tee /sys/devices/platform/gigabyte_laptop/fan_custom_speed
+# Before version 0.2.0    midpoint of the older 0-100 range
+echo '50'  | sudo tee /sys/devices/platform/gigabyte_laptop/fan_custom_speed
 ```
+
+The heading here used to read "To set the custom fan speed to 50 percent",
+which is wrong on this generation twice over: 128 is half of 255 rather than
+50, and nothing in the write path is proportional anyway.
 
 **Caution on Gigabyte Gaming (2025+) firmware: the scale here is unresolved.**
 The driver passes this value to the controller **unconverted** — that much is
@@ -388,7 +394,7 @@ The count is still available: the firmware reports it by the standard route and
 the kernel's own battery driver picks it up with no help from here:
 
 ```sh
-cat /sys/class/power_supply/BAT1/cycle_count
+cat /sys/class/power_supply/BAT*/cycle_count
 ```
 
 ## GPU boost (added in version 0.1.0)
