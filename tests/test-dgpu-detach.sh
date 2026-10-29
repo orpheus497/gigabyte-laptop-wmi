@@ -35,10 +35,26 @@
 # For the power comparison, run it on BATTERY -- on mains the battery gauge
 # reports nothing useful and the measurement is skipped.
 #
+# BEFORE YOU RUN THIS: ON A GAMING A16 5TH IT COSTS A REBOOT.
+#
+# Measured 29 Oct 2026. The eject is serviced -- nvidia-drm removes the device
+# and unloads -- but the card stays on the PCI bus with a non-zero usage count,
+# leaving it present-but-unbound. Every in-session recovery then fails:
+# gpu_boost 4 aborts in firmware on an unresolved PEGP._ON, a PCI rescan is a
+# no-op because nothing left the bus, modprobe -r is refused on a stuck
+# refcount, and writing the driver's bind file HANGS UNINTERRUPTIBLY in D
+# state. Only a reboot clears it.
+#
+# So this is a one-shot diagnostic, not a feature you can exercise casually.
+# Run it when you want the answer re-confirmed on different firmware, and
+# expect to reboot afterwards.
+#
 # Usage: sudo bash tests/test-dgpu-detach.sh
 #
-# Restores the GPU on every exit path, including Ctrl-C. The detach is not
-# persistent either way: a reboot always brings the card back.
+# It ATTEMPTS a restore on every exit path, including Ctrl-C, and on this
+# firmware that attempt fails -- gpu_boost 4 cannot run. Nothing is left
+# half-written and the detach is not persistent, so a reboot always brings the
+# card back; it is just that a reboot is the only thing that does.
 
 set -uo pipefail   # deliberately not -e: a failure must still reach the restore
 
@@ -159,17 +175,23 @@ restore() {
 		That is the real answer to this test: the graphics driver does not
 		re-bind on its own, and the firmware restore cannot make it.
 
-		BIND IT BACK -- no reboot needed, and do NOT reach for a rescan or a
-		module reload first. The device is present, so a rescan finds nothing
-		missing, and unloading nvidia fails while its refcount is non-zero:
+		REBOOT. Measured on a GAMING A16 5TH, every in-session recovery
+		fails, so do not spend time on them:
 
-		    echo $DEV | sudo tee /sys/bus/pci/drivers/$DRIVER_AT_START/bind
-		    sudo modprobe nvidia_drm
+		  gpu_boost 4         AE_NOT_FOUND on PEGP._ON, aborts WMBD
+		  pci/rescan          no-op, the device never left the bus
+		  drivers/$DRIVER_AT_START/bind  HANGS the writer in D state, unkillable
+		  modprobe -r         refused, the module refcount stays non-zero
 
-		nvidia_drm unloads itself during the detach, which is why it needs
-		loading again separately. Verify with nvidia-smi.
+		DO NOT write to the driver's bind file. It blocks in the probe and
+		cannot be interrupted -- not by Ctrl-C, not by SIGKILL -- and after
+		that any further bind or unbind queues behind it and hangs too. It
+		makes the reboot harder, not easier.
 
-		Record it -- a detach that needs manual re-binding to undo is a very
+		  sudo systemctl reboot        # and if that stalls for a few minutes:
+		  sudo reboot -f
+
+		Record it -- a detach that costs a reboot every time is a very
 		different feature from one that round-trips.
 		EOF
 		RESTORE_OK=0
@@ -348,10 +370,9 @@ elif [ "$(gpu_present)" = yes ]; then
 		log above: something held a reference and the removal stopped after
 		the unbind.
 
-		This is not a firmware refusal. Recovery is a bind, NOT a rescan --
-		a rescan finds nothing missing when the device never left:
-		    echo $DEV | sudo tee /sys/bus/pci/drivers/$DRIVER_AT_START/bind
-		    sudo modprobe nvidia_drm
+		This is not a firmware refusal. It is also not recoverable in this
+		session -- see the restore block below. Do NOT write to the driver's
+		bind file: it hangs uninterruptibly and makes the reboot worse.
 		EOF
 	else
 		cat <<-EOF

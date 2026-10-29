@@ -5580,16 +5580,65 @@ card never left the bus, so `GPP0.D0ST` was presumably still not `0x03`, the
 `Else` branch ran again, and `PEGP._ON` is still an unresolved `External`.
 **`gpu_boost 4` has never once succeeded on this machine.**
 
-**Recovery needs neither a reboot nor a PCI rescan.** A rescan does nothing
-when the device is already present — which is also why the test's own fallback
-was useless here. The card is on the bus and merely unbound, so binding it
-back is enough:
+~~**Recovery needs neither a reboot nor a PCI rescan.**~~ **Wrong — see "The
+PCI bind does not recover it either" below.** A rescan genuinely does nothing,
+because the device never left the bus. But the bind that looked like the
+obvious remedy **hangs the writing process in D state** and the machine needs
+a reboot. The claim was committed before the remedy was tried.
 
-```sh
+
+#### The PCI bind does not recover it either — it wedges, 29 Oct 2026
+
+**This corrects the paragraph above, which was written and committed before the
+recovery was actually tried.** It read *"Recovery needs neither a reboot nor a
+PCI rescan ... binding it back is enough"*. **That is wrong.** The reasoning
+was sound as far as it went — the card is present and merely unbound, and a
+bind is the textbook recovery for exactly that — and the hardware does not
+cooperate:
+
+```
 echo 0000:01:00.0 | sudo tee /sys/bus/pci/drivers/nvidia/bind
-sudo modprobe nvidia_drm          # nvidia_drm unloaded itself during the detach
 ```
 
+**hangs.** The `tee` goes to **D state** — uninterruptible sleep — and stays
+there. Observed at 2m49s and not progressing, with the device still unbound:
+
+```
+PID 31534  STAT D  TIME 02:49  tee /sys/bus/pci/drivers/nvidia/bind
+/sys/bus/pci/devices/0000:01:00.0/driver   ->   still absent
+```
+
+**A D-state process cannot be killed.** Not by Ctrl-C, not by `SIGKILL`. It is
+blocked inside the kernel, in the nvidia driver's probe, and the only exits are
+the operation completing — it does not — or a reboot.
+
+**So the honest verdict on the whole feature is worse than the last one.** The
+detach is **not recoverable in-session by any route tried**:
+
+| Route | Result |
+|---|---|
+| `gpu_boost 4` (firmware restore) | `AE_NOT_FOUND` on `PEGP._ON`, aborts `WMBD` |
+| `echo 1 > /sys/bus/pci/rescan` | no-op; the device never left the bus |
+| `echo <dev> > .../nvidia/bind` | **hangs the writer in D state** |
+| `modprobe -r nvidia ...` | refused; refcount stuck at 50 |
+| **reboot** | **the only thing that works** |
+
+**Why the module reload cannot help either**, which rules out the remaining
+obvious idea: `nvidia` keeps a refcount of **50** after the half-eject, with
+`nvidia_uvm` and `nvidia_modeset` listed as users, so `modprobe -r` is refused
+before it starts. And once the bind has wedged, the probe path is holding
+device-level locks, so further bind or unbind attempts queue behind it and hang
+the same way.
+
+**Rebooting may itself be slow.** systemd will wait on the D-state task before
+giving up. `sudo systemctl reboot` first; if it stalls for more than a couple
+of minutes, `sudo reboot -f`, or enable SysRq and use it —
+`/proc/sys/kernel/sysrq` reads **16** here, which is sync only, so a SysRq
+reboot needs `echo 1 | sudo tee /proc/sys/kernel/sysrq` first.
+
+**This is the thing to know before ever writing `gpu_boost 3` on this
+machine:** it costs a reboot, every time. Not "a reboot if something goes
+wrong" — a reboot, as the normal outcome.
 **What this means for the feature, and it is not encouraging.** The matched
 detach/restore pair the `0x51` bound fix was argued from does not exist on this
 firmware. Value 3 unbinds the driver without ejecting the card; value 4 cannot
@@ -5661,17 +5710,11 @@ own `_Q49` calls `PG00._ON()`, the *slot's* power gate, while the WMI path
 calls `PEGP._ON()`, the *GPU's*, which does not exist here. The careful one
 may be the one that does not reference a missing symbol.
 
-**Consequence for anyone detaching**, corrected 29 Oct 2026 by doing it: a PCI
-rescan is **not** the recovery either, because the card never leaves the bus --
-rescanning finds nothing missing. What the detach actually leaves is a present
-but **unbound** device, so the recovery is a bind:
-
-```sh
-echo 0000:01:00.0 | sudo tee /sys/bus/pci/drivers/nvidia/bind
-sudo modprobe nvidia_drm
-```
-
-No reboot is needed. Do not assume `4` will bring it back -- it cannot.
+**Consequence for anyone detaching**, corrected twice on 29 Oct 2026 by
+actually doing it: **`gpu_boost 3` costs a reboot.** A PCI rescan is not the
+recovery, because the card never leaves the bus. Nor is a bind -- it hangs the
+writer in uninterruptible sleep. Nor is `gpu_boost 4`, which cannot run. See
+"The PCI bind does not recover it either".
 
 **And a consequence for the driver worth weighing:** `gpu_boost_store()`
 accepts `4` unconditionally, so a userspace GUI offering "reattach GPU" would
