@@ -1519,8 +1519,13 @@ defect, not a review.
 | `a16-5th-gmate` | **Integration branch. All work lands here.** |
 | `a16-5th` | Retired 24 Oct 2026. Local only; deleted on the fork. **Do not delete.** |
 | `a16-5th-kbd-charge-uevent` | PR #2's feature branch, merged. Local only; deleted on the fork. **Do not delete.** |
-| `p4-rem-a15` | Scratch branch cut from `7a54031`. No upstream configured — the same trap as the two retired branches, below. **The checkout is no longer on it**; see the row below |
-| `a16-5th-phase-a` | **Where the checkout is, and where the whole 29 Oct session landed — 39 commits.** No upstream, on no remote, and **not merged into `a16-5th-gmate`.** Builds clean and every script passes syntax, so it is ready to land; it simply has not been |
+| `p4-rem-a15` | Scratch branch, **redundant and due for deletion**: zero unique commits, fully contained in `a16-5th-gmate`, no tag points into it, and no hash this file cites depends on it — checked against all eleven. It is the **last branch tip still carrying the battery serial**, which is the reason to remove it rather than leave it lying about. Not covered by the do-not-delete rule |
+| `a16-5th-phase-a` | The 29 Oct session's 40 commits. **Merged into `a16-5th-gmate` by fast-forward on 29 Oct 2026**, so it is now identical to it and carries nothing unique. Safe to delete once `gmate` is pushed |
+
+**The checkout is on `a16-5th-gmate` as of 29 Oct 2026**, which is where it
+should be: the session's work was fast-forwarded onto it, so the integration
+branch is once again both the newest and the right place to commit. It is
+**41 commits ahead of `origin/a16-5th-gmate`** and unpushed.
 
 **The integration branch changed on 24 Oct 2026, and the old name is a trap.**
 PR #3 squash-merged the whole of `a16-5th` onto `a16-5th-gmate` as `8dad4e1`,
