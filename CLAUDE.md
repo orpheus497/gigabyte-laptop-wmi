@@ -1073,8 +1073,18 @@ with the other boot settings.
 **But nothing depends on this and it should probably stop here.** `0xD1` is an
 unlabelled byte; the only motivation for chasing it was USB sleep charging,
 which closed separately when BIOS setup turned out to have no USB option at
-all. Two of the four candidates are now eliminated and the remaining two cost
-two reboots each for a fact with no consumer.
+all. **One of the four candidates is eliminated and three remain**, at two
+reboots each, for a fact with no consumer.
+
+**That sentence said "two eliminated, two remain" and was wrong — corrected
+30 Oct 2026.** It contradicted the paragraph ten lines above it, which says
+three remain, and the error is worth naming because it is a counting mistake
+of a specific kind: **USB sleep charging was never one of the four.** The four
+are unmatched *Peripherals menu options* (RTC Support, Wake on LAN, SVM
+Enable, Network Stack); USB was a separate hypothesis, closed by the menu
+having no USB entry at all. Folding a differently-scoped closure into the
+tally double-counted it and halved the remaining work. A reader planning
+reboots off the closing count would have budgeted two instead of six.
 
 **The note that produced this result, kept because it is the method:** record
 the option's original value before changing it. The 29 Oct attempt did not,

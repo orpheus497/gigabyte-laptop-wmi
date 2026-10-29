@@ -153,16 +153,47 @@ kill_tree() {
 }
 
 cleaned=0
+RESTORE_OK=1
+# Check every restore write, and say so when one does not land. These three
+# used to discard both the exit status and stderr, so a failed fan_preset write
+# left the test's `gaming` preset and mode 2 in place while the script still
+# printed "== restored ==" -- the machine audible, with the output claiming
+# otherwise. Same helper and same RESTORE_OK convention as
+# tests/test-gpu-power.sh, so the two scripts fail the same way.
+put_back() {   # put_back <value> <path> <label>
+	if ! echo "$1" > "$2" 2>/dev/null; then
+		echo "  RESTORE FAILED: $3 could not be set back to '$1'" >&2
+		RESTORE_OK=0
+	fi
+}
 cleanup() {
 	[ "$cleaned" -eq 1 ] && return
 	cleaned=1
 	[ -n "$LOAD_PID" ] && kill_tree "$LOAD_PID"
 	# power_preset last: writing it re-applies the tier, so it must land after
 	# the profile it may need to read.
-	echo "$PROFILE_WAS"       > "$PROFILE"        2>/dev/null
-	echo "$PRESET_WAS"        > "$S/fan_preset"   2>/dev/null
-	echo "$POWER_PRESET_WAS"  > "$S/power_preset" 2>/dev/null
+	put_back "$PROFILE_WAS"      "$PROFILE"        platform_profile
+	put_back "$PRESET_WAS"       "$S/fan_preset"   fan_preset
+	put_back "$POWER_PRESET_WAS" "$S/power_preset" power_preset
 	sleep 3
+
+	# Verify fan_preset specifically, and retry once. It is the one restore
+	# whose failure is both audible and silent: the preset is the POLICY, so a
+	# preset left on `gaming` keeps the fans at mode 2 indefinitely and no
+	# later profile switch reclaims them. A write can also return 0 and still
+	# not stick, which the exit-status check above cannot see.
+	if [ "$(cat "$S/fan_preset" 2>/dev/null)" != "$PRESET_WAS" ]; then
+		echo "  fan_preset did not stick, retrying once" >&2
+		put_back "$PRESET_WAS" "$S/fan_preset" fan_preset
+		sleep 1
+		if [ "$(cat "$S/fan_preset" 2>/dev/null)" != "$PRESET_WAS" ]; then
+			echo "  RESTORE FAILED: fan_preset is still not '$PRESET_WAS'." >&2
+			echo "                  The fans may stay where this test left" >&2
+			echo "                  them. Put it back by hand:" >&2
+			echo "                    echo $PRESET_WAS | sudo tee $S/fan_preset" >&2
+			RESTORE_OK=0
+		fi
+	fi
 	# Write fan_mode back ONLY for a custom mode (3+), and never for 0-2.
 	#
 	# fan_mode_store() pins fan_preset from the mode it is given:
@@ -185,10 +216,14 @@ cleanup() {
 	# `auto` is the profile's to re-pick, so the preset is the one to protect.
 	if [ "$FAN_MODE_WAS" -ge 3 ] 2>/dev/null &&
 	   [ "$(cat "$S/fan_mode" 2>/dev/null)" != "$FAN_MODE_WAS" ]; then
-		echo "$FAN_MODE_WAS" > "$S/fan_mode" 2>/dev/null
+		put_back "$FAN_MODE_WAS" "$S/fan_mode" fan_mode
 		sleep 1
 	fi
-	printf '\n== restored ==\n'
+	if [ "$RESTORE_OK" -eq 1 ]; then
+		printf '\n== restored ==\n'
+	else
+		printf '\n== RESTORE INCOMPLETE -- check the values below by hand ==\n' >&2
+	fi
 	printf '   fan_preset=%s power_preset=%s platform_profile=%s\n' \
 		"$(cat "$S/fan_preset")" "$(cat "$S/power_preset")" "$(cat "$PROFILE")"
 	printf '   perf_mode=%s fan_mode=%s\n' \
