@@ -20,7 +20,13 @@
 # Usage: sudo bash tests/test-gpu-power.sh
 #
 # Restores perf_mode, gpu_boost, power_preset and the platform profile on every
-# exit path, including Ctrl-C. Takes about a minute.
+# exit path, including Ctrl-C.
+#
+# IT IS SLOW, around 8 minutes, and that is deliberate. Every reading samples
+# the limit for LIMIT_SAMPLES seconds and takes the minimum, because the
+# enforced limit wanders on its own and a single read lands wherever
+# arbitration happens to be. A faster window would reintroduce the false
+# failures this is here to prevent.
 
 set -uo pipefail   # deliberately not -e: a failure must still reach the restore
 
@@ -28,10 +34,14 @@ P=/sys/devices/platform/gigabyte_laptop
 PROFILE=/sys/firmware/acpi/platform_profile
 SETTLE=6           # the enforced limit takes several seconds to update;
                    # reading sooner reports the PREVIOUS value
-LIMIT_SAMPLES=12   # seconds of sampling per reading, minimum taken -- see
-                   # limit(). Must outlast an arbitration excursion, which was
-                   # measured at around twenty seconds, so this is deliberately
-                   # long rather than a token average.
+LIMIT_SAMPLES=30   # seconds of sampling per reading, minimum taken -- see
+                   # limit(). It MUST outlast an arbitration excursion or the
+                   # minimum is the excursion rather than the floor, which is
+                   # the false failure this sampling exists to prevent. The
+                   # longest excursion measured was about 20 s, so 30 carries
+                   # a 50% margin. This was 12 when first written, which is
+                   # shorter than the excursion the comment beside it already
+                   # named -- the value and its own justification disagreed.
 
 die() { echo "$*" >&2; exit 1; }
 say() { printf '\n== %s ==\n' "$*"; }
@@ -231,7 +241,7 @@ done
 
 say "result"
 printf '  %d passed, %d failed' "$pass" "$fail"
-[ "$skip" -gt 0 ] && printf ', %d skipped' "$skip"
+if [ "$skip" -gt 0 ]; then printf ', %d skipped' "$skip"; fi
 printf '\n'
 if [ "$fail" -ne 0 ]; then
 	echo "  Something has changed -- check CLAUDE.md's ACBT decode against the firmware."

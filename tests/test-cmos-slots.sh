@@ -46,8 +46,11 @@
 #
 #   1. run it
 #   2. reboot into BIOS setup (Del or F2 on Gigabyte)
-#   3. change ONE option, note its name and new value
+#   3. change ONE option. Write down its name AND its original value --
+#      nothing here can undo a BIOS change, so that note is the only way back
 #   4. boot back, run it again -- it diffs against the previous run itself
+#   5. to test a further option, restore the first one in the same visit, so
+#      only ever one option differs from the baseline
 #
 # THE SCRIPT KEEPS ITS OWN HISTORY, deliberately. This test is the one that
 # spans a reboot, so asking the caller to redirect output somewhere is a
@@ -152,9 +155,23 @@ if [ "$changed" -eq 0 ]; then
 	there are four unmatched options in Peripherals, so at most one of the four
 	is here.
 
-	Try another one. Wake on LAN first -- it is a toggle the firmware acts on at
-	boot and nothing normally depends on it. RTC Support second. Avoid SVM if you
-	run VMs or accelerated containers: it gates AMD-V and breaks them while off.
+	BEFORE TRYING ANOTHER: put the one you just changed back.
+
+	  1. note its ORIGINAL value before you touch it, every time
+	  2. reboot into setup, restore it, and change the NEXT one
+	  3. run this script again -- that reading is both the restored baseline
+	     and the new test's "before", so it does double duty
+
+	Restoring as you go is what keeps the result attributable. Leave two
+	options changed at once and a byte that moves cannot be pinned to either,
+	which is the whole reason this test changes one thing at a time. It also
+	means an interrupted run leaves the machine in a state you wrote down
+	rather than one you have to reconstruct -- nothing in this script can undo
+	a BIOS change for you, so the note is the only restore mechanism there is.
+
+	Order: Wake on LAN first -- it is a toggle the firmware acts on at boot and
+	nothing normally depends on it. RTC Support second. Avoid SVM if you run
+	VMs or accelerated containers: it gates AMD-V and breaks them while off.
 
 	If all four come back unchanged, 0xD1 closes as unidentifiable from the
 	menu, which is a real answer and costs nothing: no feature depends on it.

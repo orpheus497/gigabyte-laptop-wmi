@@ -759,12 +759,19 @@ Peripherals
 
 Three things follow, and the first two are what make this worth the space:
 
-- **USB sleep charging closes for good on this machine.** Not "unidentified" —
-  **absent from the firmware's own settings menu**, which is a stronger
-  negative than the missing `0x7A`/`0x7B` methods on their own. There is no
-  option to flip, so there is nothing `0xD1` could be holding for it, and the
-  two `usb_charge_*` nodes have no feature behind them by any route. See "The
-  four nodes that read nothing".
+- **USB sleep charging has no route this driver can expose, and that is as far
+  as the evidence goes.** `0x7A` and `0x7B` are absent from WMBC and WMBD,
+  `EC0.USBC` is a dead declaration with no other reference, and setup offers no
+  USB option to store in `0xD1` — so there is nothing for the two
+  `usb_charge_*` nodes to drive and they are correctly hidden. See "The four
+  nodes that read nothing".
+
+  **It does not establish that the hardware cannot do it**, and an earlier
+  version of this bullet said it "closes for good". The EC's own firmware is
+  not dumpable, the `ERCD` mailbox's opcodes are largely unenumerated, and a
+  later BIOS could add the menu entry. What is ruled out is **every route
+  visible from here** — enough to hide the nodes and stop work, not enough to
+  assert the silicon lacks the feature.
 - **The LED entries corroborate the slot map independently.** "Battery LED
   Enable/Disable" and "Power LED Enable/Disable" are exactly the two settings
   `0x88`/`0x87` persist to `0xD9`/`0xDA`, and they are the only two rows in
@@ -862,9 +869,9 @@ firmware's own `0xF7` marker in byte 0 separates them. Both tests now live in
 `gigabyte_laptop_light_sensor_method()`, shared by `probe()` and `is_visible()`
 so the two cannot drift apart.
 
-**`usb_charge_s3_toggle` / `usb_charge_s4_toggle` — closed 29 Oct 2026. The
-feature does not exist on this machine.** It had exactly one lead and the lead
-is dead.
+**`usb_charge_s3_toggle` / `usb_charge_s4_toggle` — closed 29 Oct 2026 as
+unreachable, which is narrower than "the feature does not exist".** Every
+route visible from here is ruled out, and the one lead is dead.
 
 The firmware facts are unchanged. `USB_SLEEP 0x7A` and `USB_HIBERNATE 0x7B` are
 both absent, and there is no live EC field for the feature either: `EC0.USBC`,
@@ -879,10 +886,16 @@ machines. **It is not a setup option on this one.** BIOS setup on FB03 has no
 USB entry of any kind; the Peripherals menu is enumerated in full under "The
 extended-settings slot map".
 
-**That is a stronger negative than the missing methods were**, which is why it
-closes the question rather than parking it. Two absent WMI methods only say the
-driver's route is gone; an absent BIOS option says the firmware does not
-implement the behaviour at all, so there is nothing for any route to reach.
+**That is a stronger negative than the missing methods alone**, which is why it
+closes the question rather than parking it: two absent WMI methods say only
+that the driver's route is gone, while an absent BIOS option removes the
+stored-setting route as well.
+
+**It is not proof the hardware cannot do it.** The EC's own firmware is not
+dumpable, the `ERCD` mailbox's opcodes are largely unenumerated, and a later
+BIOS could add the entry. What is established is that **no route visible from
+here exists** — enough to hide the nodes and stop work on it, not enough to
+assert the silicon lacks the feature.
 **The two nodes are already hidden at load** by the `is_visible` gate — the
 right outcome, and now for a confirmed reason rather than a provisional one.
 
@@ -1211,6 +1224,8 @@ tests/test-cmos-slots.sh     read 0xE6 and 0xA3 either side of a BIOS change,
 tests/test-dgpu-detach.sh    detach and restore the dGPU, and measure what
                              detaching actually saves
 tests/test-apu-burst.sh      do the APU's short-burst power limits bind?
+tests/test-dynamic-boost.sh  which way round is dynamic_boost? Measures the
+                             SPREAD of the GPU limit, not its value
 ```
 
 **Every one of them restores what it touched on every exit path, including
@@ -2652,19 +2667,40 @@ obvious meaning and a standard keycode that every desktop already handles. The
 entry is in `gigabyte_laptop_keymap[]` alongside GiMate.
 
 **There is a double-fire hazard for anyone who has already worked around
-this**, and it has to be dealt with when the driver is updated. The EC also
-synthesises a scancode combo for this key — on this machine KDE reads it as
-`F15` / `Meta+Volume Mute`, and `kglobalshortcutsrc` had `mic_mute` bound to
-both. With the driver now delivering `KEY_MICMUTE` as well, a surviving manual
-binding means **two** toggles per press, which is a silent no-op and looks
-exactly like the key not working. Remove the manual binding; the standard
-keycode needs none.
+this.** The EC also synthesises a scancode combo for this key, so with the
+driver now delivering `KEY_MICMUTE` too, a **hand-added** binding on that
+combo means two toggles per press — a silent no-op that looks exactly like the
+key not working.
 
-That three-layer workaround — EC synthesises `Super`+F-key, `input-remapper`
-collapses it, KDE binds the result — is what the mapping replaces. The
-`input-remapper` preset on this machine maps `Super`+`Shift`+`F23` to `F13`,
-which is the same pattern for a different key and is worth checking before it
-is removed.
+**Only hand-added bindings count, and this file got that wrong first time.** It
+said to remove `Meta+Volume Mute` from KDE's `mic_mute` shortcut. That is a
+**KDE default**, not a workaround, and removing it would have broken a stock
+binding for nothing. The entry reads `Microphone Mute\tMeta+Volume Mute` and
+both ship with Plasma; `Microphone Mute` is the keysym `KEY_MICMUTE` arrives
+as, which is precisely why the mapping needs no configuration. What *was*
+hand-added here was a bare `F15`, already removed by the time this was written.
+The narrow lesson: **before telling someone to remove a desktop binding,
+establish that they added it** — a stock shortcut and a workaround look
+identical in a config file.
+
+That three-layer pattern — EC synthesises `Super`+F-key, `input-remapper`
+collapses it, the desktop binds the result — is what the mapping replaces.
+
+**The `input-remapper` preset on this machine is the GiMate key, not this
+one.** `Super`+`Shift`+`F23` → `F13`, per the user. So it must not be removed
+as part of a mic-mute cleanup — and it **contradicts the `showkey` test
+recorded under Phase 3**, which found GiMate emitting no scancode at all. Both
+cannot be true: a preset keyed on that combo from the AT keyboard implies
+GiMate does emit one.
+
+Three untested explanations: the `showkey` run was taken with `input-remapper`
+holding the device, which this file warns about immediately above that result;
+the combo appears only in some firmware state; or the preset was speculative
+and never fires. **Settle it before trusting either claim** — stop
+`input-remapper`, then `sudo libinput debug-events --show-keycodes` and press
+GiMate. If it does emit the combo then GiMate has the same double-delivery
+shape as mic mute, and the keymap comment saying it "emits no i8042 scancode"
+needs correcting.
 
 **`0xEF` is the lid, and that one does not need a guess.** `_Q70` and `_Q71`
 both send `SMGR (0xEF, LSTE)` *and* `Notify (LID0, 0x80)` — the ACPI lid

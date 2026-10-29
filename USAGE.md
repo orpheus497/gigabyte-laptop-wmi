@@ -182,16 +182,21 @@ Mic mute gets the standard one because it has a single obvious meaning, and
 `KEY_MICMUTE` is what GNOME and KDE already listen for.
 
 **If you previously worked around the mic-mute key, remove that workaround.**
-The firmware *also* synthesises a scancode combo for it, which desktops read as
-something odd — on the machine this was developed against, KDE saw
-`F15` / `Meta+Volume Mute`. A manual binding on that combo, or an
-`input-remapper` preset collapsing it, will now fire **in addition** to the
-driver's `KEY_MICMUTE`. Two mute toggles per press cancel out, so the key looks
-broken when in fact both halves are working:
+The firmware *also* synthesises a scancode combo for it, so desktops may read
+the key as something odd. If you bound that combo by hand, or set up an
+`input-remapper` preset to collapse it, that binding will now fire **in
+addition** to the driver's `KEY_MICMUTE`. Two mute toggles per press cancel
+out, so the key looks broken when in fact both halves are working.
+
+**Only remove bindings you added yourself.** On KDE the `mic_mute` shortcut
+ships with `Microphone Mute` *and* `Meta+Volume Mute` as defaults — both are
+standard and neither is a workaround, so leave them alone. `Microphone Mute` is
+the keysym this driver's `KEY_MICMUTE` arrives as, which is exactly why no
+configuration is needed.
 
 ```sh
-# KDE: Settings -> Shortcuts -> Audio Volume -> "Microphone Mute"
-# Clear any custom binding; the standard keycode needs none.
+# What is bound now. A lone function key such as F13 or F15 in this line is
+# the kind of thing that was added by hand; the two names above are not.
 grep -n mic_mute ~/.config/kglobalshortcutsrc
 ```
 
@@ -201,6 +206,12 @@ Check for an `input-remapper` preset on the keyboard too, if you use it:
 ls ~/.config/input-remapper-2/presets/*/
 ```
 
+A preset that maps a `Super`+function-key combo to a plain function key is this
+pattern. Work out which physical key it is for before removing it — on the
+machine this was developed against, one such preset turned out to be for the
+**GiMate** key, which the driver reports as `KEY_PROG1` on its own. Removing
+that preset is safe only once whatever you bound to its output is moved onto
+`KEY_PROG1` instead.
 **Events the driver does not map are logged rather than dropped**, so a key
 this family uses that nobody has accounted for announces itself:
 
@@ -509,11 +520,15 @@ created there.** Both method IDs are absent from that generation, and there is
 no live controller field behind the feature either. The driver checks at load
 time and omits both nodes rather than publishing toggles that always read `0`.
 
-**It is not a driver gap — the feature is not in the firmware at all.** BIOS
-setup on this generation has no USB option of any kind, so there is nothing to
-enable by any route: not through this driver, not through a BIOS setting, and
-not through a vendor tool. Confirmed on a `GA65TH` running BIOS FB03 by reading
-the whole Peripherals menu.
+**It is not a driver gap.** BIOS setup on this generation has no USB option of
+any kind either, so there is no setting for the driver to read or write and
+nothing a vendor tool could reach through the same interfaces. Confirmed on a
+`GA65TH` running BIOS FB03 by reading the whole Peripherals menu.
+
+That rules out every route visible from Linux. It does not prove the hardware
+is incapable — the embedded controller's own firmware cannot be read, so it may
+well charge from a port in sleep without exposing a switch for it. Try it with
+a phone if you want to know; there is nothing here to configure either way.
 
 ## Keyboard backlight
 

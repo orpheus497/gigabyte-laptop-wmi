@@ -274,8 +274,14 @@ for t in $(seq 1 "$SECONDS_TOTAL"); do
 			if (( tail_n == 10 )); then
 				base_avg=$((base_sum / base_n))
 				tail_avg=$((tail_sum / 10))
-				if [ -z "$step_at" ] &&
-				   (( tail_avg * 100 < base_avg * STEP_FRACTION )); then
+				if [ -n "$step_at" ]; then
+					# A step was already reported. Keep printing the windows
+					# so the plateau after it is visible, but do not call them
+					# "no step" -- the step stands, and re-reporting it every
+					# window would be just as misleading.
+					printf '  -- %ds: last 10 averaged %d W (stepped at %ds) (%ds left)\n' \
+						"$t" "$tail_avg" "$step_at" "$((SECONDS_TOTAL - t))"
+				elif (( tail_avg * 100 < base_avg * STEP_FRACTION )); then
 					step_at=$t
 					printf '  ^^ STEP DOWN: 10-sample average %d W against a %d W baseline\n' \
 						"$tail_avg" "$base_avg"
@@ -315,18 +321,37 @@ if [ -n "$MODE_HOLD" ]; then
 		figure for this mode is the number the plateau should now match.
 		EOF
 	else
-		cat <<-EOF
+		printf '\n\tNO step down over %ss.\n' "$SECONDS_TOTAL"
+		# The "sustained limit is not enforced" conclusion only follows for
+		# mode 0, and only if the load actually exceeded mode 0's 45 W SPL.
+		# Held in any other mode the SPL is 65 or 70 W and this run says
+		# nothing about it; and a load that never reached the ceiling cannot
+		# show a ceiling binding, which is the error that made the first
+		# sweep's verdict worthless.
+		if [ "$MODE_HOLD" = 0 ] && (( base_avg > 45 )); then
+			cat <<-EOF
 
-		NO step down over ${SECONDS_TOTAL}s.
+			For mode 0 that is the interesting answer: 0x30 programs 45 W, the
+			part held a ${base_avg} W plateau throughout, so the
+			sustained limit is not being applied on any timescale this run
+			covers. Saying "not enforced" is supported in a way the 30-second
+			sweep never supported it.
 
-		For mode 0 that is the interesting answer: 0x30 programs 45 W, the part
-		held its ~65 W sPPT plateau throughout, so the sustained limit is not
-		being applied on any timescale this run covers. Saying "not enforced"
-		is now supported in a way the 30-second sweep never supported it.
+			If this was a shorter hold, try a longer one before concluding --
+			some sustained windows run to several minutes.
+			EOF
+		else
+			cat <<-EOF
 
-		If this was a shorter hold, try a longer one before concluding -- some
-		sustained windows run to several minutes.
-		EOF
+			Baseline $( ((base_avg > 0)) && echo "${base_avg} W" || echo "not established" ), peak ${peak} W, mode ${MODE_HOLD}.
+
+			This does NOT establish that a sustained limit is unenforced. That
+			conclusion needs mode 0, whose 45 W SPL sits well below the 65 W
+			sPPT, AND a load that actually exceeded 45 W -- otherwise there was
+			no ceiling for the part to be held against and nothing to observe.
+			$( [ "$MODE_HOLD" = 0 ] || echo "Mode $MODE_HOLD programs a higher SPL; re-run with --hold 0." )
+			EOF
+		fi
 	fi
 else
 	cat <<'EOF'
