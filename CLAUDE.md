@@ -418,6 +418,51 @@ it answers INTEGER and is correctly detected. **The gate is sound on every
 firmware we hold.** Recorded as a bound on the technique rather than a defect,
 and worth re-checking against any new dump: it is the one way the test can lie.
 
+### A BUFFER reply does not mean absent — audited 29 Oct 2026
+
+**The blind spot above was described as theoretical. It is not: this firmware
+has one, and the tooling was calling it "not implemented".** The question that
+found it — *how many other things did we record as non-functional because they
+answer with a buffer?* — deserves the full answer, because the audit is cheap
+and the result bounds the damage exactly.
+
+**Exactly one WMBC case on this firmware returns a buffer**, derived by
+listing every `Return` in `WMBC`'s own range and discarding the EC-field and
+constant returns:
+
+```
+Case (0x63)  ->  Return (TEST)      Name (TEST, Buffer (0x05))   :9163
+```
+
+That is `power_on_time`'s five CMOS bytes. Everything else returns an
+`EC0.<field>`, an `RXCM()`, or a constant — all integers. (`Return (DEVS)` is
+`_WED`'s event buffer, not a `WMBC` case.)
+
+**No conclusion in this file was ever damaged by it**, and that is a fact
+rather than a hope: `power_on_time` has only ever been read through
+`get_devstate_buf()`, which takes the buffer branch, and it returned real
+values both times it was sampled — `0 1 5 5 2`, then `0 0 0 0 0`. The type
+test was never run against `0x63` and no note anywhere calls it absent.
+
+**What was wrong is the tooling's wording, now fixed.** `debug_method` printed
+`not implemented: reply was not an integer` for any non-integer reply, which
+would have been a flat false negative on `0x63`. It now says *"absent, or a
+method that returns a buffer"*, and the sentinel marker says *"echoed back --
+absent"* when the reply is the argument, which is what actually separates the
+two cases.
+
+**The same trap caught `light_sensor` for real, on other generations.**
+`LIGHT_SENSOR_NEW` (`0xFC`) legitimately answers with a four-byte buffer where
+`gigabyte_laptop_method_implemented()` demands an INTEGER, so that gate would
+call a *working* sensor absent on an AORUS 17X. It is why that node needed
+`gigabyte_laptop_light_sensor_method()` rather than the plain check — see "the
+four nodes that read nothing".
+
+**So the rule for any future capability gate:** the plain `implemented()` check
+is only valid for a method known to return an integer. Check the `WMBC` case
+body first. Two IDs on firmware we hold need the longer route — `0x63` and
+`0xFC` — and both are now handled.
+
 ### A third of WMBD's setters return nothing, and that read as failure
 
 The mirror image of the WMBC echo problem, found from a spurious warning in the
@@ -3906,12 +3951,19 @@ method 0xed arg 0x5a -> 0x5a (90) [echoed argument: method not implemented]
 method 0xe7 arg 0x5a -> 0x0 (0)
 ```
 
-**That sample is in the node's _old_ wording.** `debug_method` was later
-given the typed read, and the same call now prints
-`[not implemented: reply was not an integer] [argument echoed back]`. The
-reading is unchanged -- see the bracket-matching note under "WMBC echoes
-unknown method IDs" for why the two strings are not interchangeable when
-parsed.
+**That sample is in the node's _oldest_ wording, and the node has been
+reworded twice.** It gained the typed read, then on 29 Oct 2026 its negative
+message was corrected for over-claiming. The same call now prints
+
+```
+method 0xed arg 0x5a -> 0x5a (90) [reply was not an integer: absent, or a method that returns a buffer] [argument echoed back -- absent]
+```
+
+The reading of *this* case is unchanged — `0xED` is genuinely absent from
+WMBC — but see "A BUFFER reply does not mean absent" below for why the old
+wording was wrong in general. One incidental improvement: the negative string
+no longer contains the substring `implemented` at all, so the parsing hazard
+that caught `scripts/test-charge-limit.sh` can no longer bite.
 
 `0xED` echoes the sentinel, confirming on this machine's firmware that
 performance mode is write-only exactly as the ASL said. `0xE7` does not echo,

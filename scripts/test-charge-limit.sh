@@ -79,9 +79,14 @@ echo "   0x65 BCPC : $BASE_LIMIT"
 # parses as a thoroughly plausible 90 -- enough to run the whole test against a
 # field nothing reads, then "restore" 90 as the ceiling.
 #
-# Match the brackets, not the bare word. The negative form is
-#   [not implemented: reply was not an integer]
-# which *contains* "implemented", so a *implemented* glob passes both.
+# Match the brackets, not the bare word. This used to matter a great deal: the
+# negative form was "[not implemented: reply was not an integer]", which
+# *contains* "implemented", so a bare *implemented* glob passed both cases and
+# silently accepted an absent method.
+#
+# The node was reworded on 29 Oct 2026 and the negative form no longer contains
+# that substring at all, so the trap is gone. Keep matching the brackets
+# anyway -- it costs nothing and it is correct against both wordings.
 for reply in "$BASE_MODE" "$BASE_LIMIT"; do
 	case $reply in
 	*"[implemented]"*) ;;

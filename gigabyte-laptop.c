@@ -1789,19 +1789,29 @@ static ssize_t debug_method_show(struct device *dev, struct device_attribute *at
 		return ret;
 
 	/*
-	 * Two independent signals, because neither is complete on its own. The
-	 * reply type is conclusive -- a BUFFER is the Default echo -- but says
-	 * nothing about the value. The sentinel comparison is only suggestive,
-	 * since a sentinel can collide with a real reading, but it is what
-	 * flags the case where the two disagree.
+	 * Two independent signals, because neither is complete on its own.
+	 *
+	 * An INTEGER reply is conclusive: the firmware has a case for this ID.
+	 * A BUFFER reply is NOT conclusive the other way, and saying otherwise
+	 * was wrong. WMBC ends in Default { Return (Arg2) } with Arg2 passed as
+	 * a four-byte buffer, so an absent ID answers with a buffer -- but so
+	 * does a case that genuinely returns one. On this firmware 0x63 is
+	 * exactly that: it returns TEST, declared Buffer (0x05), the five CMOS
+	 * bytes behind power_on_time. Reporting that as "not implemented" would
+	 * be a false negative on a method that demonstrably works.
+	 *
+	 * The sentinel comparison is what separates them in practice: the echo
+	 * hands back the argument, a real buffer almost never will. It is
+	 * suggestive rather than conclusive, since a sentinel can collide with
+	 * a real reading, which is why both are printed and neither is hidden.
 	 */
 	echoed = gigabyte->debug_arg && output == (int)gigabyte->debug_arg;
 
 	return sysfs_emit(buf, "method 0x%02x arg 0x%x -> 0x%x (%d) [%s]%s\n",
 			gigabyte->debug_method, gigabyte->debug_arg, output, output,
 			type == ACPI_TYPE_INTEGER ? "implemented" :
-				"not implemented: reply was not an integer",
-			echoed ? " [argument echoed back]" : "");
+				"reply was not an integer: absent, or a method that returns a buffer",
+			echoed ? " [argument echoed back -- absent]" : "");
 }
 
 /*
