@@ -259,13 +259,28 @@ if ! dkms install "$NAME/$VERSION" --force; then
 	# next boot asks systemd-modules-load for a module that no longer exists
 	# and fails with nothing explaining why.
 	#
-	# Removing that entry is the honest end state: no driver is installed, so
-	# nothing should claim one loads at boot. It is restored by the successful
-	# run that follows.
+	# SAY SO; DO NOT DELETE IT. An earlier version of this failure path removed
+	# the entry, and that broke an invariant documented at the top of this
+	# script: the modules-load.d file is deliberately NOT ownership-gated
+	# *because* the script only ever overwrites it with identical content, never
+	# deletes it, except under an explicit --no-autoload. An install failure is
+	# not an explicit request, so deleting it there would strand a packaged
+	# gigabyte-laptop-dkms -- rpm or dpkg still listing a file that is gone,
+	# which is the exact harm the ownership check exists to prevent.
+	#
+	# The two costs are not comparable. Leaving the entry costs one journal line
+	# at the next boot ("Failed to find module 'gigabyte_laptop'"), which is
+	# noise. Deleting a package-owned file damages the package database and
+	# silently discards an autoload choice the caller never asked to drop.
 	if [ -e /etc/modules-load.d/gigabyte-laptop.conf ]; then
-		rm -f /etc/modules-load.d/gigabyte-laptop.conf
-		echo "Removed /etc/modules-load.d/gigabyte-laptop.conf so the next boot" >&2
-		echo "does not request a module that is no longer installed." >&2
+		echo >&2
+		echo "NOTE: /etc/modules-load.d/gigabyte-laptop.conf is still present, so" >&2
+		echo "      the next boot will log 'Failed to find module gigabyte_laptop'" >&2
+		echo "      until an install succeeds. That is cosmetic. To silence it" >&2
+		echo "      yourself:" >&2
+		echo "        sudo rm /etc/modules-load.d/gigabyte-laptop.conf" >&2
+		echo "      It is left in place rather than removed here because a" >&2
+		echo "      distro package may own it." >&2
 	fi
 	echo >&2
 	echo "No driver is installed now. Fix the cause and run this again; the" >&2
