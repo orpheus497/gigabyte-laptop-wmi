@@ -2562,14 +2562,27 @@ static void gigabyte_laptop_kbd_brightness_changed(u8 level)
  * GiMate is reported as a programmable key, so GNOME and KDE can bind it to
  * whatever the user wants.
  *
+ * Mic mute (0xC8) gets the standard keycode, because unlike GiMate it is a key
+ * with one obvious meaning that every desktop already handles. Identified on a
+ * GAMING A16 5TH by pressing it; the firmware does not name it, but the older
+ * Aero/AORUS DSDTs assign the same event number in AML -- _Q41, between _Q40
+ * (audio mute, which carries the MUTE field) and _Q42 (Fn-lock). It passes a
+ * constant Zero rather than a field, which is why the state byte is always 0:
+ * the controller announces the press and tracks no state of its own.
+ *
  * Mode (Fn+F7) is deliberately absent: it cycles the fan preset in the kernel
  * instead, which is what it does on Windows and the only way to reach gaming
  * mode without a terminal. gigabyte_laptop_wmi_notify() intercepts it before
  * the keymap is consulted, so it reports no keycode at all.
+ *
+ * Not mapped, and deliberately: 0xEF is the lid, which the kernel already
+ * services through LID0 -- the firmware sends both, so mapping it here would
+ * duplicate an event the ACPI button driver has already delivered.
  */
 #define GIGABYTE_EVENT_MODE 0xCC
 
 static const struct key_entry gigabyte_laptop_keymap[] = {
+	{ KE_KEY, 0xC8, { KEY_MICMUTE } },	// microphone mute
 	{ KE_KEY, 0xCE, { KEY_PROG1 } },	// GiMate
 	{ KE_END, 0 }
 };

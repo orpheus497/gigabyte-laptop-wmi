@@ -164,6 +164,54 @@ It reacts to the **key** only. Writing `fan_preset` or `fan_mode` from a script
 does not raise the notification, because the driver does not notify on a write —
 the caller of a write already knows what it did.
 
+
+## Hotkeys
+
+On the Gigabyte Gaming A16, three keys arrive as WMI events rather than as
+ordinary keyboard scancodes. The driver creates an input device,
+**"Gigabyte laptop hotkeys"**, and reports them there.
+
+| Key | Reported as | Who acts on it |
+|---|---|---|
+| GiMate | `KEY_PROG1` | you — bind it in your desktop's shortcut settings |
+| Microphone mute | `KEY_MICMUTE` | your desktop, with no configuration |
+| Mode (Fn+F7) | *nothing* | the driver — it cycles `fan_preset`, see above |
+
+GiMate gets a programmable keycode because only you can say what it should do.
+Mic mute gets the standard one because it has a single obvious meaning, and
+`KEY_MICMUTE` is what GNOME and KDE already listen for.
+
+**If you previously worked around the mic-mute key, remove that workaround.**
+The firmware *also* synthesises a scancode combo for it, which desktops read as
+something odd — on the machine this was developed against, KDE saw
+`F15` / `Meta+Volume Mute`. A manual binding on that combo, or an
+`input-remapper` preset collapsing it, will now fire **in addition** to the
+driver's `KEY_MICMUTE`. Two mute toggles per press cancel out, so the key looks
+broken when in fact both halves are working:
+
+```sh
+# KDE: Settings -> Shortcuts -> Audio Volume -> "Microphone Mute"
+# Clear any custom binding; the standard keycode needs none.
+grep -n mic_mute ~/.config/kglobalshortcutsrc
+```
+
+Check for an `input-remapper` preset on the keyboard too, if you use it:
+
+```sh
+ls ~/.config/input-remapper-2/presets/*/
+```
+
+**Events the driver does not map are logged rather than dropped**, so a key
+this family uses that nobody has accounted for announces itself:
+
+```sh
+journalctl -kf | grep -i "unrecognised WMI event"
+```
+
+Press the key, read the number, and it can be added. Two numbers are known and
+deliberately unmapped: `0xCC` is the Mode key, which the kernel consumes, and
+`0xEF` is the lid, which the kernel already handles through the standard ACPI
+lid device — mapping it here would duplicate an event you have already had.
 ## Custom fan speed
 
 Aero/AORUS laptops support setting a custom fan speed. However, this only takes effect if either auto or fixed mode is enabled.

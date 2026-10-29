@@ -389,10 +389,19 @@ else, while a *name-to-number table* is either present or absent.
 
 **Validate the transfer with an anchor rather than assuming it.** Here the
 anchor is `0xF6`: the Aero AML says `SMGR (0xF6, KBLL)`, and `0xF6` was
-independently observed on this machine toggling with Fn+Space. One confirmed
-entry is what licenses reading the rest off the same table — without an anchor
-this would be cross-generation guessing of the kind the rest of this file warns
-against.
+independently observed on this machine toggling with Fn+Space. Without an
+anchor this would be cross-generation guessing of the kind the rest of this
+file warns against.
+
+**But be precise about what the anchor buys, because overstating it cost a
+wrong guess within the hour.** It establishes that the **numbering space is
+the same** -- same events, same numbers, same stateless-or-field convention.
+It does **not** establish that a given number is the same *key*, because the
+chassis are not the same and do not have the same keys. So read the old dumps
+for an event's **shape** -- which query block it sits in, whether it carries a
+field or a constant -- and press the hardware to find out what it is. `0xC8`
+is the worked example: the shape was read correctly off the Aero and the key
+was guessed wrongly from its neighbour's label.
 
 See "A fourth event number fires on this machine" for the decode itself.
 ### WMBC echoes unknown method IDs — this breaks naive validation
@@ -2525,7 +2534,7 @@ So:
 | `0xCE` | GiMate key |
 | `0xCC` | Mode key (Fn+F7) |
 | `0xF6` | keyboard backlight level, published by the EC — see Step 6a |
-| `0xC8` | a **hotkey or button**, specific key unidentified — EC query `_Q41` on the older generation, between mute and Fn-lock. Stateless. See below |
+| `0xC8` | **microphone mute** — mapped as `KEY_MICMUTE`. EC query `_Q41` on the older generation, stateless by design |
 | `0xEF` | **the lid** — `_Q70`/`_Q71`, which also `Notify (LID0, 0x80)`. Observed as a `0x00`/`0x01` close/open pair. The kernel handles the lid itself, so there is nothing for this driver to do |
 
 *The assignment follows the press order and is worth one confirming press each
@@ -2547,8 +2556,9 @@ The Gaming generation collapsed them into a single generic forwarder and moved
 the assignment into EC firmware; the older generation still has the table, and
 it is committed here.
 
-**The vocabulary is shared across generations, and `0xF6` proves it rather than
-merely suggesting it.** `Aero-15-Classic-DSDT.dsl:61170` is
+**The numbering space is shared across generations, and `0xF6` anchors it.**
+(Shared *numbering*, not a shared key list -- see the `0xC8` correction below
+for why that distinction cost a wrong guess.) `Aero-15-Classic-DSDT.dsl:61170` is
 `_Q94 { SMGR (0xF6, KBLL) }` — and `0xF6` was independently observed on *this*
 machine toggling in step with Fn+Space and the keyboard backlight, which is how
 `max_brightness` was measured. So one entry in the old table is confirmed by
@@ -2564,7 +2574,7 @@ query:
 | `0xC5` | `_Q89` | `CDON` | optical drive |
 | `0xC6` | `_Q57` | `Zero` | unidentified |
 | `0xC7` | `_Q40` | `MUTE` | mute |
-| **`0xC8`** | **`_Q41`** | **`Zero`** | **unidentified — the one in question** |
+| **`0xC8`** | **`_Q41`** | **`Zero`** | **microphone mute — confirmed on the 5TH** |
 | `0xC9` | `_Q42` | `Zero` | Fn-lock (`FNKS`, per the method table) |
 | `0xCA` | `_Q33` | `PSON` | power source |
 | `0xCF` | `_Q64` | `Zero` | unidentified |
@@ -2601,26 +2611,60 @@ boot  -6   1 event    12:54:11
 Twelve boots have none at all. So firmware initialisation and queued-notify
 theories are both out — it is something a person does.
 
-**The leading guess, stated as a guess: a volume key.** It sits between mute
-and Fn-lock in the query block, it is stateless the way a "something happened"
-announcement is, the eight-in-24-seconds burst has the rhythm of repeated key
-presses, and KDE's audio settings panel was open in the journal two minutes
-before that cluster. **None of that is proof** and the firmware does not name
-it — there is no volume field anywhere near `MUTE` in either old dump, and the
-`_Q41` body carries no comment.
+**`0xC8` is the microphone-mute key — identified 29 Oct 2026 by pressing it**,
+after the static analysis had narrowed it to "a key in the mute/Fn-lock block"
+and guessed wrong about which one.
 
-**Settling it costs one minute and needs no code.** Watch the log and press
-things:
-
-```sh
-journalctl -kf | grep -i "unrecognised WMI event"
+```
+Oct 29 16:43:43  Unrecognised WMI event 0xc8 (state 0x00)
+Oct 29 16:43:44  Unrecognised WMI event 0xc8 (state 0x00)
+Oct 29 16:43:46  Unrecognised WMI event 0xc8 (state 0x00)
+Oct 29 16:43:47  Unrecognised WMI event 0xc8 (state 0x00)
 ```
 
-Then work through the Fn row and any side buttons. The event number names
-itself the moment the right key is pressed. **`0xEF` is worth a press too** —
-closing and opening the lid should produce the `0x00`/`0x01` pair, which would
-confirm the lid decode on this hardware the same way `0xF6` confirmed the
-keyboard backlight one.
+**It fits the firmware better than the guess did**, which is the satisfying
+part. On the Aero, `_Q40` sends `SMGR (0xC7, MUTE)` — audio mute, carrying the
+EC's own `MUTE` field, because the controller tracks that state. `_Q41` sends
+`SMGR (0xC8, Zero)` — a constant, no state. A microphone the EC does not own
+the mute state of is exactly the thing that gets announced statelessly, and it
+explains why every occurrence ever logged here reads `state 0x00`.
+
+**The guess was "a volume key", and the reasoning behind it was the error.**
+It went: the Aero labels `0xC7` as `MUTE`, so `0xC8` is something *else*, and
+the something else next to mute and Fn-lock is probably volume. Every step is
+plausible and the first one is the mistake — **`0xC7` being audio mute does not
+make `0xC8` not-a-mute.** There are two mute keys on this chassis and the
+vocabulary has one event for each. Reasoning outward from an adjacent label
+beats having no hypothesis, and it is not evidence.
+
+**That also sharpens a claim made an hour earlier in this file.** "One
+confirmed entry is what licenses reading the rest off the same table" was too
+strong, and `0xF6` does not license it. What the anchor shows is that the
+**table is the right table** — the same event vocabulary, the same numbering
+space. It says nothing about which *key* on a different chassis sends a given
+number, because the chassis has different keys. Use the old dumps to find the
+*shape* of an event (which block it is in, whether it carries state) and the
+hardware to find out what it is.
+
+**Mapped as `KEY_MICMUTE` (248), as of 29 Oct 2026.** Unlike GiMate, which gets
+`KEY_PROG1` because only the user can say what it should do, mic mute has one
+obvious meaning and a standard keycode that every desktop already handles. The
+entry is in `gigabyte_laptop_keymap[]` alongside GiMate.
+
+**There is a double-fire hazard for anyone who has already worked around
+this**, and it has to be dealt with when the driver is updated. The EC also
+synthesises a scancode combo for this key — on this machine KDE reads it as
+`F15` / `Meta+Volume Mute`, and `kglobalshortcutsrc` had `mic_mute` bound to
+both. With the driver now delivering `KEY_MICMUTE` as well, a surviving manual
+binding means **two** toggles per press, which is a silent no-op and looks
+exactly like the key not working. Remove the manual binding; the standard
+keycode needs none.
+
+That three-layer workaround — EC synthesises `Super`+F-key, `input-remapper`
+collapses it, KDE binds the result — is what the mapping replaces. The
+`input-remapper` preset on this machine maps `Super`+`Shift`+`F23` to `F13`,
+which is the same pattern for a different key and is worth checking before it
+is removed.
 
 **`0xEF` is the lid, and that one does not need a guess.** `_Q70` and `_Q71`
 both send `SMGR (0xEF, LSTE)` *and* `Notify (LID0, 0x80)` — the ACPI lid
