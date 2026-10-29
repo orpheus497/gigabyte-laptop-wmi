@@ -609,8 +609,10 @@ the node **round-trips** (`write 0` → `DBAC = 1` → reads back `1`), but not
 which direction means "boost on". That rests on the fork's testing on a CWH.
 ~~Confirm against `nvidia-smi` in Step 2~~ — **the round-trip was confirmed in
 Step 2 and the direction cannot be**, because `nvidia-smi` reads a TGP that is
-pinned, so there is nothing for a toggle to move. It stays unresolvable here
-until `nvidia-powerd` initialises; see "`dynamic_boost` round-trips, direction
+pinned, so there is nothing for a toggle to move. ~~It stays unresolvable here until `nvidia-powerd` initialises~~ -- **reopened
+29 Oct 2026 and now testable: the TGP is not pinned on AC, it arbitrates**, so
+a toggle has something to move. See Phase 3 row 19. For the original context,
+see "`dynamic_boost` round-trips, direction
 still unknown". If it is backwards, the node is self-consistent but semantically
 inverted.
 
@@ -2108,6 +2110,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~A2~~ | ~~Hide nodes whose methods the firmware lacks~~ **done 29 Oct 2026** — all four of `battery_cycle`, `usb_charge_s3_toggle`, `usb_charge_s4_toggle` and `light_sensor` are omitted at load rather than reporting a permanent `0`. The rule is now uniform: **a node that exists means the feature exists** | low |
 | ~~11~~ | ~~MUX encoding via `0xE6`~~ **done 29 Oct 2026 — two values measured.** `0x00` = MSHybrid (panel on iGPU), `0x01` = discrete (panel on dGPU), confirmed by the CMOS byte, the connected eDP and `boot_vga` all moving together. BIOS option: Peripherals → "Switchable Graphics device". A possible third value is unenumerated | low |
 | ~~18~~ | ~~`gpu_boost` inert in discrete mode?~~ **answered 29 Oct 2026 — INERT, and the `DPMF` decode is confirmed.** With the panel on the dGPU and the tier pinned at 60 W, `gpu_boost 0` left the floor at **60.00 W** where a landed write gives 50 W. The firmware skipped `Case (0x51)` exactly as the `If (DPMF != 0x02)` gate says it should | low |
+| 19 | **`dynamic_boost`'s direction is answerable now, and was not before.** This file recorded it as unresolvable "until `nvidia-powerd` initialises", because a pinned TGP gives a toggle nothing to move. **The TGP is no longer pinned** — it arbitrates, with excursions from the 60 W tier up to 75 W, observed live. `Case (0xE7)` write 0 zeroes `AMAT` and clears `PPAB`; write 1 restores `AMAT` from `LMAT`. If `AMAT` is the ±15 W budget Dynamic Boost shifts between CPU and GPU, **zeroing it should stop the excursions without moving the floor** — a different observable from the other two axes. Needs the GPU busy, and the node currently reads `0` while excursions are happening, which is itself worth explaining | low |
 | 12 | **Is detaching the dGPU worth anything?** Runtime D3 already works fine-grained on this card, and Linux already offers `pci .../remove` + `rescan`. Measure the power difference before building a firmware path that duplicates them | low |
 | ~~9~~ | ~~Does `WMBC 0xE1` lag or freeze under load?~~ **answered 29 Oct 2026 — it lags, by minutes.** `temp1` held at 66 °C for **120 consecutive samples** while `k10temp` swung 78→86→65, then moved once in the following 60 s. Not frozen, heavily damped. The EC's own fan control is unaffected and tracked the load correctly | low |
 
@@ -4948,11 +4951,19 @@ the tier. `tests/test-gpu-power.sh` now samples for `LIMIT_SAMPLES` seconds and
 takes the minimum, with the window deliberately longer than the ~20 s
 excursion observed above.
 
-**What woke it up is `amd_pmf` binding.** The earlier hybrid-mode measurements
-were repeatable to the watt across several runs — 4/4 predictions on the
-`ACBT` decode — because arbitration was quiet with no second power manager
-present. That is why the decode held then and why single samples were adequate
-then; neither is true now.
+**What woke it up is not established, and an earlier version of this section
+asserted that it was `amd_pmf` binding.** Two variables changed in that reboot
+-- `amd_pmf` bound and the display MUX went to discrete -- and the MUX is the
+better candidate: in discrete mode the dGPU drives the panel, so it sits in P4
+doing continuous work instead of idling at P8, and Dynamic Boost raising the
+limit for a busy GPU is the feature behaving correctly. See "`amd_pmf` binds"
+below for the free experiment that separates them.
+
+What is certain is that the earlier hybrid-mode measurements were repeatable to
+the watt across several runs — 4/4 predictions on the `ACBT` decode — because
+arbitration was quiet then, with the dGPU parked at P8 and no second power
+manager present. That is why the decode held then and why single samples were
+adequate then; neither is true now.
 
 **So the `ACBT` decode is not withdrawn, but its evidence is weaker than it
 looked.** The tiers still floor at 50/60/70 W, which is what the formula
@@ -4998,6 +5009,43 @@ hypothetical one.
 second power manager, and the GPU limit stopped being a stable number. That is
 the trade to weigh before leaving it enabled: it is one `grubby --remove-args`
 and a reboot to undo.
+
+**What it actually bought: one duplicate handler and nothing else.** The kernel
+log on the binding boot is two lines, and the first one matters:
+
+```
+amd-pmf AMDI0100:00: Failed to open TA session (-22)
+amd-pmf AMDI0100:00: registered PMF device successfully
+```
+
+The **TA session is the AMD PSP trusted application** that drives PMF's
+interesting half — the Smart PC policy engine, auto-mode, CnQF. It failed with
+`-EINVAL`, so none of that is running. What registered is the static-slider
+path, which is a `platform_profile` handler and nothing more. The platform
+device's sysfs directory confirms it: `platform-profile` is the only non-generic
+entry, with no extra nodes of any kind.
+
+**So the trade is one-sided.** It added a handler whose choice list is a subset
+of ours — it has no `quiet` — which means the legacy aggregate reads `custom`
+the moment the two disagree, and `platform_profile_cycle()` starts returning
+`-EINVAL` when it does. In exchange it contributed no control this driver does
+not already provide. **Removing it is the better default**:
+`sudo grubby --update-kernel=ALL --remove-args="amd_pmf.force_load=1"` and a
+reboot.
+
+**Do not attribute the arbitration to it, though — two variables changed in the
+same reboot.** `amd_pmf` bound *and* the display MUX went to discrete, and the
+MUX is the more plausible cause: in discrete mode the dGPU drives the panel, so
+it is doing continuous real work and sits in P4 rather than P8. Dynamic Boost
+raising the limit for a GPU that is actually busy is Dynamic Boost working.
+Attributing it to the handler whose trusted-application session failed is the
+weaker explanation, and this file said "what woke it up is `amd_pmf` binding"
+before the log was read.
+
+**The clean experiment is free, because the MUX has to go back anyway** for the
+detach work: put the MUX on MSHybrid and *keep* `force_load=1` for one boot. If
+the excursions continue, `amd_pmf` is responsible. If they stop, the MUX was.
+Then remove the parameter on the following reboot.
 
 ### In discrete mode: `perf_mode` still works, `gpu_boost` is the one gated
 

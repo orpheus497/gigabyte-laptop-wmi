@@ -641,9 +641,9 @@ for i in $(seq 25); do
 done | sort -n | head -1
 ```
 
-This matters most on a machine where `amd_pmf` is loaded, which adds a second
-power manager and is what woke the arbitration up here. Readings taken before
-that were repeatable to the watt. `tests/test-gpu-power.sh` does this sampling
+It matters whenever the GPU is doing real work — arbitration is quiet while the
+card idles, and the readings taken on this machine before it had anything to do
+were repeatable to the watt. `tests/test-gpu-power.sh` does this sampling
 itself.
 
 **On battery it does nothing**, and that half is genuinely blocked below this
