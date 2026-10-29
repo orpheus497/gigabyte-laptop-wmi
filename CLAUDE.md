@@ -2012,7 +2012,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~14~~ | ~~GPU TGP on AC~~ **done 29 Oct 2026 — `perf_mode` controls GPU power on mains.** 0→50 W, 1→60 W, 2→70 W against a 50 W default. The "firmware-blocked" verdict was drawn from readings taken on DC or unannotated. Only the DC path is blocked | low |
 | ~~16~~ | ~~Should `platform_profile` drive `perf_mode` again?~~ **done and verified on hardware 29 Oct 2026.** Profiles set fan policy and GPU tier on two independent axes with identical pinning rules; `gpu_boost` stays manual. Measured across all three profiles: `low-power` → 50 W / fan 1, `balanced` → 60 W / fan 1, `performance` → 70 W / fan 0 | low |
 | 15 | **The dGPU never reaches D3cold.** `nvidia_drm.modeset=1` makes it a KMS device with an HDMI connector, so the compositor holds it open; it idles at 3.1 W in P8 instead of powering off. Not a driver defect — but it is what decides whether the detach feature is worth anything (row 12) | low |
-| ~~7~~ | ~~`perf_mode`'s APU-power half via `ECPT`~~ **closed 29 Oct 2026 — no mode's limit bound under load.** Swept 0→1→2 with 16 threads loaded on AC: the all-core clock stayed at **~4.32 GHz, flat in all three modes**, and package power at ~62 W. A binding limit would force the clock down. Caveat on the load type recorded below | low |
+| ~~7~~ | ~~`perf_mode`'s APU-power half via `ECPT`~~ **answered 29 Oct 2026 — it DOES control APU package power.** Under a `stress-ng matrixprod` load the package stepped **64 → 65 → 79 W** across modes 0/1/2, matching the firmware's `ECPT` sPPT/fPPT figures of 65/65/80 W exactly. The earlier "no limit bound" result came from a load that drew 62 W and never reached the 65 W ceiling. See "`perf_mode` controls APU power after all" | low |
 | ~~17~~ | ~~`gpu_boost` on AC~~ **done 29 Oct 2026 — it is a real second power axis**, and the `ACBT` decode predicted it exactly: `gpu_boost 0` → 50 W, `1` → back to the tier's value, 4/4 predictions correct | low |
 | 8 | **`amd_pmf.force_load=1`** — one kernel parameter and a reboot, fully reversible. Settles whether APMF binds and what a second `platform_profile` handler does to the aggregate | medium |
 | ~~10~~ | ~~dGPU attach/detach — fix the `0x51` bounds~~ **done 29 Oct 2026** — the node takes the full 0-4 and the detach/restore pair is whole again; detach is logged, not refused, and the firmware supplies the interlock. See "`DPMF` is the display-MUX flag" | low |
@@ -2178,6 +2178,13 @@ package-wide on this AMD part** rather than core power reported under a package
 name. So the tempting arithmetic — "62 W drawn against mode 0's 45 W `ECPT`
 SPL, therefore not applied" — depends on something unchecked and is dropped.
 
+> **Reversed 29 Oct 2026, same day, by the heavier load this very caveat asked
+> for. `perf_mode` does control APU package power.** The paragraph below was
+> right that the sustained limit is not enforced, and right that the burst
+> limits were untested — and the burst limits turn out to be the ones that
+> bind. See "`perf_mode` controls APU power after all" immediately below. Kept
+> because the reasoning identified exactly the gap that produced the answer.
+
 **The load-type caveat is narrower than it first looked, and the sustained
 limit is settled without it.** `ECPT` converts watts to milliwatts and sends
 the 32-bit value as two six-byte EC commands with command byte `0x45` at
@@ -2202,6 +2209,74 @@ short excursions rather than sustained behaviour, so they matter much less —
 but a heavier load (AVX, memory-bound) is what would show whether *they* are
 enforced. That is the only part of row 7 still open, and it is a detail rather
 than a reopening.
+
+### `perf_mode` controls APU power after all — 29 Oct 2026
+
+**Row 7 is answered, and the answer is the opposite of what was recorded a few
+hours earlier.** A `stress-ng --cpu-method matrixprod` load on all cores, on
+AC, cooling pinned to `gaming`, stepping `perf_mode` at 30 s and 60 s:
+
+```
+ sec  mode   pkgW  clkMHz  k10C
+  15     0     65    4088    81
+  30     0     65    4047    86
+  45     1     65    4067    87
+  60     1     65    4055    86
+  75     2     79    4241    97
+  90     2     80    4153    97
+```
+
+**Package power stepped 64–65 → 64–65 → 79–80 W.** That is not noise and it is
+not a measurement artifact; it is a clean, sustained, reproducible step on the
+third mode.
+
+**It matches the firmware's own `ECPT` constants exactly**, which is what makes
+this a decode rather than an observation. On AC the three calls write:
+
+| `perf_mode` | `0x30` SPL | `0x32` sPPT | `0x34` fPPT | measured |
+|---|---|---|---|---|
+| 0 | 45 W | **65 W** | **65 W** | **64–65 W** |
+| 1 | 65 W | **65 W** | 80 W | **64–65 W** |
+| 2 | 70 W | **80 W** | **80 W** | **79–80 W** |
+
+So the binding figure tracks **65 / 65 / 80** — the sPPT/fPPT pair — and not
+45/65/70. Two conclusions, and both matter:
+
+- **The sustained limit (`0x30`) is still not enforced.** Mode 0 writes 45 W
+  and the part drew 65 W. That half of the earlier result stands untouched.
+- **The package limits (`0x32`/`0x34`) ARE enforced.** Mode 2's 80 W figure is
+  hit to within a watt, and modes 0 and 1 sit exactly on their shared 65 W.
+
+**Why the first attempt missed it, and the lesson is a sharp one.** The earlier
+sweep used `yes(1)`, which drew ~62 W — **three watts under the 65 W ceiling.**
+Every mode was therefore below its binding limit, nothing bound, the clock
+stayed flat, and the honest-looking conclusion was "no mode's limit bound under
+load". That was true as stated and false as a verdict. **A limit cannot be
+observed by a load that never reaches it**, and the caveat recorded at the time
+named precisely that gap — then the heavier load closed it the same day.
+
+The clock corroborates: ~4050 MHz in modes 0 and 1 against ~4200 MHz in mode 2,
+which is the part being held below its preferred frequency by the lower
+ceiling, exactly as a bound power limit looks.
+
+**Temperature is worth recording too**: 86 °C in mode 0, 87 °C in mode 1, and
+**97 °C in mode 2** with the fans pinned to `gaming`. Within spec for this
+part, but it is the first time this chassis has been seen in the high nineties,
+and it is the cost of the top tier under a genuinely heavy load.
+
+**Consequence for the project: `perf_mode` is a working CPU power control, not
+only a GPU one.** It moves the GPU limit 50/60/70 W on mains *and* the APU
+package limit 65/65/80 W, through two independent firmware channels. The
+`platform_profile` mapping shipped in Step 3b therefore does more than it was
+built to do — selecting a profile now demonstrably changes both.
+
+**And the restore defect this run exposed, for the third time.**
+`test-apu-burst.sh` saved `fan_preset` and the platform profile and **not**
+`perf_mode` or `power_preset` — so writing `perf_mode` directly moved the ring
+to `boost` and the machine was left pinned at the 70 W tier after the run. The
+house rule is in "`scripts/` is tooling, `tests/` is hardware tests" and this
+is the third sweep to break it. Fixed in the script; recorded here because the
+pattern is the point, not the individual slip.
 
 ### Open: the fans did not respond to a sustained CPU load — 26 Oct 2026
 
@@ -4652,10 +4727,13 @@ annotation.
 **So "`perf_mode` does nothing" was only ever tested on the GPU side.** The
 GPU-TGP conclusion is untouched and must not be reopened: that chain is broken
 above the driver, independently, and this is a *different* chain that happens to
-share a method ID. What follows is narrower and more interesting — the APU-power
-half has never been measured at all, and it is the **highest-value remaining
-experiment in the project** because it needs no reverse engineering and no new
-code.
+share a method ID. What follows is narrower and more interesting — ~~the
+APU-power half has never been measured at all, and it is the **highest-value
+remaining experiment in the project**~~ **measured 29 Oct 2026, and it works:
+65 / 65 / 80 W across the three modes. See "`perf_mode` controls APU power
+after all".** It was indeed the highest-value remaining experiment, and it
+needed no reverse engineering and no new code — only a load heavy enough to
+reach the ceiling.
 
 **How to test it.** On AC, pin cooling first (`echo gaming > fan_preset`), run a
 sustained all-core load, and sweep `perf_mode` 0 → 1 → 2 recording steady-state
@@ -4691,9 +4769,17 @@ visible and a fourth name to every consumer's UI for no gain.
 firmware distinction is real — mode 2 reads a power class with `ECPL()` and
 switches `ATPP` on the result, where mode 3 pins `ATPP = 0xC8` — so the two
 could still diverge on **APU** package power, which `enforced.power.limit`
-cannot see. The `ECPT` sweep is what would show it. Until then the honest
-statement is: **no GPU-side difference measured, APU side untested, cap stays
-at 2 with this recorded as the reason.**
+cannot see. The `ECPT` sweep is what would show it.
+
+**That sweep has since run, and it covered modes 0–2 only** — mode 3 was never
+stepped through it, because the sweep went through `perf_mode` and the node
+caps at 2. So the honest statement is unchanged in substance: **no GPU-side
+difference measured, no APU-side comparison attempted, cap stays at 2 with this
+recorded as the reason.** Settling it means writing `0xED 3` through
+`debug_method_write` *during* a heavy load and watching package power, which is
+a one-line addition to `tests/test-apu-burst.sh` if it ever matters. Mode 3's
+`ECPT` ladder is identical to mode 2's, so the expected answer is "no
+difference" and the value of knowing is low.
 
 `restore` note from the same run, because it cost a confusing reading: the
 limit takes a few seconds to settle, so a value read immediately after a write

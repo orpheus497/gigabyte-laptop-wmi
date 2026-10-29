@@ -148,6 +148,7 @@ for pair in "low-power 50.00 1" "balanced 60.00 1" "performance 70.00 0"; do
 	got_fan=$(cat "$P/fan_mode")
 	if [ "$got_fan" = "$3" ]; then
 		printf '  %-34s fan_mode=%s ok\n' "" "$got_fan"
+		pass=$((pass + 1))
 	else
 		printf '  %-34s fan_mode=%s EXPECTED %s\n' "" "$got_fan" "$3"
 		fail=$((fail + 1))

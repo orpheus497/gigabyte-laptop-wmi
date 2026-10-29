@@ -68,6 +68,11 @@ fi
 
 PRESET_WAS=$(cat "$S/fan_preset")
 PROFILE_WAS=$(cat "$PROFILE")
+# This script writes perf_mode directly, which also moves power_preset to match
+# -- so both have to be saved. The first version restored only the fan preset
+# and the profile, and left the machine pinned at the top GPU tier with
+# power_preset=boost. Third time a sweep here failed to put something back.
+POWER_PRESET_WAS=$(cat "$S/power_preset")
 LOAD_PID=""
 
 # Kill only our own descendants, found by walking the process tree. The earlier
@@ -87,12 +92,17 @@ cleanup() {
 	[ "$cleaned" -eq 1 ] && return
 	cleaned=1
 	[ -n "$LOAD_PID" ] && kill_tree "$LOAD_PID"
-	echo "$PROFILE_WAS" > "$PROFILE"       2>/dev/null
-	echo "$PRESET_WAS"  > "$S/fan_preset"  2>/dev/null
-	printf '\n== restored: fan_preset=%s platform_profile=%s ==\n' \
-		"$PRESET_WAS" "$PROFILE_WAS"
-	printf '   perf_mode=%s power_preset=%s fan_mode=%s\n' \
-		"$(cat "$S/perf_mode")" "$(cat "$S/power_preset")" "$(cat "$S/fan_mode")"
+	# power_preset last of the three: writing it re-applies the tier, so it
+	# must land after the profile it may need to read.
+	echo "$PROFILE_WAS"       > "$PROFILE"           2>/dev/null
+	echo "$PRESET_WAS"        > "$S/fan_preset"      2>/dev/null
+	echo "$POWER_PRESET_WAS"  > "$S/power_preset"    2>/dev/null
+	sleep 3
+	printf '\n== restored ==\n'
+	printf '   fan_preset=%s power_preset=%s platform_profile=%s\n' \
+		"$(cat "$S/fan_preset")" "$(cat "$S/power_preset")" "$(cat "$PROFILE")"
+	printf '   perf_mode=%s fan_mode=%s\n' \
+		"$(cat "$S/perf_mode")" "$(cat "$S/fan_mode")"
 }
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM

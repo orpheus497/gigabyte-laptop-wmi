@@ -632,24 +632,39 @@ separate controller channel that does not involve the graphics card or
 `nvidia-powerd` at all — roughly 45 W, 65 W and 70 W for the three modes on
 mains power.
 
-**That half was measured on 29 Oct 2026 and the sustained limit is not
-enforced.** Stepping the three modes under a sustained all-core load on mains,
-the all-core clock stayed flat at about 4.32 GHz and package power at about
-62 W throughout. Mode 0 writes a 45 W sustained limit and the part sustained
-62 W, which it could not do if that limit were in force.
+**That half was measured on 29 Oct 2026 and it works too.** Under a heavy
+all-core load on mains, package power stepped with the mode:
 
-**The two short-burst limits are still untested**, because the load drew about
-62 W and never reached the 65 W figures that would have exercised them. They
-govern brief excursions rather than sustained behaviour.
+| `perf_mode` | APU package power |
+|---|---|
+| `0` eco | **~65 W** |
+| `1` balanced | **~65 W** |
+| `2` boost | **~80 W** |
 
-So the picture, with each part held to what was actually measured: **GPU power
-works on mains**, the GPU half is blocked on battery, and **on mains the APU
-sustained limit does not take effect.** The APU half has not been measured on
-battery at all — the firmware writes a different and lower set of limits there,
-so nothing above says what happens.
+Those match the firmware's own figures exactly. Each mode writes three limits —
+a sustained one and two short-burst ones — and it is the **burst** pair that
+binds: 65 / 65 / 80 W across the three modes. The sustained figure (45 W in
+mode 0) is **not** enforced; the part drew 65 W in that mode.
 
-Do not read any of this as the write failing — the write lands and the firmware
-executes it; what differs is whether anything downstream acts on it.
+**A light load will show none of this.** An earlier attempt used a simple
+integer load that drew about 62 W — three watts under the 65 W ceiling — so no
+mode was ever at its limit and the readings looked flat. A power limit cannot
+be observed by a load that never reaches it. Use something that genuinely
+saturates the vector units.
+
+**Mode 2 runs hot.** The same test measured 97 °C with the fans pinned to the
+gaming preset. That is within spec for this part, but it is the real cost of
+the top tier under a heavy sustained load.
+
+So, each part held to what was measured: **on mains, `perf_mode` controls both
+the GPU power limit and the APU package limit**, through two independent
+firmware channels. On battery the GPU half does nothing, for reasons outside
+this driver. The APU half has not been measured on battery — the firmware
+writes a different and lower set of limits there, so nothing above says what
+happens.
+
+Do not read the battery case as the write failing — the write lands and the
+firmware executes it; what differs is whether anything downstream acts on it.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/perf_mode`
 
