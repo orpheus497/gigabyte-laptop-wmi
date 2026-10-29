@@ -49,15 +49,19 @@ die() { echo "$*" >&2; exit 1; }
 [ -d "$P" ] || die "driver not loaded: $P does not exist"
 [ -e "$P/debug_method" ] || die "$P/debug_method is missing"
 
-# One value per slot, trimmed to just the number the reply reports, so two runs
-# can be compared without the surrounding prose getting in the way.
+# A failed read must stop the run, not log a placeholder. Appending "READ-FAILED"
+# to the history would put a line in the log that the next run compares against
+# and reports as a change, inventing a result from a broken read.
 read_slot() {
-	echo "$1" > "$P/debug_method" || { echo "READ-FAILED"; return; }
-	cat "$P/debug_method"
+	echo "$1" > "$P/debug_method" 2>/dev/null ||
+		die "could not write $1 to $P/debug_method"
+	cat "$P/debug_method" 2>/dev/null ||
+		die "could not read back $P/debug_method after writing $1"
 }
 
-E6=$(read_slot 0xE6)
-A3=$(read_slot 0xA3)
+E6=$(read_slot 0xE6) || exit 1
+A3=$(read_slot 0xA3) || exit 1
+[ -n "$E6" ] && [ -n "$A3" ] || die "a slot read came back empty; refusing to log a partial result"
 
 # Whichever card owns the connected eDP is the one driving the panel, which is
 # what the MUX selects -- the independent check on 0xE6.
@@ -77,8 +81,8 @@ PANEL=$(panel)
 
 NOW=$(date -Is)
 printf 'run    : %s\n' "$NOW"
-printf '0xE6   : %s' "$E6"
-printf '0xA3   : %s' "$A3"
+printf '0xE6   : %s\n' "$E6"
+printf '0xA3   : %s\n' "$A3"
 printf 'panel  : %s\n' "$PANEL"
 
 # Compare against the previous run before appending this one.

@@ -11,7 +11,7 @@
 #
 #   Ctrl+Alt+F3, log in, then:
 #     sudo systemctl stop display-manager
-#     sudo bash scripts/test-dgpu-detach.sh
+#     sudo bash tests/test-dgpu-detach.sh
 #     sudo systemctl start display-manager
 #
 # Why: on a hybrid machine the compositor holds the discrete GPU, because
@@ -63,6 +63,17 @@ echo "ejectable device: $DEV"
 
 gpu_present() { [ -e "/sys/bus/pci/devices/$DEV" ] && echo yes || echo NO; }
 
+# Which driver, if any, is bound to it. Presence alone is not a successful
+# restore: "does the out-of-tree nvidia driver survive the round trip" is the
+# question this test exists to answer, and a card that comes back on the bus
+# with nothing bound to it has failed that even though it is visible.
+gpu_driver() {
+	local d="/sys/bus/pci/devices/$DEV/driver"
+	[ -e "$d" ] && basename "$(readlink -f "$d")" || echo "(unbound)"
+}
+
+DRIVER_AT_START=$(gpu_driver)
+
 # The gauge is noisy, so average. Returns milliwatts.
 draw() {
 	local total=0 n=0 v
@@ -75,6 +86,7 @@ draw() {
 }
 
 restored=0
+RESTORE_OK=1
 restore() {
 	[ "$restored" -eq 1 ] && return
 	restored=1
@@ -86,12 +98,36 @@ restore() {
 		echo 1 > /sys/bus/pci/rescan 2>/dev/null
 		sleep "$SETTLE"
 	fi
-	echo "dGPU present: $(gpu_present)"
-	[ "$(gpu_present)" = yes ] || cat <<-EOF
+	local present driver
+	present=$(gpu_present)
+	driver=$(gpu_driver)
+	echo "dGPU present: $present   driver: $driver"
 
-	Still absent. Try:  echo 1 > /sys/bus/pci/rescan
-	A reboot always brings it back -- the detach does not persist.
-	EOF
+	if [ "$present" != yes ]; then
+		cat <<-EOF
+
+		RESTORE FAILED -- the card is not back on the bus.
+		Try:  echo 1 > /sys/bus/pci/rescan
+		A reboot always brings it back; the detach does not persist.
+		EOF
+		RESTORE_OK=0
+	elif [ "$driver" != "$DRIVER_AT_START" ]; then
+		cat <<-EOF
+
+		RESTORE INCOMPLETE -- the card is back but the driver is not.
+		  before: $DRIVER_AT_START
+		  after:  $driver
+
+		That is the real answer to this test: the eject works and the card
+		returns, but the graphics driver does not re-bind on its own. Try
+		  modprobe -r nvidia_drm nvidia_modeset nvidia && modprobe nvidia_drm
+		or reboot. Record it -- a detach that needs a reboot to undo is a very
+		different feature from one that round-trips.
+		EOF
+		RESTORE_OK=0
+	else
+		echo "  driver re-bound cleanly -- the round trip works"
+	fi
 }
 trap restore EXIT
 trap 'restore; exit 130' INT TERM
@@ -101,13 +137,40 @@ PANEL=$(grep -l '^connected$' /sys/class/drm/card*-eDP-*/status 2>/dev/null || t
 echo "connected panel:  ${PANEL:-none found}"
 echo "  The firmware refuses a detach while the panel is on the discrete GPU,"
 echo "  so this must name a card whose driver is amdgpu."
-echo "dGPU present:     $(gpu_present)"
+echo "dGPU present:     $(gpu_driver | sed "s|^|$(gpu_present), driver |")"
+
+# Refuse rather than advise. The earlier version printed "should be stopped
+# first" and then detached anyway, which is the whole hazard this test is
+# careful about everywhere else. A process holding the card loses it mid-use,
+# and for a compositor that means the session.
+#
+# The plain Processes table is used, not --query-compute-apps: that query lists
+# compute contexts only, so a process using the GPU purely for graphics is
+# invisible to it. Measured here, the compositor shows as type C+G -- that
+# compute context is the only reason the compute-only query caught it.
 echo "processes holding it:"
-if command -v nvidia-smi >/dev/null; then
-	nvidia-smi 2>/dev/null | sed -n '/Processes/,$p' | tail -n +4 | sed 's/^/  /'
-	echo "  Anything other than 'No running processes found' should be stopped first."
-else
-	echo "  (nvidia-smi not available -- cannot check)"
+command -v nvidia-smi >/dev/null || die "
+nvidia-smi is not available, so whether anything is using the GPU cannot be
+checked. Refusing to detach blind. Set GIGABYTE_DETACH_FORCE=1 to override."
+
+PROCS=$(nvidia-smi 2>/dev/null | sed -n '/Processes/,$p' | tail -n +4) ||
+	die "nvidia-smi failed, so the process check could not run. Refusing to detach blind.
+Set GIGABYTE_DETACH_FORCE=1 to override."
+echo "$PROCS" | sed 's/^/  /'
+
+if ! printf '%s' "$PROCS" | grep -q 'No running processes found'; then
+	[ "${GIGABYTE_DETACH_FORCE:-0}" = 1 ] || die "
+Something is still using the discrete GPU, listed above. Detaching now takes
+the card away from it -- for a compositor that means your session.
+
+Stop it first. If you are already on a text console, the usual culprit is the
+display manager:
+    sudo systemctl stop display-manager
+
+To detach anyway, knowing what it costs:
+    GIGABYTE_DETACH_FORCE=1 sudo -E bash tests/test-dgpu-detach.sh"
+	echo
+	echo "  GIGABYTE_DETACH_FORCE=1 -- proceeding with the card in use"
 fi
 
 MEASURE=0

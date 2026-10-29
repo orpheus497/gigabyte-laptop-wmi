@@ -203,13 +203,26 @@ while (( SECONDS - START < TIMEOUT )); do
 			break
 		fi
 
-		# Fallback that assumes nothing about either field: the capacity
-		# simply stopped climbing while at the ceiling.
+		# Fallback for a battery that exposes neither a useful status nor a
+		# usable current: the capacity simply stopped climbing while at the
+		# ceiling.
+		#
+		# It must not fire while the other two fields actively contradict it.
+		# A gauge that reports whole percent can sit on one value for a
+		# couple of minutes near the top of charge, where the rate tapers --
+		# so four flat samples on their own are coarseness, not a hold. With
+		# the status still Charging AND the current still above the held
+		# threshold, the battery is demonstrably taking charge and the only
+		# honest verdict is to keep waiting.
 		if (( CAP == LAST_CAP )); then
-			(( FLAT++ ))
-			if (( FLAT >= FLAT_NEEDED )); then
-				VERDICT="HONOURED: capacity flat at ${CAP}% for $((FLAT*POLL))s with a ${CEILING}% ceiling"
-				break
+			if (( HAVE_CUR )) && [ "$ST" = "Charging" ] && (( CUR >= HELD_UA )); then
+				FLAT=0   # charging for real; flatness carries no information
+			else
+				(( FLAT++ ))
+				if (( FLAT >= FLAT_NEEDED )); then
+					VERDICT="HONOURED: capacity flat at ${CAP}% for $((FLAT*POLL))s with a ${CEILING}% ceiling (status ${ST}, $((CUR/1000)) mA)"
+					break
+				fi
 			fi
 		else
 			FLAT=0
