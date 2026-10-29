@@ -1967,7 +1967,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~6a~~ | ~~`0xF6`/`KBLL` keyboard brightness~~ **done** — LED class device, `max_brightness` 1 measured from the EC's own events | low |
 | ~~6b~~ | ~~RGB **colour** over `/dev/hidraw2`~~ **closed 29 Oct 2026 — not applicable.** GIGABYTE specs the `GA65H`/`5TH` keyboard as single-colour **blue**; the firmware has no colour fields; `max_brightness` is 1. There is nothing to drive. See "this keyboard has no colour to drive" | — |
 | ~~14~~ | ~~GPU TGP on AC~~ **done 29 Oct 2026 — `perf_mode` controls GPU power on mains.** 0→50 W, 1→60 W, 2→70 W against a 50 W default. The "firmware-blocked" verdict was drawn from readings taken on DC or unannotated. Only the DC path is blocked | low |
-| ~~16~~ | ~~Should `platform_profile` drive `perf_mode` again?~~ **done 29 Oct 2026 — it does, through a `power_preset` ring.** Profiles set fan policy and GPU tier on two independent axes with identical pinning rules; `gpu_boost` stays manual. **Untested on hardware** | low |
+| ~~16~~ | ~~Should `platform_profile` drive `perf_mode` again?~~ **done and verified on hardware 29 Oct 2026.** Profiles set fan policy and GPU tier on two independent axes with identical pinning rules; `gpu_boost` stays manual. Measured across all three profiles: `low-power` → 50 W / fan 1, `balanced` → 60 W / fan 1, `performance` → 70 W / fan 0 | low |
 | 15 | **The dGPU never reaches D3cold.** `nvidia_drm.modeset=1` makes it a KMS device with an HDMI connector, so the compositor holds it open; it idles at 3.1 W in P8 instead of powering off. Not a driver defect — but it is what decides whether the detach feature is worth anything (row 12) | low |
 | ~~7~~ | ~~`perf_mode`'s APU-power half via `ECPT`~~ **closed 29 Oct 2026 — no mode's limit bound under load.** Swept 0→1→2 with 16 threads loaded on AC: the all-core clock stayed at **~4.32 GHz, flat in all three modes**, and package power at ~62 W. A binding limit would force the clock down. Caveat on the load type recorded below | low |
 | ~~17~~ | ~~`gpu_boost` on AC~~ **done 29 Oct 2026 — it is a real second power axis**, and the `ACBT` decode predicted it exactly: `gpu_boost 0` → 50 W, `1` → back to the tier's value, 4/4 predictions correct | low |
@@ -4096,9 +4096,27 @@ change GPU power on every load for no benefit.
 **On battery the GPU half writes and nothing happens**, because the DC path is
 SBIOS-blocked. Harmless, documented in `USAGE.md`, and not fixable here.
 
-**Untested on hardware.** Builds clean under `-Wall -Wextra`. Verify by
-switching profiles and reading `enforced.power.limit` back, allowing a few
-seconds for it to settle.
+**Verified on hardware, 29 Oct 2026**, through the installed DKMS build across
+all three profiles:
+
+```
+power_preset starts at  auto
+low-power    ->  50.00 W   fan_mode=1
+balanced     ->  60.00 W   fan_mode=1
+performance  ->  70.00 W   fan_mode=0
+```
+
+Both axes moved together, each to the mapped value, and `power_preset` and
+`perf_mode` agreed with the measured limit afterwards (`auto`, `1`, 60 W on
+`balanced`).
+
+**The verification snippet handed over had no restore step, and that is worth
+recording as a defect in the method rather than a detail.** It left the profile
+on `performance`, which maps the fans to *normal* — so the machine stayed
+audible after the test with nothing saying why, and the fans had to be put back
+by hand. Any sweep that moves fan policy needs to end by restoring it, the way
+`scripts/test-charge-limit.sh` restores on every exit path including Ctrl-C.
+This is the second time a hand-written test has been handed over without one.
 
 ### Settled: the Mode key owns fan policy, profiles own it only on `auto`
 

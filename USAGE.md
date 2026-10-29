@@ -642,10 +642,14 @@ the all-core clock stayed flat at about 4.32 GHz and package power at about
 62 W and never reached the 65 W figures that would have exercised them. They
 govern brief excursions rather than sustained behaviour.
 
-So the three-way picture is: **GPU power works on mains**, the GPU half is
-blocked on battery, and the APU sustained limit does not take effect either
-way. Do not read any of that as the write failing — the write lands and the
-firmware executes it; what differs is whether anything downstream acts on it.
+So the picture, with each part held to what was actually measured: **GPU power
+works on mains**, the GPU half is blocked on battery, and **on mains the APU
+sustained limit does not take effect.** The APU half has not been measured on
+battery at all — the firmware writes a different and lower set of limits there,
+so nothing above says what happens.
+
+Do not read any of this as the write failing — the write lands and the firmware
+executes it; what differs is whether anything downstream acts on it.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/perf_mode`
 
@@ -904,6 +908,16 @@ override them. The profile is still remembered and takes effect the next time it
 is set, once the preset is back on `auto` and the fans are back under controller
 control.
 
-On Gigabyte Gaming models this selects fan policy only. It does not change the
-discrete GPU's power budget: that is governed by the NVIDIA platform controller
-interface rather than by the embedded controller.
+**On Gigabyte Gaming models a profile also sets the GPU power tier**, while
+`power_preset` reads `auto`:
+
+| Profile | Fan mode | GPU power |
+|---|---|---|
+| `low-power` / `quiet` | silent | 50 W |
+| `balanced` | silent | 60 W |
+| `performance` | normal | 70 W |
+
+Measured on a GAMING A16 5TH. The two are independent axes with the same
+pinning rules, so holding one does not freeze the other — see "GPU power
+preset" above. On battery the fan half still applies and the GPU half does
+nothing, for reasons outside this driver.
