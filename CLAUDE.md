@@ -655,7 +655,7 @@ nothing in the driver touches:
 | `0xC9` | `EC0.FNKS` | Fn-lock |
 | `0xC7` | `EC0.MUTE` | Mute status |
 | `0x87` / `0x88` | `EC0.PLED` / `EC0.BLED` | Power LED / battery LED. Both **invert** — writing `0` sets the field to `One` — and both persist the choice to extended CMOS alongside the live field: `0x87` → `WXCM (0xDA, …)` (`:9632-9646`), `0x88` → `WXCM (0xD9, …)` (`:9648-9662`) |
-| `0xE6` | **CMOS `0xD0`**, not EC | **dGPU display MUX.** `WXCM (0xD0, Arg2)` out (`:9279`), `RXCM (0xD0) & 0x7F` back (`:9685`) — **extended CMOS consumed at the next boot**, like `0x63`, not a live EC field, so the "EC field" column header does not apply. ~~0 dynamic, 1 discrete, 2 MS-Hybrid~~ — **that encoding was unsourced and is withdrawn 29 Oct 2026**; the AML decodes nothing, and the `& 0x7F` mask means bit 7 carries something unidentified. **One value is now anchored:** `0x00`, read 29 Oct 2026 while the panel was independently confirmed on the iGPU. See "`DPMF` is the display-MUX flag" |
+| `0xE6` | **CMOS `0xD0`**, not EC | **dGPU display MUX — the BIOS option is Peripherals → "Switchable Graphics device".** `WXCM (0xD0, Arg2)` out (`:9279`), `RXCM (0xD0) & 0x7F` back (`:9685`) — **extended CMOS consumed at the next boot**, like `0x63`, not a live EC field, so the "EC field" column header does not apply. ~~0 dynamic, 1 discrete, 2 MS-Hybrid~~ — that encoding was unsourced and was withdrawn; **two values are now measured**: `0x00` = MSHybrid (panel on the iGPU), `0x01` = discrete (panel on the dGPU). See "`DPMF` is the display-MUX flag" |
 | `0x63` | `WXCM 0xD2`–`0xD6` | Five bytes in, five back. RGB-shaped, see Step 6 |
 | `0x66` | `EC0.FLVL` (8-bit) | Current fan **step**, the index into the curve the EC is using |
 | `0x6B` | `EC0.FAN1` (8-bit) | CPU fan fixed duty. The driver calls this `FAN_CUSTOM_SPEED`; GCC uses it as the CPU side of its Max-mode recipe |
@@ -686,7 +686,7 @@ caught `0x63` and `0xE6`.
 
 | Index | Written by | What it holds |
 |---|---|---|
-| `0xD0` | `0xE6` | dGPU display MUX. Read masks with `& 0x7F`. Measured `0x00` on 29 Oct 2026 with the panel on the iGPU; no other value observed, and the full encoding is unknown |
+| `0xD0` | `0xE6` | dGPU display MUX — BIOS: Peripherals → "Switchable Graphics device". Read masks with `& 0x7F`. **`0x00` = MSHybrid, `0x01` = discrete**, both measured 29 Oct 2026 against the DRM connectors. Whether a third value exists is unknown; the menu was not enumerated |
 | `0xD1` | `0xA3` | **Unidentified.** Read/write, and its purpose appears nowhere in the firmware |
 | `0xD2`–`0xD6` | `0x63` | The five-byte block behind the misnamed `power_on_time` node |
 | `0xD9` | `0x88` | Battery LED, the persistent copy of `BLED` |
@@ -839,21 +839,36 @@ else that nobody has identified. **Do not write `0xE6` on the strength of that
 row** — a wrong value is consumed at the next boot and could route the panel to
 a GPU whose driver is not up.
 
-**The read was taken on 29 Oct 2026 and anchors exactly one value:**
+**Two values are now measured, 29 Oct 2026 — the encoding is usable.** The
+BIOS setup option exists and is **Peripherals → "Switchable Graphics device"**.
+Changing it and re-reading gave:
 
-```
-method 0xe6 arg 0x0 -> 0x0 (0) [implemented]
-```
+| `0xE6` | BIOS setting | connected eDP | `boot_vga` |
+|---|---|---|---|
+| `0x00` | **MSHybrid** | `card1-eDP-1` (amdgpu) | the iGPU |
+| `0x01` | **discrete** | `card2-eDP-2` (nvidia) | the dGPU |
 
-`[implemented]` with its brackets, so this is a genuine INTEGER reply and not
-the `Default { Return (Arg2) }` echo — which matters here because the argument
-sent was also `0`. Taken while the connector check above independently showed
-the panel on the iGPU. So **`0x00` means panel-on-iGPU with the dGPU present on
-the bus**, and that is the whole of what is known. It does **not** confirm any
-three-way labelling: a single observation of one state cannot distinguish
-"0 = dynamic" from "0 = hybrid" or from any other scheme. The remaining values
-stay unknown until one is observed from a known state, which is what a BIOS
-setup option would give for free if this firmware exposes one.
+**Three independent signals moved together**, which is what makes this a decode
+rather than a correlation: the CMOS byte, the DRM connector that reports
+`connected`, and which card the firmware marks as the boot VGA device. The
+connector cross-check was built into `tests/test-cmos-slots.sh` for exactly
+this moment and it earned its place — a byte changing on its own would have
+been suggestive; a byte changing in lockstep with the panel physically moving
+between cards is conclusive.
+
+Note the DRM card numbers renumber across the switch (`card0`/`card1` became
+`card1`/`card2`), so **never identify a card by its index** — match on the
+driver name, which is what the test script does.
+
+**Whether a third value exists is unknown.** The menu was photographed showing
+MSHybrid but its full option list was not enumerated, so a "dGPU only" or
+"dynamic" third setting may exist. Reading `0xE6` from it would cost one more
+reboot and would complete the table.
+
+**`0xA3` did not move**, which is a clean negative for the other half: the
+option changed was the graphics one, so slot `0xD1` remains unidentified and
+USB sleep charging stays closed. A BIOS visit that changes a *USB* option is
+what would settle that.
 
 **The EC can do the detach and attach by itself, with no WMI involved.** Found
 on both Gaming dumps:
@@ -2018,7 +2033,8 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~10~~ | ~~dGPU attach/detach — fix the `0x51` bounds~~ **done 29 Oct 2026** — the node takes the full 0-4 and the detach/restore pair is whole again; detach is logged, not refused, and the firmware supplies the interlock. See "`DPMF` is the display-MUX flag" | low |
 | 13 | **Exercise the detach and restore on hardware.** `_EJ0` is present and Linux sees the card as ejectable, so the mechanism is real; what is untested is whether the out-of-tree nvidia driver unbinds and re-probes cleanly. Stop GPU workloads first, recover with `4` or a PCI rescan | medium |
 | ~~A2~~ | ~~Hide nodes whose methods the firmware lacks~~ **done 29 Oct 2026** — all four of `battery_cycle`, `usb_charge_s3_toggle`, `usb_charge_s4_toggle` and `light_sensor` are omitted at load rather than reporting a permanent `0`. The rule is now uniform: **a node that exists means the feature exists** | low |
-| 11 | **MUX encoding via `0xE6`** — one value anchored (`0x00` = panel on iGPU). Identify the rest from a known state before ever writing it; a wrong value is consumed at the next boot and can black the panel | **high if written** |
+| ~~11~~ | ~~MUX encoding via `0xE6`~~ **done 29 Oct 2026 — two values measured.** `0x00` = MSHybrid (panel on iGPU), `0x01` = discrete (panel on dGPU), confirmed by the CMOS byte, the connected eDP and `boot_vga` all moving together. BIOS option: Peripherals → "Switchable Graphics device". A possible third value is unenumerated | low |
+| 18 | **The machine is currently in discrete mode, and that makes `gpu_boost` inert — testable now.** `Case (0x51)` sits inside `If (DPMF != 0x02)` and the panel is on the dGPU, so the firmware should skip the whole routine. Sweeping `gpu_boost` 0/1 and seeing `enforced.power.limit` *not* move is the direct confirmation of the `DPMF` decode, and the window closes as soon as the MUX goes back | low |
 | 12 | **Is detaching the dGPU worth anything?** Runtime D3 already works fine-grained on this card, and Linux already offers `pci .../remove` + `rescan`. Measure the power difference before building a firmware path that duplicates them | low |
 | ~~9~~ | ~~Does `WMBC 0xE1` lag or freeze under load?~~ **answered 29 Oct 2026 — it lags, by minutes.** `temp1` held at 66 °C for **120 consecutive samples** while `k10temp` swung 78→86→65, then moved once in the following 60 s. Not frozen, heavily damped. The EC's own fan control is unaffected and tracked the load correctly | low |
 
