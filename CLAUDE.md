@@ -650,6 +650,21 @@ is a byte inside `OperationRegion (GNVS, SystemMemory, 0xB8065D18, 0x0D)` — a
 declaration. That is an unused BIOS variable slot, not a sensor interface. **The
 hardware is not there**; this is not a driver gap.
 
+**The node is no longer created here, as of 29 Oct 2026**, and closing it
+flushed out a real defect rather than just hiding a zero. The detection read
+`LIGHT_SENSOR_NEW` and, on anything that was not the new method, installed the
+**old** one *without checking it existed* — an unconditional fallback. So
+firmware carrying neither ended up with `0xF7` installed and a node answering
+the `Default { Return (Arg2) }` echo forever.
+
+It also needed a different test from the other three capability gates, which
+is the part worth carrying forward: `gigabyte_laptop_method_implemented()`
+demands an INTEGER reply, and the **new** light-sensor method legitimately
+answers with a BUFFER — the same thing an absent method answers with. Only the
+firmware's own `0xF7` marker in byte 0 separates them. Both tests now live in
+`gigabyte_laptop_light_sensor_method()`, shared by `probe()` and `is_visible()`
+so the two cannot drift apart.
+
 **`usb_charge_s3_toggle` / `usb_charge_s4_toggle` — open, with exactly one
 lead.** `USB_SLEEP 0x7A` and `USB_HIBERNATE 0x7B` are both absent, and there is
 no live EC field for the feature either: `EC0.USBC`, 8 bits at `:8117`, has one
@@ -1859,7 +1874,7 @@ Both commits build clean with `-Wall -Wextra`.
 | 8 | **`amd_pmf.force_load=1`** — one kernel parameter and a reboot, fully reversible. Settles whether APMF binds and what a second `platform_profile` handler does to the aggregate | medium |
 | ~~10~~ | ~~dGPU attach/detach — fix the `0x51` bounds~~ **done 29 Oct 2026** — the node takes the full 0-4 and the detach/restore pair is whole again; detach is logged, not refused, and the firmware supplies the interlock. See "`DPMF` is the display-MUX flag" | low |
 | 13 | **Exercise the detach and restore on hardware.** `_EJ0` is present and Linux sees the card as ejectable, so the mechanism is real; what is untested is whether the out-of-tree nvidia driver unbinds and re-probes cleanly. Stop GPU workloads first, recover with `4` or a PCI rescan | medium |
-| ~~A2~~ | ~~Hide nodes whose methods the firmware lacks~~ **done 29 Oct 2026** — `battery_cycle`, `usb_charge_s3_toggle`, `usb_charge_s4_toggle` are now omitted at load rather than reporting a permanent `0`. `light_sensor` is **not** gated and is the remaining candidate | low |
+| ~~A2~~ | ~~Hide nodes whose methods the firmware lacks~~ **done 29 Oct 2026** — all four of `battery_cycle`, `usb_charge_s3_toggle`, `usb_charge_s4_toggle` and `light_sensor` are omitted at load rather than reporting a permanent `0`. The rule is now uniform: **a node that exists means the feature exists** | low |
 | 11 | **MUX encoding via `0xE6`** — one value anchored (`0x00` = panel on iGPU). Identify the rest from a known state before ever writing it; a wrong value is consumed at the next boot and can black the panel | **high if written** |
 | 12 | **Is detaching the dGPU worth anything?** Runtime D3 already works fine-grained on this card, and Linux already offers `pci .../remove` + `rescan`. Measure the power difference before building a firmware path that duplicates them | low |
 | 9 | **Does `WMBC 0xE1` lag or freeze under load?** Opened 26 Oct 2026, and **this outranks 7 and 8.** A load run with the driver's `temp1` and `k10temp` sampled *together*, after both fans were seen at 0 RPM with the CPU at 95 °C and `temp1` reporting 58 °C. The only open item that could change what the driver reports. See "Open: the fans did not respond to a sustained CPU load" | low |

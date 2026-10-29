@@ -354,6 +354,33 @@ static int gigabyte_laptop_get_devstate_buf(u32 method_id, void *result, size_t 
 }
 
 /*
+ * Which light sensor method does this firmware implement, or 0 for neither?
+ *
+ * The two need different tests, which is why this cannot be the plain
+ * implemented() check the other capability gates use. The new method answers
+ * with a four-byte buffer whose first byte is a 0xF7 marker the firmware puts
+ * there, and a buffer is also what an *unimplemented* ID answers with, since
+ * WMBC ends in Default { Return (Arg2) } -- so only the marker separates them.
+ * The old method answers with an integer, where the ordinary type test works.
+ *
+ * Reads the firmware rather than any cached state because is_visible() calls
+ * this too, and that runs during sysfs_create_group(), before probe().
+ */
+static u8 gigabyte_laptop_light_sensor_method(void)
+{
+	u8 result[4] = { };
+
+	if (!gigabyte_laptop_get_devstate_buf(LIGHT_SENSOR_NEW, result, sizeof(result)) &&
+		result[0] == 0xF7)
+		return LIGHT_SENSOR_NEW;
+
+	if (gigabyte_laptop_method_implemented(LIGHT_SENSOR))
+		return LIGHT_SENSOR;
+
+	return 0;
+}
+
+/*
  * WMBD method (sets value in EC).
  *
  * A third of this firmware's WMBD cases assign their EC field and fall off the
@@ -1981,6 +2008,15 @@ static umode_t gigabyte_laptop_sysfs_is_visible(struct kobject *kobj, struct att
 	if (attr == &dev_attr_usb_charge_s4_toggle.attr)
 		return gigabyte_laptop_method_implemented(USB_HIBERNATE) ? attr->mode : 0;
 
+	/*
+	 * The light sensor needs its own test rather than the plain
+	 * implemented() check: its two methods answer with different ACPI
+	 * types, and the newer one answers with a buffer, which is also what an
+	 * absent method answers with.
+	 */
+	if (attr == &dev_attr_light_sensor.attr)
+		return gigabyte_laptop_light_sensor_method() ? attr->mode : 0;
+
 	return attr->mode;
 }
 
@@ -2669,20 +2705,21 @@ obtain_custom_fan_speed:
 		}
 	}
 
-	// Test for new light sensor method. Older models don't support it.
-	u8 light_sensor_result[4] = { };
-	ret = gigabyte_laptop_get_devstate_buf(LIGHT_SENSOR_NEW, light_sensor_result,
-					sizeof(light_sensor_result));
-	if (ret)
+	/*
+	 * Test for the new light sensor method. Older models don't support it.
+	 *
+	 * The fallback used to be unconditional: anything that was not the new
+	 * method installed the old one without checking it existed, so firmware
+	 * carrying neither -- the Gaming generation -- ended up with 0xF7
+	 * installed and a node that answered the echo forever.
+	 */
+	gigabyte->light_sensor_method = gigabyte_laptop_light_sensor_method();
+	if (!gigabyte->light_sensor_method)
 		pr_info("Light sensor unsupported by this firmware\n");
-	if (light_sensor_result[0] == 0xF7) {
-		gigabyte->light_sensor_method = LIGHT_SENSOR_NEW;
+	else if (gigabyte->light_sensor_method == LIGHT_SENSOR_NEW)
 		pr_info("Using new light sensor method\n");
-	}
-	else {
-		gigabyte->light_sensor_method = LIGHT_SENSOR;
+	else
 		pr_info("Using old light sensor method\n");
-	}
 
 	// AORUS VG, Gaming (2025+) and all Aero X16 models can eject dGPU
 	if (gigabyte_laptop_family_is("GIGABYTE AERO") ||

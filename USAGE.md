@@ -522,10 +522,16 @@ All VE and newer models (e.g. Aero 16 XE5) return four 8-bit values, while older
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/light_sensor`
 
-**Not available on Gigabyte Gaming (2025+) firmware**, and not merely
-unimplemented here: both method IDs are absent from that generation, and so is
-every standard route — no ACPI ambient-light device is declared at all. The
-sensor is not fitted.
+**Not available on Gigabyte Gaming (2025+) firmware, and the node is not
+created there.** This is not merely unimplemented in the driver: both method
+IDs are absent from that generation, and so is every standard route — no ACPI
+ambient-light device is declared at all. The sensor is not fitted.
+
+The driver tests both methods at load time and omits the node when neither
+answers. The two need different tests, which is worth knowing if you are
+reading the code: the newer method replies with a buffer whose first byte is a
+`0xF7` marker, and a buffer is also what an *absent* method replies with, so
+only the marker separates them.
 
 ## PWM (added in version 0.2.0)
 
