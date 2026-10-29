@@ -86,14 +86,17 @@ printf '  perf_mode=%s gpu_boost=%s power_preset=%s dynamic_boost=%s\n' \
 	"$(cat "$P/perf_mode")" "$(cat "$P/gpu_boost")" \
 	"$(cat "$P/power_preset")" "$BOOST_WAS"
 printf '  GPU: %s\n' "$(nvidia-smi --query-gpu=pstate,utilization.gpu,power.draw --format=csv,noheader)"
-echo "  Each window is ${WINDOW}s. Three windows, so about $(( WINDOW * 3 / 60 + 1 )) minutes."
+echo "  Four windows of ${WINDOW}s: as-found, 1, 0, then as-found again as a"
+echo "  CONTROL. About $(( (WINDOW * 4 + 60) / 60 )) minutes."
 
-say "baseline, as found (dynamic_boost=$BOOST_WAS)"
-read -r b_lo b_hi b_n <<< "$(sample "$WINDOW")"
-printf '  min %s  max %s  distinct values %s\n' "$b_lo" "$b_hi" "$b_n"
+# A1 -- as found
+say "window 1/4: baseline, as found (dynamic_boost=$BOOST_WAS)"
+read -r a1_lo a1_hi a1_n <<< "$(sample "$WINDOW")"
+printf '  min %s  max %s  distinct values %s\n' "$a1_lo" "$a1_hi" "$a1_n"
 
+# B1, B0
 for v in 1 0; do
-	say "dynamic_boost = $v"
+	say "window $(( v == 1 ? 2 : 3 ))/4: dynamic_boost = $v"
 	echo "$v" > "$P/dynamic_boost" || { echo "  write FAILED"; continue; }
 	sleep "$SETTLE"
 	read -r lo hi n <<< "$(sample "$WINDOW")"
@@ -101,43 +104,84 @@ for v in 1 0; do
 	eval "n_$v=$n; lo_$v=$lo; hi_$v=$hi"
 done
 
+# A2 -- the control. This is the window that makes the test mean anything:
+# the excursions are INTERMITTENT, so a quiet window under a test setting
+# proves nothing on its own. Only a RETURN of the wandering once the original
+# setting is restored shows that the setting was what stopped it.
+say "window 4/4: CONTROL -- back to as-found (dynamic_boost=$BOOST_WAS)"
+echo "$BOOST_WAS" > "$P/dynamic_boost"
+sleep "$SETTLE"
+read -r a2_lo a2_hi a2_n <<< "$(sample "$WINDOW")"
+printf '  min %s  max %s  distinct values %s\n' "$a2_lo" "$a2_hi" "$a2_n"
+
 say "result"
-printf '  as found (%s)      min %s  max %s  distinct %s\n' "$BOOST_WAS" "$b_lo" "$b_hi" "$b_n"
-printf '  dynamic_boost 1    min %s  max %s  distinct %s\n' "$lo_1" "$hi_1" "$n_1"
-printf '  dynamic_boost 0    min %s  max %s  distinct %s\n' "$lo_0" "$hi_0" "$n_0"
+printf '  1 as-found (%s)   min %s  max %s  distinct %s\n' "$BOOST_WAS" "$a1_lo" "$a1_hi" "$a1_n"
+printf '  2 boost = 1       min %s  max %s  distinct %s\n' "$lo_1" "$hi_1" "$n_1"
+printf '  3 boost = 0       min %s  max %s  distinct %s\n' "$lo_0" "$hi_0" "$n_0"
+printf '  4 as-found again  min %s  max %s  distinct %s   <- control\n' "$a2_lo" "$a2_hi" "$a2_n"
 echo
 
-if [ "$b_n" -le 1 ] && [ "$n_1" -le 1 ] && [ "$n_0" -le 1 ]; then
+# Did anything wander at all?
+if (( a1_n <= 1 && n_1 <= 1 && n_0 <= 1 && a2_n <= 1 )); then
 	cat <<-'EOF'
-	INCONCLUSIVE -- the limit never moved in any window, including the
-	baseline. Both "the toggle quietened it" and "there was nothing to
-	quieten" predict exactly this, so it distinguishes nothing.
+	INCONCLUSIVE -- the limit never moved in any window, control included.
+	Both "the toggle quietened it" and "there was nothing to quieten" predict
+	exactly this, so it distinguishes nothing.
 
-	Give the discrete GPU sustained work and re-run. In hybrid mode an idle
-	card sits at P8 and nothing arbitrates.
+	Give the discrete GPU sustained work and re-run. An idle card at P8 does
+	not arbitrate.
 	EOF
-elif [ "$n_1" -le 1 ] && [ "$n_0" -gt 1 ]; then
+elif (( n_1 <= 1 && n_0 > 1 )); then
 	cat <<-'EOF'
 	THE NODE IS INVERTED. Writing 1 ("on") held the limit still; writing 0
-	("off") let it wander. So node 1 reaches the firmware as raw 0, which is
-	the branch that zeroes AMAT -- and zeroing the budget is what DISABLES
-	boost. The driver's !enable inversion in dynamic_boost_store() and the
-	"write 0 to enable" comment on DYN_BOOST are both the wrong way round.
-
-	Fix: drop the inversion, so the node value is sent unchanged.
+	("off") let it wander. So node 1 reaches the firmware as raw 0, the branch
+	that zeroes AMAT -- and zeroing the budget is what DISABLES boost. The
+	!enable inversion in dynamic_boost_store() and the "write 0 to enable"
+	comment on DYN_BOOST are both the wrong way round.
 	EOF
-elif [ "$n_0" -le 1 ] && [ "$n_1" -gt 1 ]; then
+elif (( n_0 <= 1 && n_1 > 1 )); then
 	cat <<-'EOF'
-	THE NODE IS CORRECT AS SHIPPED. Writing 0 ("off") held the limit still
-	and writing 1 ("on") let it wander, which is what the node's documented
-	sense promises. The inversion in dynamic_boost_store() is right and the
-	fork's testing on the CWH was right. Record it and close the question.
+	THE NODE IS CORRECT AS SHIPPED. Writing 0 ("off") held the limit still and
+	writing 1 ("on") let it wander, which is what the node's documented sense
+	promises. Record it and close the question.
+	EOF
+elif (( n_1 <= 1 && n_0 <= 1 && a2_n > 1 )); then
+	cat <<-'EOF'
+	WRITING 0xE7 PINS THE LIMIT, EITHER WAY -- and the control is what makes
+	that readable. Both test settings held the limit still, and the wandering
+	RETURNED once the original setting was restored. So it is the write
+	itself, not the value, that quietens arbitration.
+
+	Both firmware branches end in Notify (NPCF, 0xC0), so the likely mechanism
+	is the notify making the consumer re-read and settle at the tier base,
+	rather than AMAT's value mattering. AMAT is therefore NOT what drives
+	these excursions.
+
+	This says nothing about which direction means "boost on" -- that question
+	needs an observable other than the limit's spread. Record it as a property
+	of 0xE7 and leave the direction open.
+	EOF
+elif (( n_1 <= 1 && n_0 <= 1 && a2_n <= 1 && a1_n > 1 )); then
+	cat <<-'EOF'
+	INCONCLUSIVE, AND THE CONTROL IS WHY. The baseline wandered, both test
+	settings were quiet -- and so was the control, with the original setting
+	restored. The wandering therefore stopped on its own partway through, and
+	nothing here can be credited to the writes.
+
+	That is the intermittency this hardware is already known for: excursions
+	come in bursts with long quiet stretches. A single quiet window is not
+	evidence a setting caused it.
+
+	Re-run with a longer window (the first argument is seconds, try 120) or
+	when the limit is wandering more continuously. Check first:
+	  for i in $(seq 60); do nvidia-smi --query-gpu=enforced.power.limit \
+	      --format=csv,noheader; sleep 1; done | sort | uniq -c
 	EOF
 else
 	cat <<-'EOF'
-	UNCLEAR -- both settings showed spread, so neither pinned the limit.
-	dynamic_boost may not be the thing driving these excursions at all;
-	amd_pmf is the other candidate, since it is a second power manager.
-	Record the numbers and do not read a direction out of them.
+	NO DIRECTION READABLE. Both test settings let the limit wander, so neither
+	pinned it and 0xE7 is not controlling these excursions. amd_pmf is the
+	other candidate, being a second power manager. Record the numbers and do
+	not read a direction out of them.
 	EOF
 fi

@@ -2570,6 +2570,13 @@ static void gigabyte_laptop_kbd_brightness_changed(u8 level)
  * constant Zero rather than a field, which is why the state byte is always 0:
  * the controller announces the press and tracks no state of its own.
  *
+ * Note that this key ALSO emits KEY_F15 from the i8042 keyboard, measured with
+ * libinput on a GA65TH -- so it arrives twice, once from each path, and only
+ * one of them is ours. Harmless while nothing binds F15, but a user who bound
+ * F15 to mute the microphone before this mapping existed will now get two
+ * toggles per press, which cancel out. GiMate does NOT do this: it emits no
+ * scancode at all, which is why it needs the driver to report it.
+ *
  * Mode (Fn+F7) is deliberately absent: it cycles the fan preset in the kernel
  * instead, which is what it does on Windows and the only way to reach gaming
  * mode without a terminal. gigabyte_laptop_wmi_notify() intercepts it before

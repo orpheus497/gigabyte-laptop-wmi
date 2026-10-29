@@ -2163,7 +2163,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~A2~~ | ~~Hide nodes whose methods the firmware lacks~~ **done 29 Oct 2026** — all four of `battery_cycle`, `usb_charge_s3_toggle`, `usb_charge_s4_toggle` and `light_sensor` are omitted at load rather than reporting a permanent `0`. The rule is now uniform: **a node that exists means the feature exists** | low |
 | ~~11~~ | ~~MUX encoding via `0xE6`~~ **done 29 Oct 2026 — two values measured.** `0x00` = MSHybrid (panel on iGPU), `0x01` = discrete (panel on dGPU), confirmed by the CMOS byte, the connected eDP and `boot_vga` all moving together. BIOS option: Peripherals → "Switchable Graphics device". A possible third value is unenumerated | low |
 | ~~18~~ | ~~`gpu_boost` inert in discrete mode?~~ **answered 29 Oct 2026 — INERT, and the `DPMF` decode is confirmed.** With the panel on the dGPU and the tier pinned at 60 W, `gpu_boost 0` left the floor at **60.00 W** where a landed write gives 50 W. The firmware skipped `Case (0x51)` exactly as the `If (DPMF != 0x02)` gate says it should | low |
-| 19 | **`dynamic_boost`'s direction is answerable now, and was not before.** This file recorded it as unresolvable "until `nvidia-powerd` initialises", because a pinned TGP gives a toggle nothing to move. **The TGP is no longer pinned** — it arbitrates, with excursions from the 60 W tier up to 75 W, observed live. `Case (0xE7)` write 0 zeroes `AMAT` and clears `PPAB`; write 1 restores `AMAT` from `LMAT`. If `AMAT` is the ±15 W budget Dynamic Boost shifts between CPU and GPU, **zeroing it should stop the excursions without moving the floor** — a different observable from the other two axes. Needs the GPU busy, and the node currently reads `0` while excursions are happening, which is itself worth explaining | low |
+| 19 | **`dynamic_boost` direction — attempted 29 Oct 2026, inconclusive, test fixed.** Both node values pinned the limit while the baseline wandered, which is equally consistent with "the write pins it either way" and "the burst ended on its own". The script lacked a control window and its verdict text described a case it had not caught; both fixed. **Re-run with the control**, and note the direction may need package power under load rather than the limit's spread. See "Row 19 attempt 1" | low |
 | 12 | **Is detaching the dGPU worth anything?** Runtime D3 already works fine-grained on this card, and Linux already offers `pci .../remove` + `rescan`. Measure the power difference before building a firmware path that duplicates them | low |
 | ~~9~~ | ~~Does `WMBC 0xE1` lag or freeze under load?~~ **answered 29 Oct 2026 — it lags, by minutes.** `temp1` held at 66 °C for **120 consecutive samples** while `k10temp` swung 78→86→65, then moved once in the following 60 s. Not frozen, heavily damped. The EC's own fan control is unaffected and tracked the load correctly | low |
 
@@ -2686,21 +2686,43 @@ identical in a config file.
 That three-layer pattern — EC synthesises `Super`+F-key, `input-remapper`
 collapses it, the desktop binds the result — is what the mapping replaces.
 
-**The `input-remapper` preset on this machine is the GiMate key, not this
-one.** `Super`+`Shift`+`F23` → `F13`, per the user. So it must not be removed
-as part of a mic-mute cleanup — and it **contradicts the `showkey` test
-recorded under Phase 3**, which found GiMate emitting no scancode at all. Both
-cannot be true: a preset keyed on that combo from the AT keyboard implies
-GiMate does emit one.
+**Resolved 29 Oct 2026, and the recorded `showkey` test was right.** Measured
+with `libinput debug-events --show-keycodes`, which names the originating
+device for each press — run twice, once with `input-remapper` running and once
+with it stopped, and the two agree:
 
-Three untested explanations: the `showkey` run was taken with `input-remapper`
-holding the device, which this file warns about immediately above that result;
-the combo appears only in some firmware state; or the preset was speculative
-and never fires. **Settle it before trusting either claim** — stop
-`input-remapper`, then `sudo libinput debug-events --show-keycodes` and press
-GiMate. If it does emit the combo then GiMate has the same double-delivery
-shape as mic mute, and the keymap comment saying it "emits no i8042 scancode"
-needs correcting.
+```
+mic mute   -> AT Translated Set 2 keyboard : KEY_F15    (185)
+              Gigabyte laptop hotkeys      : KEY_MICMUTE (248)
+GiMate     -> Gigabyte laptop hotkeys      : KEY_PROG1  (148)      <- and nothing else
+Fn+F7      -> nothing anywhere                                     <- the kernel eats it
+```
+
+**GiMate emits no scancode.** It appears on the driver's own input device and
+on no other, so the claim under Phase 3 stands and the keymap comment is
+correct as written. **The suspicion recorded above was wrong**, and it is worth
+saying why it was raised: the `input-remapper` preset keyed on
+`Super`+`Shift`+`F23` is real and the user identified it as GiMate's, which
+*implied* a scancode. The preset simply never fires — `Super`+`Shift`+`F23`
+never arrives, so it is **dead configuration**, presumably from before this
+driver mapped the key. Harmless, and safe to delete.
+
+**The key that actually double-delivers is mic mute**, which is the opposite
+of what was expected. It sends `KEY_F15` on the PS/2 keyboard *and* reaches the
+driver as event `0xC8`. Three consequences:
+
+- **It explains the `F15` in the user's KDE config.** The hand-added
+  `mic_mute=F15` binding was a reasonable workaround for a key whose only
+  visible output was `F15`. That binding had already been removed, which is
+  why `KEY_MICMUTE` now works with nothing cancelling it — verified: one press
+  took `wpctl` from `Volume: 1.00` to `Volume: 1.00 [MUTED]`.
+- **`KEY_F15` is still emitted and is now unbound.** Nothing consumes it, so
+  it is harmless — but anyone who binds `F15` for an unrelated purpose will
+  find the mic key firing it. Documented in `USAGE.md`.
+- **The double-fire warning was aimed at the right key for the wrong reason.**
+  It assumed a synthesised `Super`+combo like Fn+F12's; the real second path is
+  a plain single keycode.
+
 
 **`0xEF` is the lid, and that one does not need a guess.** `_Q70` and `_Q71`
 both send `SMGR (0xEF, LSTE)` *and* `Notify (LID0, 0x80)` — the ACPI lid
@@ -5186,6 +5208,63 @@ reading, so there is no way to know which kind you are in — which means every
 reading has to be taken as if it might be the drifting kind. What a quiet
 window does *not* do is license going back to single samples.
 
+
+### Row 19 attempt 1: inconclusive, and the test was missing a control
+
+**Run 29 Oct 2026 in discrete mode with the limit demonstrably wandering**
+(`sort -u` over 30 samples gave both `60.00 W` and `75.00 W` beforehand), at
+`perf_mode` node 0, `gpu_boost` 0, tier floor 60 W:
+
+```
+baseline, as found (dynamic_boost=0)   min 60.00  max 75.00  distinct 2
+dynamic_boost = 1                      min 60.00  max 60.00  distinct 1
+dynamic_boost = 0                      min 60.00  max 60.00  distinct 1
+```
+
+**Neither setting wandered. The baseline did.** Two readings of that are
+equally consistent with the data and the run cannot separate them:
+
+- **Writing `0xE7` at all pins the limit**, regardless of value. Both firmware
+  branches end in `Notify (NPCF, 0xC0)`, so the notify could be making the
+  consumer re-read and settle at the tier base — in which case `AMAT`'s *value*
+  is not what drives the excursions.
+- **The wandering simply stopped partway through**, which is exactly the
+  intermittency already recorded two sections above: excursions come in bursts
+  with long quiet stretches, and a later 25-sample window in the same
+  configuration was flat at 60 W with nothing written at all.
+
+**The script's verdict was also wrong, and that is the more useful finding.**
+It printed *"UNCLEAR — both settings showed spread"* when **neither** had: the
+`else` branch caught a case its text did not describe. Nothing was learnt from
+the hardware here; something was learnt about the test.
+
+**Fixed by adding a fourth window: a control.** The sequence is now as-found →
+1 → 0 → **as-found again**. The control is what makes the measurement mean
+anything, because:
+
+| control window | reading |
+|---|---|
+| **wanders again** | the writes really were pinning it — the setting did it |
+| **stays quiet** | the burst had already ended; the writes get no credit |
+
+Without that window a quiet test window is unfalsifiable. This is the same
+class of error as the `temp2` idle comparison and the fan-duty sweep at 38 °C:
+**a measurement where both hypotheses predict the same output distinguishes
+nothing**, and it is the third time in this project. The difference is that
+this time the trap is closed in the tooling rather than noted in prose.
+
+**Re-run it with the control**, and prefer a longer window if the excursions
+look sparse — the first argument is seconds:
+
+```sh
+sudo bash tests/test-dynamic-boost.sh 120
+```
+
+**The direction question stays open**, and it may not be answerable through
+this observable at all. If writing either value pins the limit, then the
+limit's spread cannot distinguish the two branches, and settling the direction
+needs something else — sustained package power under load, where `AMAT`'s
+±15 W budget would show as CPU/GPU power actually shifting.
 ### `amd_pmf` binds, and two handlers coexist — 29 Oct 2026
 
 Row 8 is answered. `amd_pmf.force_load=1` plus a reboot and the driver binds:

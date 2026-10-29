@@ -149,13 +149,20 @@ cmp_field panel "$p_panel" "$PANEL"
 echo
 if [ "$changed" -eq 0 ]; then
 	cat <<-'EOF'
-	Nothing moved. The option you changed is stored somewhere other than these
-	two slots -- plain NVRAM rather than this CMOS block -- which is the
-	expected result for most of them: only one slot is unaccounted for and
-	there are four unmatched options in Peripherals, so at most one of the four
-	is here.
+	Nothing moved. There are two reasons that happens, and this script cannot
+	tell them apart -- it only sees the bytes:
 
-	BEFORE TRYING ANOTHER: put the one you just changed back.
+	  (a) You did not change a BIOS option between the two runs. Then this is
+	      simply a fresh BASELINE and there is nothing to read into it. That
+	      is the normal case when capturing a reading before a reboot.
+
+	  (b) You DID change one, and it is stored somewhere other than these two
+	      slots -- plain NVRAM rather than this CMOS block. That is the
+	      expected result for most options: only one slot is unaccounted for
+	      and four options in Peripherals are unmatched, so at most one of the
+	      four is here.
+
+	If (b): BEFORE TRYING ANOTHER, put the one you just changed back.
 
 	  1. note its ORIGINAL value before you touch it, every time
 	  2. reboot into setup, restore it, and change the NEXT one

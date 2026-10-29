@@ -181,37 +181,45 @@ GiMate gets a programmable keycode because only you can say what it should do.
 Mic mute gets the standard one because it has a single obvious meaning, and
 `KEY_MICMUTE` is what GNOME and KDE already listen for.
 
-**If you previously worked around the mic-mute key, remove that workaround.**
-The firmware *also* synthesises a scancode combo for it, so desktops may read
-the key as something odd. If you bound that combo by hand, or set up an
-`input-remapper` preset to collapse it, that binding will now fire **in
-addition** to the driver's `KEY_MICMUTE`. Two mute toggles per press cancel
-out, so the key looks broken when in fact both halves are working.
+**The mic-mute key also sends `KEY_F15` from the built-in keyboard.** Measured
+on a `GA65TH`: one press produces `KEY_F15` on "AT Translated Set 2 keyboard"
+*and* `KEY_MICMUTE` on "Gigabyte laptop hotkeys". The driver only controls the
+second; the first comes from the embedded controller and cannot be suppressed
+from here.
 
-**Only remove bindings you added yourself.** On KDE the `mic_mute` shortcut
-ships with `Microphone Mute` *and* `Meta+Volume Mute` as defaults — both are
-standard and neither is a workaround, so leave them alone. `Microphone Mute` is
-the keysym this driver's `KEY_MICMUTE` arrives as, which is exactly why no
-configuration is needed.
+Normally that is harmless, because nothing binds `F15` by default. Two cases
+where it matters:
+
+- **If you bind `F15` to something else**, the mic-mute key will trigger it.
+- **If you previously bound `F15` to mute the microphone** as a workaround —
+  which was the only thing that worked before this driver mapped the key —
+  remove that binding. Otherwise each press toggles mute **twice** and cancels
+  out, which looks exactly like the key not working.
 
 ```sh
-# What is bound now. A lone function key such as F13 or F15 in this line is
-# the kind of thing that was added by hand; the two names above are not.
+# See both paths for yourself. Press the key once; expect two lines from two
+# different devices.
+sudo libinput debug-events --show-keycodes
+```
+
+**Only remove bindings you added yourself.** On KDE the `mic_mute` shortcut
+ships with `Microphone Mute` *and* `Meta+Volume Mute` — both are Plasma
+defaults, neither is a workaround, so leave them. `Microphone Mute` is the
+keysym `KEY_MICMUTE` arrives as, which is exactly why the driver's mapping
+needs no configuration.
+
+```sh
+# A bare function key in this line is the hand-added kind; the two names
+# above are not.
 grep -n mic_mute ~/.config/kglobalshortcutsrc
 ```
 
-Check for an `input-remapper` preset on the keyboard too, if you use it:
+**GiMate, by contrast, sends nothing but `KEY_PROG1`.** It produces no
+scancode at all, so there is no second path and nothing to clean up. If you
+have an `input-remapper` preset collapsing a `Super`+function-key combo for
+it, that preset is not firing — on the machine this was developed against it
+was left over from before the driver mapped the key.
 
-```sh
-ls ~/.config/input-remapper-2/presets/*/
-```
-
-A preset that maps a `Super`+function-key combo to a plain function key is this
-pattern. Work out which physical key it is for before removing it — on the
-machine this was developed against, one such preset turned out to be for the
-**GiMate** key, which the driver reports as `KEY_PROG1` on its own. Removing
-that preset is safe only once whatever you bound to its output is moved onto
-`KEY_PROG1` instead.
 **Events the driver does not map are logged rather than dropped**, so a key
 this family uses that nobody has accounted for announces itself:
 
