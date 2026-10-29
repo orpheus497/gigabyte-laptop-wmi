@@ -17,7 +17,7 @@
 # nvidia-powerd, so none of these writes has a consumer and every reading stays
 # put. That is not a failure, it is the documented behaviour.
 #
-# Usage: sudo bash scripts/test-gpu-power.sh
+# Usage: sudo bash tests/test-gpu-power.sh
 #
 # Restores perf_mode, gpu_boost, power_preset and the platform profile on every
 # exit path, including Ctrl-C. Takes about a minute.

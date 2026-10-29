@@ -23,7 +23,7 @@
 # For the power comparison, run it on BATTERY -- on mains the battery gauge
 # reports nothing useful and the measurement is skipped.
 #
-# Usage: sudo bash scripts/test-dgpu-detach.sh
+# Usage: sudo bash tests/test-dgpu-detach.sh
 #
 # Restores the GPU on every exit path, including Ctrl-C. The detach is not
 # persistent either way: a reboot always brings the card back.

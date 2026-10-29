@@ -6,7 +6,7 @@
 # load never reached was the 65 W burst figures, so the burst limits are
 # untested rather than disproven.
 #
-# Usage: sudo bash scripts/test-apu-burst.sh
+# Usage: sudo bash tests/test-apu-burst.sh
 #
 # Lowest-value item on the open list: burst limits govern brief excursions and
 # the sustained limit is what matters for real behaviour.

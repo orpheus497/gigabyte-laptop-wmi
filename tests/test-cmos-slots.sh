@@ -26,7 +26,7 @@
 #                       On USB, USB Power Share, Charging in S3/S4 or
 #                       Always-on USB.
 #
-# Usage: sudo bash scripts/test-cmos-slots.sh
+# Usage: sudo bash tests/test-cmos-slots.sh
 #
 #   1. run it, keep the output
 #   2. reboot into BIOS setup (Del or F2 on Gigabyte)
