@@ -29,10 +29,18 @@
 #
 #                       The four options in Peripherals not yet matched to a
 #                       slot are RTC Support, Wake on LAN Enable, SVM Enable
-#                       and Network Stack. At most one of them lives here. SVM
-#                       is the one worth trying first: it gates AMD-V, so it is
-#                       a real hardware toggle the firmware has to act on at
-#                       boot. Nothing depends on identifying this slot.
+#                       and Network Stack. At most one of them is here.
+#
+#                       Flip WAKE ON LAN. It is a device-level toggle the
+#                       firmware has to act on at boot, and nothing normally
+#                       depends on it. NOT SVM: that gates AMD-V, and on a
+#                       machine running VMs or hardware-accelerated containers
+#                       turning it off breaks them for as long as it is off --
+#                       check for kvm_amd and /dev/kvm before touching it.
+#                       Network Stack is the one to skip; it is most likely
+#                       stored with the other boot settings.
+#
+#                       Nothing depends on identifying this slot.
 #
 # Usage: sudo bash tests/test-cmos-slots.sh
 #
@@ -144,9 +152,9 @@ if [ "$changed" -eq 0 ]; then
 	there are four unmatched options in Peripherals, so at most one of the four
 	is here.
 
-	Try another one. RTC Support, Wake on LAN Enable, SVM Enable and Network
-	Stack are the candidates; SVM first, since it gates AMD-V and the firmware
-	has to act on it at boot.
+	Try another one. Wake on LAN first -- it is a toggle the firmware acts on at
+	boot and nothing normally depends on it. RTC Support second. Avoid SVM if you
+	run VMs or accelerated containers: it gates AMD-V and breaks them while off.
 
 	If all four come back unchanged, 0xD1 closes as unidentifiable from the
 	menu, which is a real answer and costs nothing: no feature depends on it.

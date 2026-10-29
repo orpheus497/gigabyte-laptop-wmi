@@ -735,11 +735,21 @@ Three things follow, and the first two are what make this worth the space:
   slot is unidentified and four options are unmatched, so at most one of them
   lives there and the other three are stored elsewhere — plain NVRAM rather
   than this CMOS block. Identifying it still costs nothing and no code: read
-  `0xA3`, flip one of those four, read `0xA3` again. **SVM is the one worth
-  trying first** (it gates AMD-V, so it is a real hardware toggle the firmware
-  must act on at boot) and **Network Stack the one to avoid** — turning PXE off
-  and on is harmless, but it is the option most likely to be stored with the
-  other boot settings rather than here.
+  `0xA3`, flip one of those four, read `0xA3` again.
+
+  **Flip Wake on LAN, not SVM.** SVM was recommended here first on the
+  reasoning that it gates AMD-V and so is a real hardware toggle the firmware
+  must act on at boot — which is true, and beside the point: **SVM is enabled
+  on this machine with `kvm_amd` loaded and `/dev/kvm` present**, so turning it
+  off disables hardware virtualisation for as long as it is off. Recommending a
+  BIOS flip without checking what depends on it is the same class of error as
+  handing over a sweep with no restore step.
+
+  Wake on LAN is the right candidate: it is equally a device-level toggle the
+  firmware has to act on, and nothing on this machine uses it. RTC Support is
+  second — harmless to toggle, though it may affect `rtcwake`. **Network Stack
+  is the one to skip**, being the option most likely stored with the other boot
+  settings rather than here.
 
 **None of this is urgent.** No feature depends on `0xD1`; it is an unlabelled
 byte, and the only reason to chase it was USB charging, which is now closed by
@@ -2097,7 +2107,7 @@ Both commits build clean with `-Wall -Wextra`.
 | 13 | **Exercise the detach and restore on hardware.** `_EJ0` is present and Linux sees the card as ejectable, so the mechanism is real; what is untested is whether the out-of-tree nvidia driver unbinds and re-probes cleanly. Stop GPU workloads first, recover with `4` or a PCI rescan | medium |
 | ~~A2~~ | ~~Hide nodes whose methods the firmware lacks~~ **done 29 Oct 2026** — all four of `battery_cycle`, `usb_charge_s3_toggle`, `usb_charge_s4_toggle` and `light_sensor` are omitted at load rather than reporting a permanent `0`. The rule is now uniform: **a node that exists means the feature exists** | low |
 | ~~11~~ | ~~MUX encoding via `0xE6`~~ **done 29 Oct 2026 — two values measured.** `0x00` = MSHybrid (panel on iGPU), `0x01` = discrete (panel on dGPU), confirmed by the CMOS byte, the connected eDP and `boot_vga` all moving together. BIOS option: Peripherals → "Switchable Graphics device". A possible third value is unenumerated | low |
-| 18 | **`gpu_boost` should be inert in discrete mode — half-confirmed, one write away from settled.** `Case (0x51)` sits inside `If (DPMF != 0x02)` and the panel is on the dGPU today. Live reading at `perf_mode 1`: a flat **60 W across 25 samples**, which is the tier — so `perf_mode` is unaffected (`Case (0xED)` has no `DPMF` gate, only an `ACST` branch, checked in the AML). The remaining write is `gpu_boost 0`: **50 W means it still works, 60 W means the firmware skipped the case.** Needs the min-of-window method, not a single sample | low |
+| ~~18~~ | ~~`gpu_boost` inert in discrete mode?~~ **answered 29 Oct 2026 — INERT, and the `DPMF` decode is confirmed.** With the panel on the dGPU and the tier pinned at 60 W, `gpu_boost 0` left the floor at **60.00 W** where a landed write gives 50 W. The firmware skipped `Case (0x51)` exactly as the `If (DPMF != 0x02)` gate says it should | low |
 | 12 | **Is detaching the dGPU worth anything?** Runtime D3 already works fine-grained on this card, and Linux already offers `pci .../remove` + `rescan`. Measure the power difference before building a firmware path that duplicates them | low |
 | ~~9~~ | ~~Does `WMBC 0xE1` lag or freeze under load?~~ **answered 29 Oct 2026 — it lags, by minutes.** `temp1` held at 66 °C for **120 consecutive samples** while `k10temp` swung 78→86→65, then moved once in the following 60 s. Not frozen, heavily damped. The EC's own fan control is unaffected and tracked the load correctly | low |
 
@@ -5028,6 +5038,34 @@ refutation is that it compared a drifted value against a settled one.
 when `DPMF != 2`. A clean negative in discrete mode is therefore a direct test
 of the `DPMF` decode itself, not just of the node — and the decode is what the
 whole MUX section rests on.
+
+**Answered 29 Oct 2026 — INERT, and this is the cleanest confirmation of the
+`DPMF` decode there will be.** Tier pinned at 60 W, min over a 25-second
+window either side of the one write:
+
+```
+gpu_boost 1  ->  floor 60.00 W     (the tier)
+gpu_boost 0  ->  floor 60.00 W     (unchanged -- the write did not land)
+```
+
+A landed `gpu_boost 0` sets `ACBT = Zero`, which by the formula gives 50 W, and
+that is what it measured in hybrid mode (row 17, 4/4). It did not move here. So
+the firmware skipped the whole of `Case (0x51)` because `DPMF == 2`, which is
+exactly what the AML says it does and what the panel being on the nvidia eDP
+predicts.
+
+**Three things this settles beyond the node itself:**
+
+- **`DPMF == 2` really does mean the panel is on the discrete GPU**, which was
+  inferred from the brightness-key handlers and is now confirmed by an
+  independent consequence in a different method.
+- **The eDP connector status is a valid proxy for `DPMF`**, which matters
+  because `DPMF` is in a table this repo does not hold and cannot be read
+  directly. A userspace tool can read the MUX state for free, with no root.
+- **`perf_mode` and `gpu_boost` are gated differently**, so "GPU power control"
+  is not one capability. In discrete mode the tiers work and the boost axis
+  does not. Any GUI needs to know that, because the node will accept a write,
+  report the new value, and change nothing.
 
 ### Decoded: `ACBT` is the boost headroom, in ⅛ W — 29 Oct 2026
 
