@@ -4412,6 +4412,67 @@ reports the *previous* one. And `perf_mode` has no read method, so after a raw
 `debug_method_write` the node reports a stale number until it is written
 through the node itself.
 
+### Decoded: `ACBT` is the boost headroom, in ⅛ W — 29 Oct 2026
+
+**The three measured limits fit the firmware's own constants exactly, which
+makes this a decode rather than a guess.** Every mode writes `NPCF.ATPP`,
+`NPCF.ACBT` and `NPCF.AMAT`; lining the constants up against what
+`enforced.power.limit` reported:
+
+| `perf_mode` | `ATPP` | `ACBT` | measured |
+|---|---|---|---|
+| 0 | `0xA0` (160) | `0x00` (0) | **50 W** |
+| 1 | `0xC8` (200) | `0x50` (80) | **60 W** |
+| 2 | from `ECPL()` | `0xA0` (160) | **70 W** |
+| 3 | `0xC8` (200) | `0xA0` (160) | **70 W** |
+
+```
+enforced.power.limit  =  50 W  +  ACBT / 8
+```
+
+Three points, exact fit, and `power.default_limit` is 50 W. So **`ACBT` is the
+Dynamic Boost headroom added above the VBIOS base, in ⅛ W units** — 0, 10 W,
+20 W.
+
+**`ATPP` does not reach `enforced.power.limit`.** Modes 2 and 3 carry different
+`ATPP` — mode 2 computes it from `ECPL()`, mode 3 pins `0xC8` — and both
+measured 70 W. So `ATPP` is a platform-level budget that shows somewhere else
+or nowhere in `nvidia-smi`, and it is the remaining candidate for a mode-2 /
+mode-3 difference on the APU side.
+
+**No power value is settable, and this is the answer to "can mode 3 be set to
+75 W".** Every write to `ATPP`, `ACBT` and `AMAT` anywhere in the firmware is
+either a **hardcoded constant** or a restore from a saved copy (`LMAT`,
+`LCBT`) — verified by listing all 22 of them. **Nothing takes a watt value
+from the caller.** `0xED` takes a *mode index*, not a power figure. So the
+hardware offers three distinct GPU power tiers and no continuous control; a
+75 W setting is not expressible, and mode 3 is a fourth fixed recipe rather
+than a configurable slot.
+
+**`gpu_boost` is a GPU power control too, and now a predictable one.**
+`Case (0x51)` writes `ACBT` directly: value 0 sets it to `Zero`, value 1
+restores it from `LCBT` — the copy saved by the last mode 1 or mode 3 write.
+Against the formula above that gives a **testable prediction**, worth stating
+before the sweep rather than after:
+
+```
+gpu_boost 0  ->  ACBT = 0     ->  enforced.power.limit drops to 50 W
+gpu_boost 1  ->  ACBT = LCBT  ->  returns to the saved tier's value
+```
+
+If that holds, `gpu_boost` is an independent boost on/off sitting underneath
+whatever tier `perf_mode` selected, which is a coherent two-axis design rather
+than two overlapping controls.
+
+**And `dynamic_boost` (`0xE7`) is the third axis**: write 0 sets `DBAC`/`DBDC`
+to `One`, zeroes `AMAT` and clears `PPAB`; write 1 reverses it, restoring
+`AMAT` from `LMAT`. `AMAT` is `0x78` (120) in every mode and `AMIT` is
+`0xFF88` — which is −120 as a signed 16-bit — so the pair looks like a
+symmetric ±15 W range that Dynamic Boost is allowed to shift between CPU and
+GPU. Zeroing it should stop the shifting without changing the ceiling, which is
+a different observable from the other two and needs load rather than idle to
+see.
+
 ### `dynamic_boost` round-trips, direction still unknown
 
 `0 -> 1 -> 0` reads back correctly, so the node and the inversion are right.
