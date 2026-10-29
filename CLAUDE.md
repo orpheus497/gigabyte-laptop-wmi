@@ -2246,7 +2246,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~17~~ | ~~`gpu_boost` on AC~~ **done 29 Oct 2026 — it is a real second power axis**, and the `ACBT` decode predicted it exactly: `gpu_boost 0` → 50 W, `1` → back to the tier's value, 4/4 predictions correct | low |
 | ~~8~~ | ~~**`amd_pmf.force_load=1`**~~ **done 29 Oct 2026 — APMF binds, and two `platform_profile` handlers coexist without the aggregate going `custom`.** The cost is that the GPU power limit stopped being a stable number; see "`amd_pmf` binds, and two handlers coexist" | medium |
 | ~~10~~ | ~~dGPU attach/detach — fix the `0x51` bounds~~ **done 29 Oct 2026** — the node takes the full 0-4 and the detach/restore pair is whole again; detach is logged, not refused, and the firmware supplies the interlock. See "`DPMF` is the display-MUX flag" | low |
-| 13 | **Exercise the detach and restore on hardware.** `_EJ0` is present and Linux sees the card as ejectable, so the mechanism is real; what is untested is whether the out-of-tree nvidia driver unbinds and re-probes cleanly. Stop GPU workloads first, recover with `4` or a PCI rescan | medium |
+| ~~13~~ | ~~Exercise the detach and restore on hardware~~ **done 29 Oct 2026 — it half-works and does not round-trip.** The eject IS serviced: `nvidia-drm` removes the device and unloads, the HDA function goes with it. But the card **stays on the PCI bus** (`non-zero usage count`), so the end state is present-but-unbound, and `gpu_boost 4` fails with the same `PEGP._ON` `AE_NOT_FOUND` it gives when attached. Recovery is a PCI **bind**, not a rescan and not a reboot. See "Row 13 ANSWERED" | medium |
 | ~~A2~~ | ~~Hide nodes whose methods the firmware lacks~~ **done 29 Oct 2026** — all four of `battery_cycle`, `usb_charge_s3_toggle`, `usb_charge_s4_toggle` and `light_sensor` are omitted at load rather than reporting a permanent `0`. The rule is now uniform: **a node that exists means the feature exists** | low |
 | ~~11~~ | ~~MUX encoding via `0xE6`~~ **done 29 Oct 2026 — two values measured.** `0x00` = MSHybrid (panel on iGPU), `0x01` = discrete (panel on dGPU), confirmed by the CMOS byte, the connected eDP and `boot_vga` all moving together. BIOS option: Peripherals → "Switchable Graphics device". A possible third value is unenumerated | low |
 | ~~18~~ | ~~`gpu_boost` inert in discrete mode?~~ **answered 29 Oct 2026 — INERT, and the `DPMF` decode is confirmed.** With the panel on the dGPU and the tier pinned at 60 W, `gpu_boost 0` left the floor at **60.00 W** where a landed write gives 50 W. The firmware skipped `Case (0x51)` exactly as the `If (DPMF != 0x02)` gate says it should | low |
@@ -5533,6 +5533,78 @@ the cgroup line is parsed with `${unit##*/}` rather than `sed`. The obvious
 unescaped `|` in the alternation closes the `s|...|` delimiter early, and with
 `-n` the result is empty output rather than an error. Parameter expansion has
 nothing to escape.
+
+### Row 13 ANSWERED: the detach half-works and does not round-trip — 29 Oct 2026
+
+**Run properly at last**, from a text console with
+`systemctl --user stop graphical-session.target` first, so `nvidia-smi` reported
+`No running processes found` and nothing held the card. The firmware interlock
+was satisfied too — the panel was on `card1-eDP-1` (amdgpu).
+
+```
+gigabyte_laptop: dGPU detach requested. Anything holding the GPU ... loses it now
+snd_hda_intel 0000:01:00.1: GPU sound probed, but not operational
+[drm] [nvidia-drm] [GPU ID 0x00000100] Removing device
+[drm] [nvidia-drm] [GPU ID 0x00000100] Unloading driver
+NVRM: Attempting to remove device 0000:01:00.0 with non-zero usage count!
+dGPU present: yes
+```
+
+**The eject reaches the graphics stack and the card stays on the bus.** Both
+halves of that are the finding:
+
+- **The notify works.** `nvidia-drm` removed the device and unloaded itself, and
+  the HDA function on `.1` was knocked out with it. So `Notify (PEGP, 0x03)`
+  is serviced exactly as `ACPI_NOTIFY_EJECT_REQUEST` should be.
+- **`_EJ0` did not take the device off the bus.** `0000:01:00.0` is still
+  present afterwards, and `NVRM: ... with non-zero usage count` says why the
+  attempt was contested. The ACPI offline-then-eject sequence got as far as
+  unbinding and stopped.
+
+**The end state is: card present, driver `(unbound)`, `nvidia_drm` gone,
+`nvidia` still resident.** That is not a detached GPU and it is not a working
+one.
+
+**And the firmware restore fails after a real detach too**, which closes the
+question left open when the same error first appeared with the card attached:
+
+```
+gigabyte_laptop: dGPU restore requested
+ACPI BIOS Error (bug): Could not resolve symbol [^^GPP0.PEGP._ON], AE_NOT_FOUND
+ACPI Error: Aborting method \_SB.PCI0.AMW0.WMBD due to previous error
+```
+
+That was recorded as *"whether the restore works after a real eject is
+untested and depends on `D0ST`"*. **It is now tested and it does not.** The
+card never left the bus, so `GPP0.D0ST` was presumably still not `0x03`, the
+`Else` branch ran again, and `PEGP._ON` is still an unresolved `External`.
+**`gpu_boost 4` has never once succeeded on this machine.**
+
+**Recovery needs neither a reboot nor a PCI rescan.** A rescan does nothing
+when the device is already present — which is also why the test's own fallback
+was useless here. The card is on the bus and merely unbound, so binding it
+back is enough:
+
+```sh
+echo 0000:01:00.0 | sudo tee /sys/bus/pci/drivers/nvidia/bind
+sudo modprobe nvidia_drm          # nvidia_drm unloaded itself during the detach
+```
+
+**What this means for the feature, and it is not encouraging.** The matched
+detach/restore pair the `0x51` bound fix was argued from does not exist on this
+firmware. Value 3 unbinds the driver without ejecting the card; value 4 cannot
+run at all. So on a `GA65TH` the node offers a way to lose the GPU and no way
+to get it back through firmware.
+
+**The driver change still stands and should not be reverted.** Blocking 4 while
+permitting 3 was the wrong shape regardless, and `USAGE.md` documents the
+manual recovery. But the honest description of value 4 on this machine is
+**"present in the firmware, broken in the firmware"**, not "the recovery".
+
+**For the GUI project**: do not offer a "reattach GPU" button that writes
+`gpu_boost 4` on this generation. It throws an ACPI BIOS Error into the kernel
+log and does nothing. The working recovery is the PCI bind above, which is
+ordinary sysfs and needs no vendor interface at all.
 ### `gpu_boost 4` aborts in firmware: `PEGP._ON` does not resolve — 29 Oct 2026
 
 **Found by accident, from a test that correctly refused to run.** The detach
@@ -5572,11 +5644,14 @@ was attached and active when this ran, so that is the branch it took.
 GPU is attached** aborts `WMBD` with `AE_NOT_FOUND`. It is **not** a harmless
 no-op, which is how this driver's own test was treating it.
 
-**What is NOT established: whether the restore works after a real eject.** If
-a detached card reports `D0ST == 3`, value 4 takes the safe branch, never
-touches `_ON`, and works. That is the branch it was presumably designed for.
-`D0ST` is an ACPI object and cannot be read from userspace under lockdown, so
-this stays open until someone runs a real detach and then a real restore.
+~~**What is NOT established: whether the restore works after a real eject.**~~
+**Tested 29 Oct 2026 and it fails there too.** The reasoning was that a
+detached card reporting `D0ST == 3` would take the safe branch and work. A
+real detach was then run from a text console with nothing holding the card --
+and because the eject leaves the device **on the bus** (see "Row 13
+ANSWERED"), `D0ST` was evidently still not `0x03`, the `Else` branch ran
+again, and the same `AE_NOT_FOUND` came back. **`gpu_boost 4` has never once
+succeeded on this machine.**
 
 **Two corrections to this file.** It said value 4 is "the only route back from
 an ejection" — it may be, but it is at best conditionally functional. And it
@@ -5586,9 +5661,17 @@ own `_Q49` calls `PG00._ON()`, the *slot's* power gate, while the WMI path
 calls `PEGP._ON()`, the *GPU's*, which does not exist here. The careful one
 may be the one that does not reference a missing symbol.
 
-**Consequence for anyone detaching:** have `echo 1 > /sys/bus/pci/rescan` ready
-before writing `gpu_boost 3`, and do not assume `4` will bring it back. A
-reboot always does.
+**Consequence for anyone detaching**, corrected 29 Oct 2026 by doing it: a PCI
+rescan is **not** the recovery either, because the card never leaves the bus --
+rescanning finds nothing missing. What the detach actually leaves is a present
+but **unbound** device, so the recovery is a bind:
+
+```sh
+echo 0000:01:00.0 | sudo tee /sys/bus/pci/drivers/nvidia/bind
+sudo modprobe nvidia_drm
+```
+
+No reboot is needed. Do not assume `4` will bring it back -- it cannot.
 
 **And a consequence for the driver worth weighing:** `gpu_boost_store()`
 accepts `4` unconditionally, so a userspace GUI offering "reattach GPU" would

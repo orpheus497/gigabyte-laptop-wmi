@@ -152,14 +152,24 @@ restore() {
 	elif [ "$driver" != "$DRIVER_AT_START" ]; then
 		cat <<-EOF
 
-		RESTORE INCOMPLETE -- the card is back but the driver is not.
+		RESTORE INCOMPLETE -- the card is on the bus but the driver is not.
 		  before: $DRIVER_AT_START
 		  after:  $driver
 
-		That is the real answer to this test: the eject works and the card
-		returns, but the graphics driver does not re-bind on its own. Try
-		  modprobe -r nvidia_drm nvidia_modeset nvidia && modprobe nvidia_drm
-		or reboot. Record it -- a detach that needs a reboot to undo is a very
+		That is the real answer to this test: the graphics driver does not
+		re-bind on its own, and the firmware restore cannot make it.
+
+		BIND IT BACK -- no reboot needed, and do NOT reach for a rescan or a
+		module reload first. The device is present, so a rescan finds nothing
+		missing, and unloading nvidia fails while its refcount is non-zero:
+
+		    echo $DEV | sudo tee /sys/bus/pci/drivers/$DRIVER_AT_START/bind
+		    sudo modprobe nvidia_drm
+
+		nvidia_drm unloads itself during the detach, which is why it needs
+		loading again separately. Verify with nvidia-smi.
+
+		Record it -- a detach that needs manual re-binding to undo is a very
 		different feature from one that round-trips.
 		EOF
 		RESTORE_OK=0
@@ -321,9 +331,35 @@ if [ "$(gpu_present)" = NO ] && [ "$MEASURE" -eq 1 ]; then
 		EOF
 	fi
 elif [ "$(gpu_present)" = yes ]; then
+	# Present afterwards means one of two things, and they are not the same.
+	# An earlier version printed only the second and blamed the firmware, which
+	# was wrong on this machine: the panel was on amdgpu so the interlock was
+	# satisfied, the notify WAS serviced -- nvidia-drm removed the device and
+	# unloaded -- and the card still stayed on the bus.
 	echo
-	echo "The card is still present, so the detach did not take effect."
-	echo "Most likely the firmware refused it: check the panel line above."
+	echo "The card is still on the bus."
+	if [ "$(gpu_driver)" != "$DRIVER_AT_START" ]; then
+		cat <<-EOF
+		But the driver is gone: was $DRIVER_AT_START, now $(gpu_driver).
+
+		So the eject WAS serviced and only half-completed -- the graphics
+		driver unbound, the PCI device did not leave. Look for
+		"Attempting to remove device ... with non-zero usage count" in the
+		log above: something held a reference and the removal stopped after
+		the unbind.
+
+		This is not a firmware refusal. Recovery is a bind, NOT a rescan --
+		a rescan finds nothing missing when the device never left:
+		    echo $DEV | sudo tee /sys/bus/pci/drivers/$DRIVER_AT_START/bind
+		    sudo modprobe nvidia_drm
+		EOF
+	else
+		cat <<-EOF
+		And the driver is still bound, so nothing happened at all.
+		Most likely the firmware refused it: check the panel line above --
+		a detach is refused while the panel is on the discrete GPU.
+		EOF
+	fi
 fi
 
 restore
