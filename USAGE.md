@@ -621,6 +621,64 @@ the CPU.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/perf_mode`
 
+## GPU power preset (Gigabyte Gaming models)
+
+The power profile your desktop selects sets the GPU tier as well as fan policy.
+This node decides whether it is allowed to:
+
+| Value | Meaning |
+|---|---|
+| `auto` | follow the power profile |
+| `eco` | pinned to `perf_mode 0` (50 W) |
+| `balanced` | pinned to `perf_mode 1` (60 W) |
+| `boost` | pinned to `perf_mode 2` (70 W) |
+
+**Node:** `/sys/devices/platform/gigabyte_laptop/power_preset`
+
+The mapping a profile applies while this reads `auto`:
+
+| Profile | fans | GPU |
+|---|---|---|
+| `low-power` / `quiet` | silent | 50 W |
+| `balanced` | silent | 60 W |
+| `performance` | normal | 70 W |
+
+**Anything but `auto` outranks the profile.** Pin `boost` and your choice
+survives the desktop switching to balanced when you unplug. Setting it back to
+`auto` re-applies the current profile immediately. Writing `perf_mode` directly
+moves this node to match, so it can never report a tier that is not in effect.
+
+These are the same rules `fan_preset` follows, so fans and GPU power behave
+identically — and they are independent: pinning the fans does not freeze GPU
+power, or the other way round.
+
+```sh
+S=/sys/devices/platform/gigabyte_laptop
+cat $S/power_preset                          # auto
+echo boost | sudo tee $S/power_preset        # pin the top tier
+nvidia-smi --query-gpu=enforced.power.limit --format=csv,noheader
+# allow a few seconds -- the limit does not update instantly
+echo auto  | sudo tee $S/power_preset        # back to following the profile
+```
+
+**On battery this does nothing to GPU power.** Fan policy still changes with
+the profile, but the GPU half is blocked below this driver: the firmware
+withholds the battery power-limit table from `nvidia-powerd` and disables its
+battery Dynamic Boost controller, so there is no consumer to apply the change.
+See Performance mode above. Nothing in this driver can change that.
+
+**It starts at `auto` every time the driver loads**, and that is deliberate
+rather than a limitation. The firmware has no command to read the current
+performance mode back, so a remembered pin would be a claim about hardware
+state nobody had verified. Reverting to `auto` and taking the profile's tier
+reports what is actually in effect. In practice the desktop applies a profile
+within a fraction of a second of boot, so the tier is set and accurate almost
+immediately.
+
+`gpu_boost` is a separate axis and is left alone by profiles. It zeroes or
+restores the boost headroom on top of whichever tier is selected — see GPU
+boost above.
+
 **Example:** To switch to boost mode:
 
 ```sh

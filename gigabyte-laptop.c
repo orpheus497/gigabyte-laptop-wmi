@@ -141,11 +141,22 @@ struct gigabyte_laptop_wmi {
 	 */
 	struct mutex fan_lock;
 
+	/*
+	 * GPU power is a second axis with the same shape as the fan one: a
+	 * preset ring, a platform_profile mapping, and a raw node, all three
+	 * able to move perf_mode. Separate from fan_lock rather than folded
+	 * into it because the two axes are independent -- pinning the fans must
+	 * not freeze GPU power -- and because profile_set touches both, so one
+	 * lock covering both would mean holding a fan lock across a GPU write.
+	 */
+	struct mutex power_lock;
+
 	enum platform_profile_option profile;
 
 	int fan_mode;
 	int fan_custom_speed;
 	u8 fan_preset;
+	u8 power_preset;
 	int charge_mode;
 	int charge_limit;
 	int gpu_boost;
@@ -233,6 +244,47 @@ static const int fan_preset_modes[] = { -1, 1, 0, 2 };
 // preset names.
 static const u8 fan_mode_presets[] = {
 	FAN_PRESET_NORMAL, FAN_PRESET_SILENT, FAN_PRESET_GAMING
+};
+
+/*
+ * GPU power preset, the same ring as the fan one and for the same reason: the
+ * platform profile owns GPU power only while this sits on AUTO, so a
+ * deliberate choice survives tuned switching profile on an AC transition.
+ *
+ * The tiers are the three the firmware implements, measured on a GAMING A16
+ * 5TH against enforced.power.limit: perf_mode 0/1/2 give 50/60/70 W, which is
+ * 50 W plus NPCF.ACBT/8. There is no continuous control -- every power value
+ * in the firmware is a hardcoded constant -- so these are selectors, not
+ * numbers, and the names say tier rather than wattage. A fourth firmware mode
+ * exists and is a duplicate of the third on the GPU side, so it is not offered.
+ *
+ * Starts on AUTO, which is zero and so comes free from the kzalloc. Nothing
+ * restores a pinned choice across a reload, because perf_mode has no WMBC read
+ * and the firmware cannot be asked what tier it is in. That is the right
+ * behaviour rather than a gap: reverting to AUTO and taking the profile's tier
+ * reports what is actually in effect, where remembering a pre-reboot pin would
+ * claim a state nobody has set.
+ */
+enum power_preset {
+	POWER_PRESET_AUTO = 0,
+	POWER_PRESET_ECO,
+	POWER_PRESET_BALANCED,
+	POWER_PRESET_BOOST,
+	POWER_PRESET_COUNT
+};
+
+static const char * const power_preset_names[] = {
+	"auto", "eco", "balanced", "boost"
+};
+
+static_assert(ARRAY_SIZE(power_preset_names) == POWER_PRESET_COUNT);
+
+// Indexed by enum power_preset. AUTO has no tier of its own.
+static const int power_preset_modes[] = { -1, 0, 1, 2 };
+
+// The reverse, for perf_mode 0-2.
+static const u8 perf_mode_presets[] = {
+	POWER_PRESET_ECO, POWER_PRESET_BALANCED, POWER_PRESET_BOOST
 };
 
 /*
@@ -856,6 +908,7 @@ restore_preset:
  * ring in that order, wrapping from gaming back to auto.
  */
 static int gigabyte_laptop_profile_to_fan_mode(enum platform_profile_option profile);
+static int gigabyte_laptop_profile_to_perf_mode(enum platform_profile_option profile);
 
 // Call with fan_lock held.
 static int apply_fan_preset(struct gigabyte_laptop_wmi *gigabyte)
@@ -1470,9 +1523,38 @@ static ssize_t perf_mode_show(struct device *dev, struct device_attribute *attr,
 	return sysfs_emit(buf, "%d\n", gigabyte->perf_mode);
 }
 
-static ssize_t perf_mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+/* Caller holds power_lock. */
+static int set_perf_mode(struct gigabyte_laptop_wmi *gigabyte, int mode)
 {
 	int ret, output;
+
+	ret = gigabyte_laptop_set_devstate(PERF_MODE, mode, &output);
+	if (ret)
+		return ret;
+
+	gigabyte->perf_mode = mode;
+	return 0;
+}
+
+/*
+ * Apply whatever tier the power preset names, or the current profile's tier
+ * when it sits on AUTO. Caller holds power_lock.
+ */
+static int apply_power_preset(struct gigabyte_laptop_wmi *gigabyte)
+{
+	int mode = power_preset_modes[gigabyte->power_preset];
+
+	if (mode < 0)
+		mode = gigabyte_laptop_profile_to_perf_mode(gigabyte->profile);
+	if (mode < 0)
+		return 0; // profile this handler does not map; leave the tier alone
+
+	return set_perf_mode(gigabyte, mode);
+}
+
+static ssize_t perf_mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	int ret;
 	unsigned int mode;
 	struct gigabyte_laptop_wmi *gigabyte;
 
@@ -1480,17 +1562,71 @@ static ssize_t perf_mode_store(struct device *dev, struct device_attribute *attr
 	if (ret)
 		return ret;
 
+	/*
+	 * 0-2 only. The firmware implements a mode 3, and it is not offered
+	 * because it is a duplicate: measured on a GAMING A16 5TH it writes the
+	 * same NPCF.ACBT as mode 2 and produced the same 70 W enforced limit.
+	 * It does differ in NPCF.ATPP, which does not reach the GPU limit, so a
+	 * mode-2/mode-3 difference could still exist on the APU side -- revisit
+	 * only with data showing one.
+	 */
 	if (mode > 2) {
 		pr_err("Invalid performance mode\n");
 		return -EINVAL;
 	}
 
-	ret = gigabyte_laptop_set_devstate(PERF_MODE, mode, &output);
+	gigabyte = dev_get_drvdata(dev);
+	guard(mutex)(&gigabyte->power_lock);
+
+	ret = set_perf_mode(gigabyte, mode);
 	if (ret)
 		return ret;
 
-	gigabyte = dev_get_drvdata(dev);
-	gigabyte->perf_mode = mode;
+	/*
+	 * A direct write is as deliberate as naming a preset, so move the ring
+	 * with it. Otherwise power_preset could report a tier that is not the
+	 * one in effect -- the same rule fan_mode follows for fan_preset.
+	 */
+	gigabyte->power_preset = perf_mode_presets[mode];
+	return count;
+}
+
+/*
+ * GPU power preset. Mirrors fan_preset: anything but auto outranks the
+ * platform profile, and auto re-tethers immediately.
+ */
+static ssize_t power_preset_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%s\n", power_preset_names[gigabyte->power_preset]);
+}
+
+static ssize_t power_preset_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
+	int ret, preset;
+	u8 old;
+
+	preset = sysfs_match_string(power_preset_names, buf);
+	if (preset < 0) {
+		pr_err("Invalid power preset\n");
+		return preset;
+	}
+
+	guard(mutex)(&gigabyte->power_lock);
+
+	// apply_power_preset() reads the field, so set it first and put it back
+	// if the write fails, rather than reporting a tier that is not in effect
+	old = gigabyte->power_preset;
+	gigabyte->power_preset = preset;
+
+	ret = apply_power_preset(gigabyte);
+	if (ret) {
+		gigabyte->power_preset = old;
+		return ret;
+	}
+
 	return count;
 }
 
@@ -1941,6 +2077,7 @@ static DEVICE_ATTR_RW(charge_mode);
 static DEVICE_ATTR_RW(charge_limit);
 static DEVICE_ATTR_RW(gpu_boost);
 static DEVICE_ATTR_RW(perf_mode);
+static DEVICE_ATTR_RW(power_preset);
 static DEVICE_ATTR_RW(dynamic_boost);
 static DEVICE_ATTR_RW(fan_turbo);
 static DEVICE_ATTR_RW(fan_curve_index);
@@ -1963,6 +2100,7 @@ static struct attribute *gigabyte_laptop_attributes[] = {
 	&dev_attr_usb_charge_s4_toggle.attr,
 	&dev_attr_gpu_boost.attr,
 	&dev_attr_perf_mode.attr,
+	&dev_attr_power_preset.attr,
 	&dev_attr_dynamic_boost.attr,
 	&dev_attr_fan_turbo.attr,
 	&dev_attr_fan_curve_index.attr,
@@ -1981,8 +2119,11 @@ static umode_t gigabyte_laptop_sysfs_is_visible(struct kobject *kobj, struct att
 	struct device *dev = kobj_to_dev(kobj);
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
 
-	// These use method IDs only present on Gigabyte Gaming firmware
+	// These use method IDs only present on Gigabyte Gaming firmware.
+	// power_preset is here because it drives perf_mode and has nothing to
+	// select elsewhere.
 	if (attr == &dev_attr_perf_mode.attr ||
+		attr == &dev_attr_power_preset.attr ||
 		attr == &dev_attr_dynamic_boost.attr ||
 		attr == &dev_attr_fan_turbo.attr)
 		return gigabyte->gaming_family ? attr->mode : 0;
@@ -2152,6 +2293,36 @@ static int gigabyte_laptop_profile_to_fan_mode(enum platform_profile_option prof
 	}
 }
 
+/*
+ * The GPU half of the mapping, one tier per profile. Measured on a GAMING A16
+ * 5TH: perf_mode 0/1/2 set enforced.power.limit to 50/60/70 W against a 50 W
+ * VBIOS default.
+ *
+ * Unlike the fan mapping this is not shifted a notch quieter, because GPU power
+ * costs nothing when the GPU is idle -- there is no equivalent of the EC
+ * ramping the fans hard. Balanced therefore gets the middle tier rather than
+ * sharing the bottom one with the two low-power names.
+ *
+ * On battery every one of these writes lands and does nothing: the firmware
+ * withholds the DC power-limit table from nvidia-powerd and disables the DC
+ * Dynamic Boost controller, so there is no consumer to apply the change. That
+ * is above this driver and cannot be fixed here; USAGE.md says so.
+ */
+static int gigabyte_laptop_profile_to_perf_mode(enum platform_profile_option profile)
+{
+	switch (profile) {
+		case PLATFORM_PROFILE_LOW_POWER:
+		case PLATFORM_PROFILE_QUIET:
+			return 0; // eco, 50 W
+		case PLATFORM_PROFILE_BALANCED:
+			return 1; // 60 W
+		case PLATFORM_PROFILE_PERFORMANCE:
+			return 2; // boost, 70 W
+		default:
+			return -EOPNOTSUPP;
+	}
+}
+
 static int gigabyte_laptop_profile_probe(void *drvdata, unsigned long *choices)
 {
 	struct gigabyte_laptop_wmi *gigabyte = drvdata;
@@ -2195,31 +2366,66 @@ static int gigabyte_laptop_profile_set(struct device *dev,
 	if (mode < 0)
 		return mode;
 
-	guard(mutex)(&gigabyte->fan_lock);
+	/*
+	 * Two axes, two locks, applied in sequence rather than nested. Fans and
+	 * GPU power are independent: holding one must not freeze the other, and
+	 * a single lock spanning both would mean holding a fan lock across a
+	 * GPU write for no reason.
+	 */
+	scoped_guard(mutex, &gigabyte->fan_lock) {
+		/*
+		 * Leave the fans alone when the user holds them. The Mode key's
+		 * fan preset is one such hold; a custom curve, a held duty and
+		 * full speed are the others. All are deliberate, and a profile
+		 * switch arriving from the desktop should not pull them out from
+		 * under whatever set them. The profile applies on the next switch
+		 * once the fans are back on an EC preset and the ring is on auto.
+		 */
+		if (gigabyte->fan_preset == FAN_PRESET_AUTO &&
+			gigabyte->fan_mode <= 2 &&
+			gigabyte->fan_mode != mode) {
+			ret = set_fan_mode(gigabyte, fan_modes[mode]);
+			if (ret)
+				return ret;
+
+			gigabyte->fan_mode = mode;
+		}
+	}
 
 	/*
-	 * Remember the choice but leave the fans alone when the user holds
-	 * them. The Mode key's fan preset is one such hold; a custom curve, a
-	 * held duty and full speed are the others. All are deliberate, and a
-	 * profile switch arriving from the desktop should not pull them out
-	 * from under whatever set them. The profile applies on the next switch
-	 * once the fans are back on an EC preset and the ring is back on auto.
+	 * The profile has to be recorded before the GPU half runs, because
+	 * apply_power_preset() reads it to find the tier when the ring is on
+	 * auto. Recording it here rather than at the end also means a profile
+	 * whose fans were held is still remembered, which is the behaviour the
+	 * fan-hold path always had.
 	 */
-	if (gigabyte->fan_preset != FAN_PRESET_AUTO || gigabyte->fan_mode > 2) {
-		gigabyte->profile = profile;
-		return 0;
-	}
-
-	if (gigabyte->fan_mode != mode) {
-		ret = set_fan_mode(gigabyte, fan_modes[mode]);
-		if (ret)
-			return ret;
-
-		gigabyte->fan_mode = mode;
-	}
-
-	// Cached only once the hardware agrees, so profile_get cannot lie
 	gigabyte->profile = profile;
+
+	/*
+	 * perf_mode exists only on Gigabyte Gaming firmware, so there is no GPU
+	 * tier to apply elsewhere.
+	 */
+	if (!gigabyte->gaming_family)
+		return 0;
+
+	scoped_guard(mutex, &gigabyte->power_lock) {
+		// Anything but auto is a deliberate hold; the profile is recorded
+		// above and applies on the next switch once the ring is back
+		if (gigabyte->power_preset == POWER_PRESET_AUTO) {
+			/*
+			 * A failure here is logged rather than returned. The fan
+			 * half has already landed, and the platform_profile core
+			 * stops at the first handler that fails -- so reporting
+			 * failure would leave the aggregate claiming that nothing
+			 * applied when half of it did.
+			 */
+			ret = apply_power_preset(gigabyte);
+			if (ret)
+				pr_warn("Could not apply the GPU power tier for this profile: %d\n",
+					ret);
+		}
+	}
+
 	return 0;
 }
 
@@ -2825,6 +3031,7 @@ static void __exit gigabyte_laptop_exit(void)
 	platform_device = NULL;
 	mutex_destroy(&gigabyte->charge_lock);
 	mutex_destroy(&gigabyte->fan_lock);
+	mutex_destroy(&gigabyte->power_lock);
 	kfree(gigabyte);
 }
 
@@ -2858,6 +3065,7 @@ static int __init gigabyte_laptop_init(void)
 
 	mutex_init(&gigabyte->fan_lock);
 	mutex_init(&gigabyte->charge_lock);
+	mutex_init(&gigabyte->power_lock);
 
 	// Needed before the attribute group is created, as it gates what is shown
 	gigabyte->gaming_family = gigabyte_laptop_is_gaming_family();
@@ -3022,6 +3230,7 @@ fail_platform_device:
 fail_alloc:
 	mutex_destroy(&gigabyte->charge_lock);
 	mutex_destroy(&gigabyte->fan_lock);
+	mutex_destroy(&gigabyte->power_lock);
 	kfree(gigabyte);
 fail_platform_driver:
 	platform_driver_unregister(&platform_driver);

@@ -1967,7 +1967,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~6a~~ | ~~`0xF6`/`KBLL` keyboard brightness~~ **done** — LED class device, `max_brightness` 1 measured from the EC's own events | low |
 | ~~6b~~ | ~~RGB **colour** over `/dev/hidraw2`~~ **closed 29 Oct 2026 — not applicable.** GIGABYTE specs the `GA65H`/`5TH` keyboard as single-colour **blue**; the firmware has no colour fields; `max_brightness` is 1. There is nothing to drive. See "this keyboard has no colour to drive" | — |
 | ~~14~~ | ~~GPU TGP on AC~~ **done 29 Oct 2026 — `perf_mode` controls GPU power on mains.** 0→50 W, 1→60 W, 2→70 W against a 50 W default. The "firmware-blocked" verdict was drawn from readings taken on DC or unannotated. Only the DC path is blocked | low |
-| 16 | **Should `platform_profile` drive `perf_mode` again?** Step 3 was redesigned over fan policy *because* `perf_mode` was believed inert. It is not. Profiles could now set GPU power as well as fan policy, which is what the original design intended. A design decision, not a bug | low |
+| ~~16~~ | ~~Should `platform_profile` drive `perf_mode` again?~~ **done 29 Oct 2026 — it does, through a `power_preset` ring.** Profiles set fan policy and GPU tier on two independent axes with identical pinning rules; `gpu_boost` stays manual. **Untested on hardware** | low |
 | 15 | **The dGPU never reaches D3cold.** `nvidia_drm.modeset=1` makes it a KMS device with an HDMI connector, so the compositor holds it open; it idles at 3.1 W in P8 instead of powering off. Not a driver defect — but it is what decides whether the detach feature is worth anything (row 12) | low |
 | ~~7~~ | ~~`perf_mode`'s APU-power half via `ECPT`~~ **closed 29 Oct 2026 — no mode's limit bound under load.** Swept 0→1→2 with 16 threads loaded on AC: the all-core clock stayed at **~4.32 GHz, flat in all three modes**, and package power at ~62 W. A binding limit would force the clock down. Caveat on the load type recorded below | low |
 | ~~17~~ | ~~`gpu_boost` on AC~~ **done 29 Oct 2026 — it is a real second power axis**, and the `ACBT` decode predicted it exactly: `gpu_boost 0` → 50 W, `1` → back to the tier's value, 4/4 predictions correct | low |
@@ -3980,6 +3980,11 @@ The original design — `platform_profile` over `perf_mode` + `dynamic_boost` �
 became inert when GPU TGP turned out to be unreachable. Replaced with fan
 policy, which works entirely inside the EC:
 
+> **Superseded 29 Oct 2026 — profiles now drive GPU power as well.** See
+> "Step 3b: profiles drive GPU power too" below. The fan mapping here is
+> unchanged and still current; what is no longer true is that fan policy is
+> *all* a profile switch does.
+>
 > **The premise behind that replacement is dead, 29 Oct 2026.** `perf_mode`
 > *does* reach GPU power on mains — 50/60/70 W across the three modes — so the
 > original design was never inert, it was never tested on AC. **What shipped is
@@ -4033,6 +4038,67 @@ tuned-ppd → tuned profile → `[acpi]` plugin → `platform_profile` → this 
 
 `perf_mode` and `dynamic_boost` stay as raw nodes, written by nothing, in case a
 BIOS update makes NVPCF work.
+
+### Step 3b: profiles drive GPU power too — 29 Oct 2026
+
+**Built once `perf_mode` was measured working on mains.** A profile switch now
+sets a GPU tier as well as fan policy, which is what the original Step 3 design
+intended before GPU power was wrongly written off.
+
+| Profile | `fan_mode` | `perf_mode` | GPU limit |
+|---|---|---|---|
+| `low-power` / `quiet` | 1 silent | 0 | 50 W |
+| `balanced` | 1 silent | 1 | 60 W |
+| `performance` | 0 normal | 2 | 70 W |
+
+**The GPU mapping is deliberately *not* shifted a notch quieter the way the fan
+one is.** The fan map puts balanced on silent because the EC's normal and gaming
+curves both ramp hard, which is audible. GPU power has no equivalent cost: an
+idle GPU draws the same whatever the ceiling, so balanced takes the middle tier
+rather than sharing the bottom one.
+
+**`power_preset` is the ring, and it is `fan_preset` with different names**:
+`auto`, `eco`, `balanced`, `boost`, mapping to `perf_mode` −/0/1/2. Same three
+rules, so a user learns one set of semantics for both axes:
+
+- anything but `auto` outranks a profile, so a pinned tier survives `tuned`
+  switching on an AC transition
+- `auto` re-tethers immediately
+- a direct `perf_mode` write moves the ring with it, so the node cannot report
+  a tier that is not in effect
+
+**The two axes are independent, and that drove the locking.** Pinning the fans
+must not freeze GPU power, so `profile_set()` applies the fan half under
+`fan_lock` and the GPU half under a new `power_lock`, **in sequence rather than
+nested** — a single lock spanning both would mean holding a fan lock across a
+GPU write for no reason. The profile is recorded between the two, because
+`apply_power_preset()` reads it to find the tier when the ring is on `auto`.
+
+**A GPU-half failure is logged, not returned.** The fan half has already landed
+by then, and the `platform_profile` core stops at the first handler that fails,
+so returning an error would leave the aggregate claiming nothing applied when
+half of it did.
+
+**`gpu_boost` is left manual on purpose.** It is the second axis — zero or
+restore the boost headroom on top of whichever tier is selected — and it is a
+user toggle rather than something a profile should move.
+
+**Starting on `auto` every load is the correct behaviour, not a gap.** There is
+no WMBC read for `perf_mode`, so the firmware cannot be asked what tier it is
+in, and a remembered pin would be a claim about hardware state nobody verified.
+Reverting to `auto` and taking the profile's tier reports what is actually in
+effect. It also self-corrects fast: `systemd-modules-load` runs at ~13 ms and
+`tuned.service` at ~161 ms, so a profile is applied a fraction of a second
+after the driver appears and the tier is accurate from then on. This is why the
+handler does **not** write a tier at probe time — it would make the driver
+change GPU power on every load for no benefit.
+
+**On battery the GPU half writes and nothing happens**, because the DC path is
+SBIOS-blocked. Harmless, documented in `USAGE.md`, and not fixable here.
+
+**Untested on hardware.** Builds clean under `-Wall -Wextra`. Verify by
+switching profiles and reading `enforced.power.limit` back, allowing a few
+seconds for it to settle.
 
 ### Settled: the Mode key owns fan policy, profiles own it only on `auto`
 
