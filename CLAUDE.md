@@ -1852,7 +1852,9 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~4~~ | ~~Writable `pwm1`/`pwm2`~~ **closed 23 Oct 2026 — unreachable on this EC.** Four mechanisms tried and rejected, the last one verifiably inert. Read scaling kept. See "Step 4 is closed" | medium |
 | ~~5~~ | ~~GiMate button — input device + `sparse_keymap`~~ **done** — both keys scan in; GiMate reports `KEY_PROG1` and is bindable, Mode is consumed by the kernel and cycles `fan_preset` | low |
 | ~~6a~~ | ~~`0xF6`/`KBLL` keyboard brightness~~ **done** — LED class device, `max_brightness` 1 measured from the EC's own events | low |
-| 6b | RGB **colour** over `/dev/hidraw2` — not started, no precedent on this hardware. Open-ended research, not a blocker | high |
+| ~~6b~~ | ~~RGB **colour** over `/dev/hidraw2`~~ **closed 29 Oct 2026 — not applicable.** GIGABYTE specs the `GA65H`/`5TH` keyboard as single-colour **blue**; the firmware has no colour fields; `max_brightness` is 1. There is nothing to drive. See "this keyboard has no colour to drive" | — |
+| 14 | **GPU TGP on AC — reopened 29 Oct 2026.** `enforced.power.limit` reads 60 W against a 50 W default on mains, which is arbitration working. The documented "firmware-blocked" verdict came from readings taken on DC or unannotated. Sweep `perf_mode` 0→1→2 **on AC** watching the enforced limit | low |
+| 15 | **The dGPU never reaches D3cold.** `nvidia_drm.modeset=1` makes it a KMS device with an HDMI connector, so the compositor holds it open; it idles at 3.1 W in P8 instead of powering off. Not a driver defect — but it is what decides whether the detach feature is worth anything (row 12) | low |
 | 7 | **`perf_mode`'s APU-power half via `ECPT`** — opened 24 Oct 2026. Sweep 0→1→2 under sustained AC load and watch package power and all-core clock. Needs no new code and no reverse engineering; the highest-value experiment left. See "`perf_mode` has a second half" | low |
 | 8 | **`amd_pmf.force_load=1`** — one kernel parameter and a reboot, fully reversible. Settles whether APMF binds and what a second `platform_profile` handler does to the aggregate | medium |
 | ~~10~~ | ~~dGPU attach/detach — fix the `0x51` bounds~~ **done 29 Oct 2026** — the node takes the full 0-4 and the detach/restore pair is whole again; detach is logged, not refused, and the firmware supplies the interlock. See "`DPMF` is the display-MUX flag" | low |
@@ -3156,6 +3158,35 @@ top of that interface is still not demonstrated here, and should not be claimed
 without checking. What *is* demonstrated: any D-Bus client, `upowerctl`, GNOME,
 and TLP can all drive it.
 
+### Closed 29 Oct 2026: this keyboard has no colour to drive
+
+**Step 6b is not blocked research — it is not applicable to this hardware.**
+The question "does this unit have RGB or is it locked to blue" is answered by
+the vendor, and three independent lines agree:
+
+- **GIGABYTE's own spec page** for the `GA65H` family — which lists **`5TH` as
+  an alternate name for the same model** — gives the keyboard as
+  **"Single Color Backlit Keyboard (Blue)"**. Note the regional split that
+  makes this worth stating carefully: the `GA6H` listing says *1-zone RGB*,
+  and `GA65H` listings say *single colour blue*. The variant matters, and this
+  machine is the latter.
+- **The firmware has no colour plumbing at all.** Zero occurrences across the
+  whole 5TH DSDT of `RGB`, `KBCL`, `KBRG`, `LEDC`, `ZONE`, `COLR` or `KBLC`.
+  Keep the usual caveat in mind — a keyword search cannot prove a feature
+  absent, and this file has been burned by that twice — so this is
+  corroboration, not the proof.
+- **`max_brightness` is 1**, measured from the EC's own `0xF6` events. On/off,
+  no levels. That is what a single-colour backlight looks like.
+
+So the ENE HID pipe at `\_SB.I2CB.ECSH` is still undocumented, but **there is
+nothing behind it to control on this unit.** The pipe stays interesting only as
+a hotkey/EC channel, and the published Gigabyte RGB tools remain inapplicable
+for the separate reason already recorded: they target a USB `0414:8105`
+keyboard this machine does not have.
+
+**Do not reopen this as "RGB research" on a `GA65TH`.** If it is ever revisited
+it is on a `GA6H`-class unit, which is different hardware.
+
 ### Step 6 leads, in order of cost
 
 1. ~~**`0xF6` / `KBLL` over WMI**~~ — **done, shipped as Step 6a.** Brightness
@@ -4046,12 +4077,28 @@ never evidence of anything, which is worth saying plainly — an arbitrated limi
 that lands on one of the table's numbers is a coincidence, not a reading of the
 table.
 
+> **Reopened 29 Oct 2026 — "GPU TGP is closed" was too broad, and the argument
+> below is now known to be wrong.** On **AC**, `enforced.power.limit` reads
+> **60 W against the 50 W default** — *above* base, which is exactly the
+> arbitration the paragraph below says is absent. The failures in the log are
+> specifically the **DC** path: *"DC power limits table is not supported"* and
+> *"Client (presumably SBIOS) has requested to disable Dynamic Boost **DC**
+> controller"*. Both earlier figures fit that reading — the 40 W was explicitly
+> recorded on DC, and the 30 W had its AC/DC state unrecorded, which is the
+> defect this section already flags. **So the DC path is SBIOS-blocked and the
+> AC path appears to be working.** The GPU half of `perf_mode` has therefore
+> never been tested under the conditions where it could work. See "Reopened:
+> the AC path arbitrates".
+
 **The load test was a red herring, and GPU TGP is closed.** A power limit is a
 setting, not a measurement, so if `perf_mode` moved it the change would show at
-idle too. And the enforced limit sits *below* the 50 W VBIOS default — 30 W
+idle too. ~~And the enforced limit sits *below* the 50 W VBIOS default — 30 W
 then, 40 W now — which is not what Dynamic Boost arbitration looks like:
 arbitration raises above base rather than pinning under it. That pattern means
-capped, not idle, and it means the same at either figure.
+capped, not idle, and it means the same at either figure.~~ **That is the
+withdrawn argument** — see the note above. It rested on two readings that were
+either taken on DC or not annotated at all, which is precisely the gap this
+section warns about two paragraphs earlier and then reasoned from anyway.
 
 Confirmed by trying to set it directly:
 
@@ -4087,6 +4134,92 @@ unreachable a profile built on it would have done nothing at all. The design
 was therefore rewritten over **fan policy**, shipped, and verified on hardware
 — see "Step 3 design: profiles over fan policy, with PWM taking precedence".
 No longer an open question.
+
+### Reopened: the AC path arbitrates, only DC is blocked — 29 Oct 2026
+
+**Read live on mains, with the AC/DC state recorded this time:**
+
+```
+power.draw 3.10 W   enforced.power.limit 60.00 W
+power.default_limit 50.00 W   power.min_limit 5.00 W   power.max_limit 85.00 W
+ACAD/online = 1
+```
+
+**60 W against a 50 W default is arbitration raising the limit above base** —
+the exact behaviour this file said was absent. And the daemon's failures name
+their own scope:
+
+```
+ERROR! DC power limits table is not supported
+ERROR! Client (presumably SBIOS) has requested to disable Dynamic Boost DC controller
+```
+
+Both are **DC**. The service is `active`, and the only error repeating
+afterwards is `JPAC is not created/already destroyed`, which follows from the
+DC controller never being built.
+
+**So the verdict splits in two**, where it was previously one:
+
+| Path | State |
+|---|---|
+| **DC** (battery) | SBIOS withholds the power-limit table and disables the Dynamic Boost DC controller. Blocked, and not by this driver |
+| **AC** (mains) | Arbitrating. 60 W enforced against a 50 W base |
+
+**What this costs us is a conclusion, not work already done.** Everything about
+the *write* landing and the notify arriving is unaffected. What is withdrawn is
+"nothing applies it", which was inferred from two readings — 40 W explicitly on
+DC, 30 W with the AC/DC state unrecorded. This section had already identified
+the missing annotation as a defect in the record and then reasoned from the
+numbers anyway, which is the lesson worth keeping: **an un-annotated power
+reading on a machine whose firmware branches on `EC0.ACST` is not evidence.**
+
+**The experiment that was never run** is now row 14: sweep `perf_mode` 0→1→2
+**on AC**, watching `enforced.power.limit` rather than package power. A setting
+shows at idle, so this needs no load — which is why it costs almost nothing and
+should happen before the APU sweep below rather than after it.
+
+### The dGPU never powers down, and the desktop is on the iGPU — 29 Oct 2026
+
+Two questions that get conflated, measured separately.
+
+**Is the desktop on the integrated GPU? Yes, as designed.** The AMD Rembrandt
+iGPU is the primary adapter and owns the panel:
+
+```
+0000:75:00.0 (amdgpu)   boot_vga=1     card1-eDP-1  connected
+0000:01:00.0 (nvidia)   boot_vga=0     card0-eDP-2  disconnected
+                                       card0-HDMI-A-1 disconnected
+```
+
+So hybrid graphics is working the way it should: iGPU drives the display, the
+dGPU renders on request. This is also the MUX state `DPMF != 2`, confirmed
+independently — see "`DPMF` is the display-MUX flag".
+
+**Does the dGPU power down when idle? No, and that is the real finding.** It
+sits at `runtime_status active`, `power_state D0`, drawing **3.10 W at P8**
+with 0 % utilisation, despite RTD3 being enabled and capable:
+
+```
+Runtime D3 status:  Enabled (fine-grained)
+Video Memory Off:   Supported
+nvidia DynamicPowerManagement: 3
+/sys/.../0000:01:00.0/power/control = auto    d3cold_allowed = 1
+```
+
+**The cause is `nvidia_drm.modeset=1` plus `fbdev=1`**, both `Y` on this
+system. That makes the dGPU a KMS provider with its own connector list — the
+chassis HDMI port is wired to it — so the compositor opens and holds the device
+in order to manage that output. `nvidia-smi` names the holder directly:
+`kwin_wayland`. The card therefore never reaches D3cold.
+
+**This is not a gigabyte-laptop defect** and nothing in this driver causes or
+fixes it; it is a distribution/driver/compositor configuration matter. It is
+recorded here for one reason: **it is what decides whether the dGPU detach is
+worth anything.** Row 12 asks "is detaching worth it", and the answer depends
+on a 3.1 W idle draw that RTD3 is supposed to eliminate and does not. If
+`modeset=0` or a compositor change lets the card reach D3cold, detaching buys
+very little; if it cannot, detaching is the only way to stop paying that 3.1 W.
+**Measure the delta before building anything further on the detach path.**
 
 ### `perf_mode` has a second half, and it has never been tested — 24 Oct 2026
 
