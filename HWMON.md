@@ -33,3 +33,24 @@ Because a wrong duty can stop the fans rather than merely run them at the wrong 
 ## Temperature
 
 All `tempX_input` nodes are read-only, and all values are in Celsius * 1000 (so `sensors` can read it correctly). Channel 1 is for CPU, channel 2 is for GPU, and channel 3 is for the motherboard.
+
+### Channel 1 is a slow average, not an instantaneous reading
+
+Measured on a GAMING A16 5TH: during a 120-second all-core load, channel 1 held
+**66 °C for every one of 120 samples** while the CPU's own sensor ran
+78 → 86 → 65 °C. Sampled at idle afterwards it changed **once in 60 seconds**.
+It also reads high at idle and low under load, which is the signature of a
+long-window average rather than a fault.
+
+**Do not use this channel for anything responsive** — a fan curve, an on-screen
+display, a thermal alert. It will be minutes stale and will under-read badly
+under load. For an instantaneous CPU temperature use the CPU's own driver
+(`k10temp` on AMD, `coretemp` on Intel).
+
+This is the controller's published value, not a driver defect, and the
+controller's own fan logic does not use it: in the same run the fans tracked the
+load correctly while this number sat still. So a stale reading here is a
+reporting limitation, not a cooling one.
+
+Channel 2 has no such problem — it matched the GPU's own sensor exactly in the
+same test.

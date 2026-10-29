@@ -1916,14 +1916,15 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~14~~ | ~~GPU TGP on AC~~ **done 29 Oct 2026 — `perf_mode` controls GPU power on mains.** 0→50 W, 1→60 W, 2→70 W against a 50 W default. The "firmware-blocked" verdict was drawn from readings taken on DC or unannotated. Only the DC path is blocked | low |
 | 16 | **Should `platform_profile` drive `perf_mode` again?** Step 3 was redesigned over fan policy *because* `perf_mode` was believed inert. It is not. Profiles could now set GPU power as well as fan policy, which is what the original design intended. A design decision, not a bug | low |
 | 15 | **The dGPU never reaches D3cold.** `nvidia_drm.modeset=1` makes it a KMS device with an HDMI connector, so the compositor holds it open; it idles at 3.1 W in P8 instead of powering off. Not a driver defect — but it is what decides whether the detach feature is worth anything (row 12) | low |
-| 7 | **`perf_mode`'s APU-power half via `ECPT`** — opened 24 Oct 2026. Sweep 0→1→2 under sustained AC load and watch package power and all-core clock. Needs no new code and no reverse engineering; the highest-value experiment left. See "`perf_mode` has a second half" | low |
+| ~~7~~ | ~~`perf_mode`'s APU-power half via `ECPT`~~ **closed 29 Oct 2026 — it does nothing measurable.** Swept 0→1→2 under sustained all-core AC load: package power sat at **~62 W in all three modes** and the all-core clock at **~4.32 GHz**, flat. Mode 0's `ECPT` SPL is 45 W and sustained draw was 62 W, so that limit is not being applied | low |
+| ~~17~~ | ~~`gpu_boost` on AC~~ **done 29 Oct 2026 — it is a real second power axis**, and the `ACBT` decode predicted it exactly: `gpu_boost 0` → 50 W, `1` → back to the tier's value, 4/4 predictions correct | low |
 | 8 | **`amd_pmf.force_load=1`** — one kernel parameter and a reboot, fully reversible. Settles whether APMF binds and what a second `platform_profile` handler does to the aggregate | medium |
 | ~~10~~ | ~~dGPU attach/detach — fix the `0x51` bounds~~ **done 29 Oct 2026** — the node takes the full 0-4 and the detach/restore pair is whole again; detach is logged, not refused, and the firmware supplies the interlock. See "`DPMF` is the display-MUX flag" | low |
 | 13 | **Exercise the detach and restore on hardware.** `_EJ0` is present and Linux sees the card as ejectable, so the mechanism is real; what is untested is whether the out-of-tree nvidia driver unbinds and re-probes cleanly. Stop GPU workloads first, recover with `4` or a PCI rescan | medium |
 | ~~A2~~ | ~~Hide nodes whose methods the firmware lacks~~ **done 29 Oct 2026** — all four of `battery_cycle`, `usb_charge_s3_toggle`, `usb_charge_s4_toggle` and `light_sensor` are omitted at load rather than reporting a permanent `0`. The rule is now uniform: **a node that exists means the feature exists** | low |
 | 11 | **MUX encoding via `0xE6`** — one value anchored (`0x00` = panel on iGPU). Identify the rest from a known state before ever writing it; a wrong value is consumed at the next boot and can black the panel | **high if written** |
 | 12 | **Is detaching the dGPU worth anything?** Runtime D3 already works fine-grained on this card, and Linux already offers `pci .../remove` + `rescan`. Measure the power difference before building a firmware path that duplicates them | low |
-| 9 | **Does `WMBC 0xE1` lag or freeze under load?** Opened 26 Oct 2026, and **this outranks 7 and 8.** A load run with the driver's `temp1` and `k10temp` sampled *together*, after both fans were seen at 0 RPM with the CPU at 95 °C and `temp1` reporting 58 °C. The only open item that could change what the driver reports. See "Open: the fans did not respond to a sustained CPU load" | low |
+| ~~9~~ | ~~Does `WMBC 0xE1` lag or freeze under load?~~ **answered 29 Oct 2026 — it lags, by minutes.** `temp1` held at 66 °C for **120 consecutive samples** while `k10temp` swung 78→86→65, then moved once in the following 60 s. Not frozen, heavily damped. The EC's own fan control is unaffected and tracked the load correctly | low |
 
 Steps 0, 1 and 1b are complete and verified on hardware: `gigabyte-laptop/0.2.0`
 installed through DKMS, signed by the `DKMS module signing key`, loaded, with
@@ -1997,6 +1998,56 @@ was true for about a day and has been restated wrongly twice since, each time by
 naming the rows that happened to be open. **Read the open work off the Phase 3
 table, which is the only place it is maintained.** Step 6b remains open-ended
 research, so treat it as a separate project rather than a blocker.
+
+### Answered: `temp1` lags by minutes — 29 Oct 2026
+
+**The section below is the open question. This is the answer: it lags, badly,
+and it does not freeze.** A 120-second all-core load on AC with the driver's
+`temp1` and `k10temp` sampled together every second, cooling pinned to
+`gaming`:
+
+```
+ sec  mode  drvC  k10C   pkgW  clkMHz   fan1  pwm1
+   1     0    66    78     61    4328   2054    71
+  20     0    66    85     64    4337   3225   110
+  60     1    66    85     62    4328   3260   110
+ 100     2    66    86     63    4341   3225   110
+ 120     1    66    65     24    2306   2400    79
+```
+
+**`drvC` is 66 in all 120 samples.** Not one degree of movement while
+`k10temp` ran 78 → 86 → 65. Then, sampled at idle minutes later, it moved to
+61 and **changed exactly once in the following 60 seconds** with `k10temp` at
+56. So the update interval is on the order of minutes.
+
+**It reads high at idle and low under load** — 61 against `k10temp` 56 idle,
+66 against 86 loaded — which is the signature of a long-window average rather
+than a broken sensor. That fully explains the 26 Oct observation of 58 °C
+against 95 °C: the published value had not caught up, and nothing was wrong
+with the chip.
+
+**The EC's fan control does not use this value, which is the important part.**
+During the same run the fans ramped to 3260 RPM and `pwm1` to 110 while the
+published temperature sat still, then wound down correctly on cooldown. So the
+controller has a fast internal reading and publishes a smoothed one over WMI.
+**There is no safety concern here** — only a reporting one.
+
+**Consequence for the driver, and it matters now that a GUI is coming: hwmon
+`temp1` is not usable as an instantaneous CPU temperature.** Anything
+responsive — a fan curve, an OSD, a thermal alert — reading it will be minutes
+stale and will under-read badly under load. `k10temp` is the correct source for
+CPU temperature on this machine. Documented in `HWMON.md`.
+
+**`temp2`, by contrast, is accurate.** Read 45000 against `nvidia-smi`'s
+**45 °C** exactly, with the GPU idle and the CPU hot — so the two were *not*
+converged, which is what makes this a real corroboration of the 26 Oct `temp2`
+reversal rather than a repeat of the idle trap that caused it.
+
+**Two measurement artifacts from the same run, recorded so they are not read as
+findings.** `pkgW` showed `-65469` once, which is the RAPL energy counter
+wrapping. And the single-sample spikes to 71 and 72 W land exactly on the two
+`perf_mode` writes, so they are the `sudo`/`tee` overhead inflating that
+second's energy delta, not a real power excursion.
 
 ### Open: the fans did not respond to a sustained CPU load — 26 Oct 2026
 
