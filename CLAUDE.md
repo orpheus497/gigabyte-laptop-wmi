@@ -2082,13 +2082,30 @@ package-wide on this AMD part** rather than core power reported under a package
 name. So the tempting arithmetic — "62 W drawn against mode 0's 45 W `ECPT`
 SPL, therefore not applied" — depends on something unchecked and is dropped.
 
-**The caveat that could legitimately reopen this: the load was `yes
-> /dev/null` on 16 threads.** That is integer work, light on the vector units,
-so it draws less than an AVX or memory-bound load would. A limit that only
-binds at higher draw would not have shown. The honest statement is therefore
-**no mode's limit bound under this load**, not "`ECPT` does nothing at all".
-Re-testing with a heavier load is the one thing that could change the answer,
-and it is cheap if it ever matters.
+**The load-type caveat is narrower than it first looked, and the sustained
+limit is settled without it.** `ECPT` converts watts to milliwatts and sends
+the 32-bit value as two six-byte EC commands with command byte `0x45` at
+indices `Arg0` and `Arg0+1`, so each call programs one limit. Mode 0 on AC
+writes **45 / 65 / 65 W** — the shape of AMD's sustained / short-burst /
+fast-burst triplet, with the sustained one lowest.
+
+The chip **sustained ~62 W in mode 0 at a flat 4.32 GHz.** Whichever index is
+the sustained limit, a 45 W value was written for that mode and the part
+sustained 62 W, which it could not do if 45 W were being enforced. **So the
+sustained limit demonstrably does not take effect**, and that conclusion needs
+no assumption about load type.
+
+The measurement-scope worry also cuts the *favourable* way, which is worth
+stating since it was raised: if `package-0` reports core power only, true
+package draw is **higher** than 62 W, not lower. Breaking the conclusion would
+need RAPL over-reporting by around 40 %, which is not a failure mode it has.
+
+**What the light load genuinely left untested is the two burst limits.** The
+run drew ~62 W, below the 65 W figures, so nothing exercised them. They govern
+short excursions rather than sustained behaviour, so they matter much less —
+but a heavier load (AVX, memory-bound) is what would show whether *they* are
+enforced. That is the only part of row 7 still open, and it is a detail rather
+than a reopening.
 
 ### Open: the fans did not respond to a sustained CPU load — 26 Oct 2026
 
