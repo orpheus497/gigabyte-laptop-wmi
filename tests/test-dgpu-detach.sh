@@ -148,18 +148,32 @@ echo "dGPU present:     $(gpu_driver | sed "s|^|$(gpu_present), driver |")"
 # compute contexts only, so a process using the GPU purely for graphics is
 # invisible to it. Measured here, the compositor shows as type C+G -- that
 # compute context is the only reason the compute-only query caught it.
+# The override has to be honoured on the paths that mention it, not only on the
+# one where a process was found. An earlier version told the caller that
+# GIGABYTE_DETACH_FORCE=1 would override and then ignored it here, promising
+# something the code did not do.
+FORCED=0
+[ "${GIGABYTE_DETACH_FORCE:-0}" = 1 ] && FORCED=1
+
 echo "processes holding it:"
-command -v nvidia-smi >/dev/null || die "
+if ! command -v nvidia-smi >/dev/null; then
+	[ "$FORCED" -eq 1 ] || die "
 nvidia-smi is not available, so whether anything is using the GPU cannot be
 checked. Refusing to detach blind. Set GIGABYTE_DETACH_FORCE=1 to override."
-
-PROCS=$(nvidia-smi 2>/dev/null | sed -n '/Processes/,$p' | tail -n +4) ||
-	die "nvidia-smi failed, so the process check could not run. Refusing to detach blind.
-Set GIGABYTE_DETACH_FORCE=1 to override."
-echo "$PROCS" | sed 's/^/  /'
+	echo "  nvidia-smi absent -- GIGABYTE_DETACH_FORCE=1, SKIPPING the process check"
+	PROCS="No running processes found"
+elif ! PROCS=$(nvidia-smi 2>/dev/null | sed -n '/Processes/,$p' | tail -n +4); then
+	[ "$FORCED" -eq 1 ] || die "
+nvidia-smi failed, so the process check could not run. Refusing to detach
+blind. Set GIGABYTE_DETACH_FORCE=1 to override."
+	echo "  nvidia-smi failed -- GIGABYTE_DETACH_FORCE=1, SKIPPING the process check"
+	PROCS="No running processes found"
+else
+	echo "$PROCS" | sed 's/^/  /'
+fi
 
 if ! printf '%s' "$PROCS" | grep -q 'No running processes found'; then
-	[ "${GIGABYTE_DETACH_FORCE:-0}" = 1 ] || die "
+	[ "$FORCED" -eq 1 ] || die "
 Something is still using the discrete GPU, listed above. Detaching now takes
 the card away from it -- for a compositor that means your session.
 

@@ -89,7 +89,13 @@ printf 'panel  : %s\n' "$PANEL"
 PREV=""
 [ -r "$LOG" ] && PREV=$(tail -1 "$LOG")
 
-printf '%s\t%s\t%s\t%s\n' "$NOW" "${E6//$'\n'/ }" "${A3//$'\n'/ }" "$PANEL" >> "$LOG"
+# A failed append must stop the run. Otherwise it reports "saved to $LOG"
+# having saved nothing, and the next run compares against stale history and
+# calls a real change unchanged -- or an old change new.
+printf '%s\t%s\t%s\t%s\n' "$NOW" "${E6//$'\n'/ }" "${A3//$'\n'/ }" "$PANEL" >> "$LOG" ||
+	die "could not append to $LOG -- the comparison this test depends on needs
+that history, so nothing was saved and the run is stopped. Check the path is
+writable, or point GIGABYTE_CMOS_LOG somewhere that is."
 
 echo
 if [ -z "$PREV" ]; then

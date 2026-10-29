@@ -44,7 +44,18 @@ K=$(dirname "$(grep -l '^k10temp$' /sys/class/hwmon/*/name 2>/dev/null)" 2>/dev/
 # The RAPL counter is finite and wraps. Observed on this machine: a single
 # sample reported -65469 W, which is this exact range rolling over inside one
 # second. Without the wrap correction that reads as a wild negative excursion.
-MAXRANGE=$(cat "$RAPL/max_energy_range_uj" 2>/dev/null) || MAXRANGE=0
+#
+# Validate it rather than defaulting to zero on failure: a zero range makes the
+# correction add nothing, so the negative sample survives and the very bug this
+# exists to fix comes back silently.
+MAXRANGE=$(cat "$RAPL/max_energy_range_uj" 2>/dev/null) ||
+	die "cannot read $RAPL/max_energy_range_uj -- without the counter range a
+wrapped sample cannot be corrected, and it would be reported as a large
+negative wattage"
+case $MAXRANGE in
+*[!0-9]*|'') die "max_energy_range_uj is not a plain number: '$MAXRANGE'" ;;
+esac
+(( MAXRANGE > 0 )) || die "max_energy_range_uj is $MAXRANGE; need a positive range"
 
 if command -v stress-ng >/dev/null; then
 	# Deliberately longer than the sampling run, so the load never ends first.
@@ -66,14 +77,27 @@ else
 		done; wait')
 fi
 
-PRESET_WAS=$(cat "$S/fan_preset")
-PROFILE_WAS=$(cat "$PROFILE")
+# Every saved value is checked before anything is changed. An unreadable node
+# gives an empty string under `set -u` without -e, and the cleanup would then
+# write nothing and report a restore that did not happen.
+save() {   # save <path> <description>
+	local v
+	v=$(cat "$1" 2>/dev/null) ||
+		die "cannot read $1 ($2) -- refusing to change settings without a restore path"
+	[ -n "$v" ] ||
+		die "$1 ($2) read back empty -- refusing to change settings without a restore path"
+	printf '%s' "$v"
+}
+
+PRESET_WAS=$(save "$S/fan_preset" "fan preset")           || exit 1
+PROFILE_WAS=$(save "$PROFILE" "platform profile")         || exit 1
 # This script writes perf_mode directly, which also moves power_preset to match
 # -- so both have to be saved. The first version restored only the fan preset
 # and the profile, and left the machine pinned at the top GPU tier with
 # power_preset=boost. Third time a sweep here failed to put something back.
-POWER_PRESET_WAS=$(cat "$S/power_preset")
+POWER_PRESET_WAS=$(save "$S/power_preset" "power preset") || exit 1
 LOAD_PID=""
+LOAD_LOG=$(mktemp) || die "cannot create a temporary file for the load's output"
 
 # Kill only our own descendants, found by walking the process tree. The earlier
 # version used `pkill -f stress-ng` and `pkill -f 'openssl speed'`, which would
@@ -103,16 +127,44 @@ cleanup() {
 		"$(cat "$S/fan_preset")" "$(cat "$S/power_preset")" "$(cat "$PROFILE")"
 	printf '   perf_mode=%s fan_mode=%s\n' \
 		"$(cat "$S/perf_mode")" "$(cat "$S/fan_mode")"
+	[ -n "${LOAD_LOG:-}" ] && rm -f "$LOAD_LOG"
 }
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
 
-echo gaming > "$S/fan_preset"
-echo 0      > "$S/perf_mode"
+# Every write is checked. A rejected fan_preset or perf_mode write would leave
+# the samples labelled with a mode the machine is not in, which is worse than
+# no data.
+set_node() {   # set_node <path> <value>
+	echo "$2" > "$1" 2>/dev/null ||
+		die "write of '$2' to $1 was rejected -- stopping rather than sampling a
+machine that is not in the state the output would claim"
+}
+
+set_node "$S/fan_preset" gaming
+set_node "$S/perf_mode"  0
 sleep 3
 
-"${LOAD[@]}" >/dev/null 2>&1 &
+# Keep the load's output. If it dies early -- which is exactly what the finite
+# openssl fallback used to do -- the samples silently become an idle run, and
+# that is how this test produced a wrong answer the first time.
+"${LOAD[@]}" >"$LOAD_LOG" 2>&1 &
 LOAD_PID=$!
+
+load_alive() { kill -0 "$LOAD_PID" 2>/dev/null; }
+
+report_dead_load() {
+	local status
+	wait "$LOAD_PID" 2>/dev/null; status=$?
+	cat >&2 <<-EOF
+
+	THE LOAD EXITED EARLY, after ${1}s of ${SECONDS_TOTAL}. Exit status $status.
+	Every sample from here on would be an idle machine reported as a loaded run,
+	so this stops now. Its output:
+	EOF
+	sed 's/^/  /' "$LOAD_LOG" >&2
+	die "load did not survive the sampling period"
+}
 
 cat <<EOF
 
@@ -131,6 +183,8 @@ prev_us=$(now_us)
 
 for t in $(seq 1 "$SECONDS_TOTAL"); do
 	sleep 1
+
+	load_alive || report_dead_load "$t"
 
 	now_uj=$(cat "$E")
 	now_us=$(now_us)
@@ -156,8 +210,8 @@ for t in $(seq 1 "$SECONDS_TOTAL"); do
 	prev_us=$now_us
 
 	case $t in
-	30) echo 1 > "$S/perf_mode" ;;
-	60) echo 2 > "$S/perf_mode" ;;
+	30) set_node "$S/perf_mode" 1 ;;
+	60) set_node "$S/perf_mode" 2 ;;
 	esac
 done
 

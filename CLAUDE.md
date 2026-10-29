@@ -2239,13 +2239,29 @@ this a decode rather than an observation. On AC the three calls write:
 | 1 | 65 W | **65 W** | 80 W | **64–65 W** |
 | 2 | 70 W | **80 W** | **80 W** | **79–80 W** |
 
-So the binding figure tracks **65 / 65 / 80** — the sPPT/fPPT pair — and not
-45/65/70. Two conclusions, and both matter:
+So the measured plateaus track **65 / 65 / 80**, which is the **`0x32` column
+exactly** — and not 45/65/70. Three conclusions, held to what the run can
+actually support:
 
-- **The sustained limit (`0x30`) is still not enforced.** Mode 0 writes 45 W
-  and the part drew 65 W. That half of the earlier result stands untouched.
-- **The package limits (`0x32`/`0x34`) ARE enforced.** Mode 2's 80 W figure is
-  hit to within a watt, and modes 0 and 1 sit exactly on their shared 65 W.
+- **`0x32` is what binds.** Mode 1 is the only mode where `0x32` and `0x34`
+  differ — 65 W against 80 W — and it plateaued at **65 W**. That one row is
+  the whole discrimination: had `0x34` been the ceiling, mode 1 would have been
+  free to reach 80 W and did not. All three measured plateaus sit on the
+  `0x32` figure to within a watt.
+- **`0x34` enforcement is unproven, not demonstrated.** In modes 0 and 2 the
+  two columns are equal, so those rows cannot distinguish them, and mode 1
+  points the other way. ~~The package limits (`0x32`/`0x34`) ARE enforced~~ —
+  that was the original wording here and it was wrong: it credited a pair when
+  only one member of it is visible in the data.
+- **`0x30` was not reached in the 30 seconds mode 0 ran for, which is not the
+  same as it being unenforced.** The part drew 65 W against a programmed 45 W,
+  but a sustained power limit is defined over a time window, and **this run
+  held each mode for 30 s only**. If `0x30`'s window is longer than that, the
+  part was legitimately inside its burst allowance the whole time and the limit
+  would have pulled it down later. The earlier `yes(1)` sweep is no help here
+  either: it ran 40 s per mode and never reached any ceiling. **So the honest
+  statement is that `0x30` did not bind within 30 s**, and settling it means
+  holding one mode for several minutes and watching for a step down.
 
 **Why the first attempt missed it, and the lesson is a sharp one.** The earlier
 sweep used `yes(1)`, which drew ~62 W — **three watts under the 65 W ceiling.**

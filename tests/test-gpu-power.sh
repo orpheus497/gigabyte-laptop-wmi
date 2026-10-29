@@ -87,6 +87,17 @@ restore() {
 	echo "$FAN_PRESET_WAS"  > "$P/fan_preset"   2>/dev/null
 	echo "$PROFILE_WAS"     > "$PROFILE"        2>/dev/null
 	sleep "$SETTLE"
+
+	# Restoring the preset and the profile usually restores the mode with them,
+	# because with the preset on auto the profile decides the mode and with it
+	# pinned the preset decides. One case escapes that: a freshly loaded driver
+	# has the preset on auto and the mode read from the firmware, which need
+	# not be the mode the profile maps to. Writing it back explicitly covers
+	# that, and is a no-op whenever the two already agree.
+	if [ "$(cat "$P/fan_mode")" != "$FAN_MODE_AT_START" ]; then
+		echo "$FAN_MODE_AT_START" > "$P/fan_mode" 2>/dev/null
+		sleep 1
+	fi
 	printf '\n== restored ==\n'
 	printf '  profile=%s power_preset=%s fan_preset=%s\n' \
 		"$(cat "$PROFILE")" "$(cat "$P/power_preset")" "$(cat "$P/fan_preset")"

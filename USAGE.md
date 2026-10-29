@@ -629,22 +629,38 @@ normal and is why this node exists.
 
 **The same method also programs the APU's own power limits**, through a
 separate controller channel that does not involve the graphics card or
-`nvidia-powerd` at all — roughly 45 W, 65 W and 70 W for the three modes on
-mains power.
+`nvidia-powerd` at all. Each mode writes **three** limits — one sustained and
+two short-burst — and on mains they are:
+
+| `perf_mode` | sustained | short-burst | fast-burst |
+|---|---|---|---|
+| `0` eco | 45 W | **65 W** | 65 W |
+| `1` balanced | 65 W | **65 W** | 80 W |
+| `2` boost | 70 W | **80 W** | 80 W |
 
 **That half was measured on 29 Oct 2026 and it works too.** Under a heavy
-all-core load on mains, package power stepped with the mode:
+all-core load on mains, package power stepped with the mode, and the plateau
+matched the **short-burst** column every time:
 
-| `perf_mode` | APU package power |
+| `perf_mode` | measured package power |
 |---|---|
 | `0` eco | **~65 W** |
 | `1` balanced | **~65 W** |
 | `2` boost | **~80 W** |
 
-Those match the firmware's own figures exactly. Each mode writes three limits —
-a sustained one and two short-burst ones — and it is the **burst** pair that
-binds: 65 / 65 / 80 W across the three modes. The sustained figure (45 W in
-mode 0) is **not** enforced; the part drew 65 W in that mode.
+**It is the short-burst limit that binds**, and mode 1 is what shows it: that
+is the only mode where the short-burst and fast-burst figures differ (65 W
+against 80 W), and the part plateaued at 65 W. Had the fast-burst limit been
+the ceiling, mode 1 could have reached 80 W. Whether the fast-burst figure is
+enforced at all is therefore **unproven** — the other two modes have both
+columns equal and cannot tell them apart.
+
+**The sustained limit was never reached in this test**, which is not the same
+as it being ignored. Mode 0 drew 65 W against a programmed 45 W, but a
+sustained limit applies over a time window and **each mode was held for only
+30 seconds.** If that window is longer, the part was inside its burst
+allowance throughout and would have been pulled down later. Treat the
+sustained figure as untested rather than inactive.
 
 **A light load will show none of this.** An earlier attempt used a simple
 integer load that drew about 62 W — three watts under the 65 W ceiling — so no
