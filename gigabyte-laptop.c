@@ -1393,8 +1393,22 @@ static ssize_t gpu_boost_store(struct device *dev, struct device_attribute *attr
 		return -EINVAL;
 	}
 
+	/*
+	 * Warn, do not gate. The one thing worth checking before a detach is
+	 * whether anything is using the GPU, and the kernel cannot answer that
+	 * for an out-of-tree driver: the signals it does expose are bound-driver
+	 * and runtime-PM state, both of which stay true for as long as the
+	 * driver is loaded, so a gate on either would refuse every detach rather
+	 * than the unsafe ones. The authority is the graphics stack's own tools.
+	 *
+	 * There is a real safety net below us. The kernel services the eject
+	 * request by calling device_offline() first and aborts the removal if
+	 * that fails, so this is an orderly teardown rather than a surprise
+	 * removal. What nothing can catch is a driver that offlines cleanly
+	 * while its users do not, which is why this says so out loud.
+	 */
 	if (mode == 3)
-		pr_info("dGPU detach requested; restore with 'echo 4' or a PCI rescan\n");
+		pr_warn("dGPU detach requested. Anything holding the GPU -- a compositor, CUDA, a running game -- loses it now. Restore with 'echo 4' or a PCI rescan\n");
 	else if (mode == 4)
 		pr_info("dGPU restore requested\n");
 
@@ -1402,7 +1416,14 @@ static ssize_t gpu_boost_store(struct device *dev, struct device_attribute *attr
 	if (ret)
 		return ret;
 
-	gigabyte->gpu_boost = mode;
+	/*
+	 * 3 and 4 are actions, not states. Caching them would leave the node
+	 * reporting "3" as though it were a boost level for the rest of the
+	 * boot, so only the real levels update what this node reports.
+	 */
+	if (mode <= 2)
+		gigabyte->gpu_boost = mode;
+
 	return count;
 }
 

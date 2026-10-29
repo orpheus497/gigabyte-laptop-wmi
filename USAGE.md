@@ -365,15 +365,37 @@ grep -l '^connected$' /sys/class/drm/card*-eDP-*/status
 # .../card1-eDP-1/status with card1 = amdgpu -> panel on the iGPU, detach allowed
 ```
 
-**What the firmware does not check is whether anything is using the GPU.**
-That part is yours. Stop GPU workloads first — a detach while something is
-rendering relies on the graphics driver handling removal gracefully, which is
-not guaranteed for out-of-tree drivers:
+**What the firmware does not check is whether anything is using the GPU, and
+neither does the driver** — not an oversight, but because the kernel cannot
+answer it. The signals it exposes for a PCI device are "a driver is bound" and
+"runtime PM says active", and both stay true for as long as the graphics
+driver is loaded. A check on either would refuse every detach rather than the
+unsafe ones, which would amount to removing the feature. The authority is the
+graphics stack's own tooling, so **check before you detach:**
 
 ```sh
-nvidia-smi                      # confirm no processes are using it
+nvidia-smi --query-compute-apps=pid,name --format=csv
+```
+
+**Expect your desktop to be on the list.** On a hybrid-graphics machine the
+compositor itself commonly holds the discrete GPU:
+
+```
+pid, process_name
+2267, /usr/bin/kwin_wayland        <- detaching now takes the GPU from your session
+```
+
+If anything is listed, stop it first — or accept that it loses the device.
+There is a real safety net below this: the kernel services the eject request
+by offlining the device before removing it, and aborts if that fails, so this
+is an orderly teardown rather than a surprise removal. What nothing can catch
+is a driver that offlines cleanly while the programs using it do not.
+
+```sh
 echo '3' | sudo tee /sys/devices/platform/gigabyte_laptop/gpu_boost
 ```
+
+The detach is logged at warning level, so `dmesg` carries a record of it.
 
 **Restoring it**, either way works:
 

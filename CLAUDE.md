@@ -1529,9 +1529,35 @@ Install via DKMS, which signs automatically with the already-enrolled key:
 
   **The interlock is the firmware's and needs nothing from us**: the case body
   sits inside `If (DPMF != 0x02)`, so a detach is refused while the panel is on
-  the dGPU. What the firmware does *not* check is whether anything is using the
-  GPU, which is why the driver logs the detach and `USAGE.md` documents the
-  sequence and the recovery.
+  the dGPU.
+
+  **An in-kernel "is the GPU in use" gate was considered and is not viable —
+  settled 29 Oct 2026, so it does not get re-litigated.** The signals a kernel
+  driver can read for a PCI device are the bound driver and the runtime-PM
+  state. Both were sampled live with the machine idle: `driver -> nvidia`,
+  `power_state D0`, `runtime_status active`. They stay true for as long as the
+  graphics driver is loaded, so a gate on either would refuse **every** detach
+  rather than the unsafe ones — removing the feature by the back door, which is
+  the thing this project exists not to do. `runtime_usage` is not even exposed
+  on this device.
+
+  The authority is the graphics stack. `nvidia-smi` named the real risk
+  immediately and it is not hypothetical: **`kwin_wayland` holds the dGPU on
+  this machine**, so a detach during a desktop session takes the card from the
+  compositor. That is a userspace check, and the GUI project is where it
+  belongs.
+
+  **There is a genuine safety net below us**, which is why warning is
+  proportionate rather than negligent: the kernel services the eject request by
+  calling `device_offline()` before removal and aborts if that fails. The
+  residual risk is a driver that offlines cleanly while its users do not, and
+  no gate anywhere can catch that.
+
+  So the driver `pr_warn`s at detach, naming what loses the device and how to
+  restore it, and `USAGE.md` documents the check with the compositor case
+  spelled out. **Values 3 and 4 are also not cached** into `gpu_boost`: they
+  are actions, not states, and caching one would leave the node reporting `3`
+  as a boost level for the rest of the boot.
 
   Found 24 Oct 2026 by reading `Case (0x51)` against the handler.
   `WMBD 0x51` value 3 is `Notify (^^GPP0.PEGP, 0x03) // Eject Request`, and
