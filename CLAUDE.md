@@ -4389,6 +4389,27 @@ same adversarial reading as the code it replaces** — the review found things m
 own re-reading did not, every time, and twice it found them by executing the
 thing rather than reading it.
 
+**The `cmos-slots` fix was itself half done, and the finding said so.** Its
+text ended "Make the matching change to the header steps at lines 52-53", and
+the body procedure was fixed while the header's step 5 still read "restore the
+first one **in the same visit**" — verbatim the bug, in the summary a reader
+hits first. **The detailed procedure and its summary are two copies of the
+same instruction**, and fixing one is not fixing the instruction. Read a
+finding's whole text, not its headline: the pointer to the second copy was in
+the last line of it.
+
+**And the follow-up review never ran — it was rate limited.** The trigger
+reported *"Review limit reached. Next included review available in 46
+minutes"*, having first listed the three files it would have covered. **That
+listing reads exactly like a review that ran and found nothing**, which this
+file already warns about under the review bullet, and it is the second time
+the warning has earned its place. So neither `0cb18fc` nor `f7930db` has been
+reviewed, and the `cmos-slots` thread stayed open because the bot could not
+re-evaluate it — not because the fix was rejected.
+
+**Check the bot's own banner before reading silence as approval.** An
+unreviewed push and a clean push look identical from the thread list.
+
 **One decline was reversed on a second pass, and it was the right call.** The
 `test-cmos-slots.sh` finding was filed as low-value procedure text — and the
 procedure it describes is the one remaining open task on this machine, so a

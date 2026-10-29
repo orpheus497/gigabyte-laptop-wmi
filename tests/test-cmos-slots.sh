@@ -49,8 +49,11 @@
 #   3. change ONE option. Write down its name AND its original value --
 #      nothing here can undo a BIOS change, so that note is the only way back
 #   4. boot back, run it again -- it diffs against the previous run itself
-#   5. to test a further option, restore the first one in the same visit, so
-#      only ever one option differs from the baseline
+#   5. to test a FURTHER option, restore the first one and RUN IT AGAIN before
+#      changing the next. Never restore one and change another in the same
+#      visit: the next reading would then reflect both changes, so a byte that
+#      moves cannot be pinned to either -- and restoring the first one is
+#      itself a change. Two reboots per option, not one.
 #
 # THE SCRIPT KEEPS ITS OWN HISTORY, deliberately. This test is the one that
 # spans a reboot, so asking the caller to redirect output somewhere is a
