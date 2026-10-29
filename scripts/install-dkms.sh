@@ -250,6 +250,26 @@ echo "== Building and installing =="
 dkms add "$NAME/$VERSION" || true
 if ! dkms install "$NAME/$VERSION" --force; then
 	echo "dkms install failed" >&2
+	# Close the residual window the pre-flight build cannot. That build catches
+	# a compile error before anything is removed, which is the common cause --
+	# but an install can still fail afterwards for a reason the pre-flight
+	# cannot see: module signing, a full disk, a DKMS environment difference.
+	# By then the previous registration and module are gone, and on a RE-RUN an
+	# /etc/modules-load.d entry from the earlier run is still present, so the
+	# next boot asks systemd-modules-load for a module that no longer exists
+	# and fails with nothing explaining why.
+	#
+	# Removing that entry is the honest end state: no driver is installed, so
+	# nothing should claim one loads at boot. It is restored by the successful
+	# run that follows.
+	if [ -e /etc/modules-load.d/gigabyte-laptop.conf ]; then
+		rm -f /etc/modules-load.d/gigabyte-laptop.conf
+		echo "Removed /etc/modules-load.d/gigabyte-laptop.conf so the next boot" >&2
+		echo "does not request a module that is no longer installed." >&2
+	fi
+	echo >&2
+	echo "No driver is installed now. Fix the cause and run this again; the" >&2
+	echo "autoload entry is written back by a successful install." >&2
 	exit 1
 fi
 

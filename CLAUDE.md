@@ -4295,6 +4295,39 @@ same commit as a fix for a guard that advised instead of refusing.
 | `notify.c` `execlp` PATH warning (ast-grep) | Not a privilege boundary: a user-session binary running as the user, who can already run anything. `execlp` over `system()` is a deliberate recorded choice |
 | `test-gpu-power.sh` preset/mode both-states | Correctly identifies a genuine tension and asks for a decision rather than a fix. The choice is documented in the restore comment |
 
+**One decline was reversed on a second pass, and it was the right call.** The
+`test-cmos-slots.sh` finding was filed as low-value procedure text — and the
+procedure it describes is the one remaining open task on this machine, so a
+bug in it would be hit the next time anybody touches the slot hunt. It said:
+restore option A and change option B **in the same BIOS visit**, then take one
+reading that serves as both A's restored baseline and B's "before". That
+cannot work. A reading taken after two changes is attributable to neither, so
+if restoring A moves the byte, the move is reported against B — which is
+exactly the wrong answer, confidently stated.
+
+Fixed to a five-step sequence with a **restore-only reading** in the middle.
+Each option now costs two reboots instead of one, which is the honest price.
+**"Low value" was about the text; the cost was a wrong identification**, and
+those are not the same thing.
+
+**The install-dkms fix was also incomplete, and the bot was right not to mark
+it addressed.** The pre-flight build catches a compile error before anything
+is removed, which is the common cause — but an install can still fail
+afterwards for a reason the pre-flight cannot see (signing, a full disk, a
+DKMS environment difference), and by then the removal has happened. On a
+**re-run** the `modules-load.d` entry from the earlier run survives, so the
+next boot still asks for a module that is gone. The failure path now removes
+that entry and says so, which is the honest end state: no driver installed,
+nothing claiming one loads at boot, and the entry written back by the next
+successful run.
+
+**Worth noting how that was caught**: 13 of the 20 findings were marked
+"Addressed" by the bot and 7 were not, and the unmarked set was the useful
+signal — five were recorded declines, one was a major that *was* fixed (its
+anchor line had simply moved), and one was a major that genuinely was not. **A
+fix that does not match the reviewer's proposed shape still has to close the
+reviewer's failure mode**, and this one only narrowed it.
+
 ### Two review findings declined, with reasons — 23 Oct 2026
 
 Recorded so they are not re-raised and re-investigated:

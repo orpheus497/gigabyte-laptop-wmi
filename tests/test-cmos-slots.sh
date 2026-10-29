@@ -162,19 +162,31 @@ if [ "$changed" -eq 0 ]; then
 	      and four options in Peripherals are unmatched, so at most one of the
 	      four is here.
 
-	If (b): BEFORE TRYING ANOTHER, put the one you just changed back.
+	If (b): BEFORE TRYING ANOTHER, put the one you just changed back -- and
+	take a reading in between. That reading is not optional bookkeeping; it is
+	what makes the next result attributable.
 
 	  1. note its ORIGINAL value before you touch it, every time
-	  2. reboot into setup, restore it, and change the NEXT one
-	  3. run this script again -- that reading is both the restored baseline
-	     and the new test's "before", so it does double duty
+	  2. reboot into setup and RESTORE it -- restore only, change nothing else
+	  3. run this script again. This is the clean baseline for the next test
+	  4. reboot into setup and change the NEXT option
+	  5. run this script again and read the verdict
 
-	Restoring as you go is what keeps the result attributable. Leave two
-	options changed at once and a byte that moves cannot be pinned to either,
-	which is the whole reason this test changes one thing at a time. It also
-	means an interrupted run leaves the machine in a state you wrote down
-	rather than one you have to reconstruct -- nothing in this script can undo
-	a BIOS change for you, so the note is the only restore mechanism there is.
+	DO NOT restore one option and change the next in the same BIOS visit.
+	That is one reboot cheaper and it ruins the result: the following reading
+	then reflects BOTH changes at once, so if restoring the first option moves
+	the byte, the move is reported against the second option. An earlier
+	version of these instructions did exactly that and claimed the single
+	reading could serve as both the restored baseline and the next test's
+	"before". It cannot -- a reading taken after two changes cannot be
+	attributed to either of them.
+
+	So each option costs two reboots, not one. That is the price of a result
+	you can trust, and it is the same reason this test changes one thing at a
+	time at all. It also means an interrupted run leaves the machine in a
+	state you wrote down rather than one you have to reconstruct -- nothing in
+	this script can undo a BIOS change for you, so the note is the only
+	restore mechanism there is.
 
 	Order: Wake on LAN first -- it is a toggle the firmware acts on at boot and
 	nothing normally depends on it. RTC Support second. Avoid SVM if you run
@@ -187,6 +199,11 @@ else
 	cat <<-'EOF'
 	Record which BIOS option you changed against the slot that moved, in
 	CLAUDE.md under "The extended-settings slot map".
+
+	First make sure exactly ONE option changed since the previous reading. If
+	that reading followed a visit where you both restored one option and
+	changed another, this move cannot be pinned to either of them -- take a
+	restore-only reading and start the next test from it.
 
 	A third anchored value for 0xE6 completes the MUX encoding -- 0x00 and 0x01
 	are already known. A move in 0xA3 finally names the last unaccounted slot,
