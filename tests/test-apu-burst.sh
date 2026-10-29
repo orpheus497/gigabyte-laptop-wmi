@@ -262,6 +262,13 @@ for t in $(seq 1 "$SECONDS_TOTAL"); do
 		(( w > peak )) && peak=$w
 		if (( t <= BASELINE_WINDOW )); then
 			base_sum=$((base_sum + w)); base_n=$((base_n + 1))
+			# Say when the baseline closes, so the run visibly changes phase
+			# rather than looking like a sweep that forgot to step.
+			if (( t == BASELINE_WINDOW )); then
+				printf '  -- baseline set: %d W over %ds. Now watching for a step below %d W.\n' \
+					"$((base_sum / base_n))" "$BASELINE_WINDOW" \
+					"$(( (base_sum / base_n) * STEP_FRACTION / 100 ))"
+			fi
 		else
 			tail_sum=$((tail_sum + w)); tail_n=$((tail_n + 1))
 			if (( tail_n == 10 )); then
@@ -272,6 +279,12 @@ for t in $(seq 1 "$SECONDS_TOTAL"); do
 					step_at=$t
 					printf '  ^^ STEP DOWN: 10-sample average %d W against a %d W baseline\n' \
 						"$tail_avg" "$base_avg"
+				else
+					# Print every comparison, not only the one that fires.
+					# Otherwise the detector is invisible and the run is
+					# indistinguishable from a sweep that is not stepping.
+					printf '  -- %ds: last 10 averaged %d W vs %d W baseline, no step (%ds left)\n' \
+						"$t" "$tail_avg" "$base_avg" "$((SECONDS_TOTAL - t))"
 				fi
 				tail_sum=0; tail_n=0
 			fi

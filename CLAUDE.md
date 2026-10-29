@@ -2266,6 +2266,22 @@ actually support:
   this. **Mode 0 is the mode to use**: its SPL is 45 W against a 65 W sPPT, so
   if the sustained limit engages at all the step is 20 W and unmistakable.
 
+  **Settled the same day: `0x30` is not enforced.** Mode 0 held for **300
+  seconds** under `stress-ng matrixprod`, sampled every second:
+
+  ```
+  baseline plateau (first 30s) : 64 W
+  peak observed                : 65 W
+  NO step down over 300s
+  ```
+
+  All 300 samples sat at 64–65 W against a programmed 45 W, with the
+  temperature settling at 86–89 °C and never drifting. Five minutes is well
+  past any plausible sustained window — AMD's are tens of seconds, at the
+  outside around two minutes — so **"not enforced" is now a measurement rather
+  than an inference from too short a run.** The qualification added hours
+  earlier was the right call and the hold is what discharged it.
+
 **Reproduced a second time, 29 Oct 2026**, same figures to the watt — 64–65,
 64–65, 79–80 W with the clock at ~4050 / ~4050 / ~4200 MHz. Two independent
 runs agreeing is what lifts the sPPT decode from a single observation.

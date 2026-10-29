@@ -655,12 +655,16 @@ the ceiling, mode 1 could have reached 80 W. Whether the fast-burst figure is
 enforced at all is therefore **unproven** — the other two modes have both
 columns equal and cannot tell them apart.
 
-**The sustained limit was never reached in this test**, which is not the same
-as it being ignored. Mode 0 drew 65 W against a programmed 45 W, but a
-sustained limit applies over a time window and **each mode was held for only
-30 seconds.** If that window is longer, the part was inside its burst
-allowance throughout and would have been pulled down later. Treat the
-sustained figure as untested rather than inactive.
+**The sustained limit is not enforced**, and that was checked properly rather
+than inferred. Mode 0 was held under load for **five minutes**, sampled every
+second: all 300 samples sat at 64–65 W against its programmed 45 W, with no
+step down and the temperature stable at 86–89 °C. Five minutes is well past any
+plausible sustained window, so the 45 W figure is written and ignored.
+
+In short, of the three limits each mode programs, **only the short-burst one
+has any observable effect.** The sustained figure does nothing, and the
+fast-burst figure cannot be told apart from the short-burst one on two of the
+three modes.
 
 **A light load will show none of this.** An earlier attempt used a simple
 integer load that drew about 62 W — three watts under the 65 W ceiling — so no
