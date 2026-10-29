@@ -728,7 +728,7 @@ caught `0x63` and `0xE6`.
 
 | Index | Written by | What it holds |
 |---|---|---|
-| `0xD0` | `0xE6` | dGPU display MUX — BIOS: Peripherals → "Switchable Graphics device". Read masks with `& 0x7F`. **`0x00` = MSHybrid, `0x01` = discrete**, both measured 29 Oct 2026 against the DRM connectors. Whether a third value exists is unknown; the option's own selector was never opened |
+| `0xD0` | `0xE6` | dGPU display MUX — BIOS: Peripherals → "Switchable Graphics device". Read masks with `& 0x7F`. **`0x00` = MSHybrid, `0x01` = discrete**, each measured twice in both directions, 29 Oct 2026, against the DRM connectors. Whether a third value exists is unknown; the option's own selector was never opened |
 | `0xD1` | `0xA3` | **Unidentified, and now bounded.** Read/write, purpose appears nowhere in the firmware, and **it is not USB sleep charging** — BIOS setup has no USB option at all; see the menu enumeration below |
 | `0xD2`–`0xD6` | `0x63` | The five-byte block behind the misnamed `power_on_time` node |
 | `0xD9` | `0x88` | Battery LED, the persistent copy of `BLED` |
@@ -974,8 +974,15 @@ Changing it and re-reading gave:
 
 **Three independent signals moved together**, which is what makes this a decode
 rather than a correlation: the CMOS byte, the DRM connector that reports
-`connected`, and which card the firmware marks as the boot VGA device. The
-connector cross-check was built into `tests/test-cmos-slots.sh` for exactly
+`connected`, and which card the firmware marks as the boot VGA device.
+
+**And the switch was then reversed, which is the confirmation the first
+measurement could not give.** Going back to MSHybrid on 29 Oct 2026 took
+`0xE6` from `0x01` to `0x00` and the connected panel from `card2-eDP-2`
+(nvidia) to `card1-eDP-1` (amdgpu). Both values are now observed in both
+directions, so neither is a one-way coincidence.
+
+The connector cross-check was built into `tests/test-cmos-slots.sh` for exactly
 this moment and it earned its place — a byte changing on its own would have
 been suggestive; a byte changing in lockstep with the panel physically moving
 between cards is conclusive.
@@ -5179,13 +5186,13 @@ the tier. `tests/test-gpu-power.sh` now samples for `LIMIT_SAMPLES` seconds and
 takes the minimum, with the window deliberately longer than the ~20 s
 excursion observed above.
 
-**What woke it up is not established, and an earlier version of this section
-asserted that it was `amd_pmf` binding.** Two variables changed in that reboot
--- `amd_pmf` bound and the display MUX went to discrete -- and the MUX is the
-better candidate: in discrete mode the dGPU drives the panel, so it sits in P4
-doing continuous work instead of idling at P8, and Dynamic Boost raising the
-limit for a busy GPU is the feature behaving correctly. See "`amd_pmf` binds"
-below for the free experiment that separates them.
+**What woke it up was the display MUX, measured 29 Oct 2026.** An earlier
+version of this section asserted it was `amd_pmf` binding; two variables had
+changed in that reboot and the attribution was guessed. With the MUX back on
+MSHybrid and `amd_pmf` STILL bound, 60 consecutive samples read 60.00 W with
+no variation at all. In discrete mode the dGPU drives the panel and sits at P4;
+in hybrid it idles at P8. Dynamic Boost raising the limit for a busy GPU is the
+feature working. See "Settled: the MUX caused the arbitration, not `amd_pmf`".
 
 What is certain is that the earlier hybrid-mode measurements were repeatable to
 the watt across several runs — 4/4 predictions on the `ACBT` decode — because
@@ -5379,11 +5386,53 @@ Attributing it to the handler whose trusted-application session failed is the
 weaker explanation, and this file said "what woke it up is `amd_pmf` binding"
 before the log was read.
 
-**The clean experiment is free, because the MUX has to go back anyway** for the
-detach work: put the MUX on MSHybrid and *keep* `force_load=1` for one boot. If
-the excursions continue, `amd_pmf` is responsible. If they stop, the MUX was.
-Then remove the parameter on the following reboot.
+~~**The clean experiment is free**~~ — **it ran, and the MUX was responsible.**
+The design was to put the MUX on MSHybrid while *keeping* `force_load=1`, so
+only one variable moved. The excursions stopped dead: 60 samples, all 60.00 W,
+with `amd_pmf` still bound. So this handler never destabilised anything. The
+case for removing it rests only on the TA-session failure above, which is
+reason enough. See "Settled: the MUX caused the arbitration, not `amd_pmf`".
 
+
+### Settled: the MUX caused the arbitration, not `amd_pmf` — 29 Oct 2026
+
+**The free experiment ran and gave a clean answer.** The design was to change
+only the MUX while *keeping* `amd_pmf.force_load=1`, so that one variable moves
+and the other does not. With the MUX back on MSHybrid, `amd_pmf` still bound
+and both handlers still registered, 60 consecutive samples with nothing
+written:
+
+```
+     60   60.00 W
+```
+
+**Every sample identical, and 60 W is exactly the `perf_mode 1` tier.** The
+dGPU sits at **P8** drawing 3.0 W, where in discrete mode it was at **P4**
+drawing 6.2 W because it was driving the panel.
+
+**So arbitration tracks whether the GPU has work, not whether a second power
+manager is loaded.** `amd_pmf` is exonerated: it was bound for both the
+wandering measurements and this flat one. The earlier attribution to it was
+withdrawn on reasoning before this ran, and the measurement now confirms the
+withdrawal rather than merely allowing it.
+
+**Two consequences worth carrying forward:**
+
+- **`enforced.power.limit` is stable when the dGPU is idle and unstable when it
+  is busy.** That is Dynamic Boost behaving correctly, not a defect. It also
+  explains why every hybrid-mode measurement before this week was repeatable to
+  the watt: the card had nothing to do.
+- **Running row 19 in discrete mode was the right call.** The `dynamic_boost`
+  direction test needs the limit to be wandering, and this run shows that in
+  hybrid mode at idle there would have been no spread in any window — the
+  `INCONCLUSIVE (nothing moved)` verdict, learning nothing. The window really
+  was the discrete-mode session.
+
+**`amd_pmf` should still be removed**, and the reason is unchanged and
+independent of this: its trusted-application session fails, so it contributes
+only a duplicate `platform_profile` handler with a narrower choice list. See
+"`amd_pmf` binds, and two handlers coexist". What this result removes is the
+*additional* charge that it destabilised the GPU limit.
 ### In discrete mode: `perf_mode` still works, `gpu_boost` is the one gated
 
 **The machine is in discrete MUX mode as of 29 Oct 2026** — panel on the
