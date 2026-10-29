@@ -210,7 +210,8 @@ hostname anywhere in tracked content. The username `orpheus497` *does* appear
 twice — the remotes table and the PR #1 link, both below — because it is the
 public fork slug, which is the point of it being there.
 
-**The one gap is closed, 29 Oct 2026 — all four clean.** The four root-only
+**The one gap is closed, 29 Oct 2026 — all four clean, and re-confirmed the
+same day against this branch's 39 commits rather than only the tree.** The four root-only
 DMI identifiers — `product_serial`, `board_serial`, `chassis_serial` and
 `product_uuid`, all mode 0400 — could not be matched against the tree without a
 password, which is why they sat open through two audits. Read from a privileged
@@ -300,7 +301,7 @@ except as noted:
 | MAC addresses | `ip -o link` | clean |
 | filesystem UUIDs | `lsblk -no UUID` | clean |
 | disk serial | `/sys/class/nvme/nvme0/serial` | clean |
-| **battery serial** | `/sys/class/power_supply/BAT1/serial_number` | **was present — removed from the tree, but STILL IN PUSHED HISTORY**; see "The removed battery serial is still in pushed history" |
+| **battery serial** | `/sys/class/power_supply/BAT1/serial_number` | **was present. Gone from the working tree and from every branch tip once the 29 Oct merge lands; deliberately left in history.** See "The removed battery serial is still in pushed history" and the decision under it |
 | IP addresses | `ip -4 -o addr` | clean |
 | SSH host keys | `/etc/ssh/ssh_host_*.pub` | clean |
 | network names | `nmcli connection show` | clean |
@@ -382,6 +383,54 @@ cost:**
 is spelled out: a rewrite does not just change `a16-5th-gmate`, it orphans the
 CI evidence, the review history and the commit citations throughout this file.
 Weigh that against four characters of battery identity.
+
+#### Decided: history keeps it, the present must not — 29 Oct 2026
+
+**The owner's call, recorded so it is not re-litigated:** the battery serial
+stays in history, because four characters of battery identity do not justify a
+force-push that invalidates every commit hash this file cites. **But it must
+not be present in anything a reader reaches today.**
+
+**That distinction mattered more than it first appeared.** "It is in history"
+was the wrong summary. Checked surface by surface:
+
+```
+working tree, HEAD, untracked, staged     clean
+a16-5th-phase-a  tip                      clean
+master, a16-5th, a16-5th-kbd-charge…      clean
+a16-5th-gmate    tip                      PRESENT     <- the integration branch
+p4-rem-a15       tip                      PRESENT
+```
+
+So it was in the **current content** of two branches, not merely in old
+blobs — anyone cloning the fork and checking out `a16-5th-gmate` got it in
+their working copy. That is a different and worse thing than a buried object,
+and the earlier write-up did not separate them.
+
+**Both are fixed without touching history:**
+
+- **`a16-5th-gmate`** — `a16-5th-phase-a` is 40 commits ahead with `gmate` as
+  a strict ancestor, so a **fast-forward** lands the 29 Oct removal and the tip
+  becomes clean. No rewrite, no conflict, and it is the merge this work needed
+  anyway.
+- **`p4-rem-a15`** — carries **zero** unique commits, is fully contained in
+  `a16-5th-phase-a`, and **no hash cited anywhere in this file depends on it**,
+  which was checked against all eleven. It is redundant, so deleting it loses
+  nothing. It is *not* covered by the do-not-delete rule, which names only
+  `a16-5th` and `a16-5th-kbd-charge-uevent` and exists because those two are
+  the last refs for hashes this file quotes.
+
+**The remaining audit gap is closed too.** The four root-only DMI identifiers
+— `product_serial`, `board_serial`, `chassis_serial`, `product_uuid` — were
+read from a privileged shell and searched against all 39 commits of this
+branch: **all four clean**, none skipped as a placeholder, so each held a real
+value that was really searched.
+
+**The rule this leaves behind**, which is the durable part: **"is it in
+history" and "is it in the current tip" are separate questions with separate
+remedies.** The second is cheap to fix and is what a reader actually sees.
+Check both, and check the tip of *every* branch rather than the one that
+happens to be checked out.
 ### Method IDs present in the AMD sibling
 
 Verified by reading the `Switch` case lists directly:
