@@ -7,8 +7,14 @@ set -e
 
 case "$1" in
     remove|upgrade|dconfigure)
-        if [ "`dkms status -m $NAME`"]; then
-            dkms remove -m $NAME -v $VERSION --all
+        # The space before ] is required, and it was missing: `[ "$x"]` glues
+        # the bracket to the argument, so `[` never sees its terminator and
+        # exits with "missing ]". In an if-condition that reads as false, so
+        # `dkms remove` was SKIPPED on every remove and upgrade, leaving the
+        # registration behind. Inherited from upstream 4b817ea, not introduced
+        # by the rename -- see the upstreaming list in CLAUDE.md.
+        if [ -n "$(dkms status -m "$NAME")" ]; then
+            dkms remove -m "$NAME" -v "$VERSION" --all
         fi
     ;;
     *)

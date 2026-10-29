@@ -92,7 +92,14 @@ sample() {
 	printf '%s %s %s' "$lo" "$hi" "$(printf '%s' "$vals" | sort -u | grep -c .)"
 }
 
-BOOST_WAS=$(cat "$P/dynamic_boost")
+# Refuse to change the setting without a restore path. An empty read turns the
+# restore into a write of an empty string, which fails -- so the test would
+# move dynamic_boost and have nothing to put back. test-apu-burst.sh guards
+# every saved value this way with its save() helper; this script had no guard
+# at all.
+BOOST_WAS=$(cat "$P/dynamic_boost" 2>/dev/null)
+[ -n "$BOOST_WAS" ] ||
+	die "cannot read $P/dynamic_boost -- refusing to change it with no restore path"
 restored=0
 RESTORE_OK=1
 # Same helper and RESTORE_OK convention as test-gpu-power.sh and

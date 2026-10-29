@@ -4658,6 +4658,7 @@ Sorted by how likely each is to be accepted, for when that time comes:
 | `hwmon_read()` error propagation | Returned success with `*val` unwritten on a failed read |
 | NULL-safe DMI family match | Four unchecked `strcmp`s on `DMI_PRODUCT_FAMILY` |
 | `fan_lock` | Three entry points doing read-modify-write on `fan_mode` unserialised |
+| **Debian `prerm` never ran `dkms remove`** | `if [ "$(dkms status -m $NAME)"]; then` — **the space before `]` is missing**, so `[` never sees its terminator, exits with `missing ']'`, and the if-condition reads false. `dkms remove` was therefore **skipped on every remove and upgrade**, leaving the registration behind. Verified by running it: `sh: [: missing ']'`. **Present verbatim in upstream `4b817ea`**, so it is upstream's bug and not the rename's, and it hits any Debian user who removes or upgrades the package. The smallest possible patch and the easiest of this list to argue |
 
 The rename, the `fan_preset` ring and the hotkey input device are this fork's
 own direction and should **not** be offered upstream without asking first — the
