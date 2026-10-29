@@ -10,7 +10,7 @@
 # So this has to wait, and that is why it is a script rather than a sequence of
 # commands to time by hand.
 #
-# Usage: sudo bash scripts/test-charge-limit.sh [ceiling]
+# Usage: sudo bash tests/test-charge-limit.sh [ceiling]
 #
 # Restores the original values on every exit path, including Ctrl-C.
 

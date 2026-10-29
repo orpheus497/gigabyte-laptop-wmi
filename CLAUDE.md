@@ -397,7 +397,7 @@ argument that was sent. Two consequences:
   so the *negative* string contains the word `implemented` as a substring. A
   `grep implemented` or a `*implemented*` glob therefore passes both cases and
   silently accepts an absent method. Only `[implemented]` — brackets included —
-  distinguishes them. Caught in `scripts/test-charge-limit.sh`, which parsed the
+  distinguishes them. Caught in `tests/test-charge-limit.sh`, which parsed the
   decimal out of the reply without checking the marker at all, so an absent
   `0x64`/`0x65` would have echoed the sentinel, parsed as a plausible `90`, run
   the whole ceiling test against a field nothing reads, and then "restored" 90.
@@ -1051,6 +1051,49 @@ is now a well-motivated test rather than a guess: a BIOS that ships ASL for all
 fifteen APMF functions is unlikely to advertise none of them.
 
 ## Repo layout and conventions
+
+### `scripts/` is tooling, `tests/` is hardware tests — separated 29 Oct 2026
+
+**Neither directory exists upstream**, so the layout is entirely this fork's to
+decide, and it was decided wrong to begin with: `scripts/` held
+`install-dkms.sh` (tooling) alongside `test-charge-limit.sh` (a hardware test)
+with nothing marking the difference. Four more test scripts were about to be
+added to the same place before the mixing was noticed.
+
+| Directory | Holds |
+|---|---|
+| `scripts/` | tooling — things that install, build or package the driver |
+| `tests/` | hardware tests — things that drive the machine and report |
+
+**The tests are committed deliberately**, having briefly been moved out of the
+repo and then brought back. The argument for keeping them: each encodes a
+measurement that took several attempts to get right, and the reasoning is in
+the header comments rather than only in this file. `test-charge-limit.sh` is
+the clearest case — three attempts, two of which measured nothing, and the
+script exists because the observation *is* a wait that a human cannot time by
+hand.
+
+```
+tests/test-charge-limit.sh   does the EC honour the charge ceiling? (HONOURED)
+tests/test-gpu-power.sh      regression test for the perf_mode / gpu_boost /
+                             platform_profile contract -- the one a userland
+                             GUI is written against
+tests/test-cmos-slots.sh     read 0xE6 and 0xA3 either side of a BIOS change,
+                             to identify the display MUX and the unknown slot
+tests/test-dgpu-detach.sh    detach and restore the dGPU, and measure what
+                             detaching actually saves
+tests/test-apu-burst.sh      do the APU's short-burst power limits bind?
+```
+
+**Every one of them restores what it touched on every exit path, including
+Ctrl-C.** That is the house rule, and it exists because two hand-written sweeps
+were handed over without it — one left the fans audible with nothing saying why.
+A test that moves fan policy, a power tier or a profile ends by putting it back.
+
+**Do not put a test in `scripts/` again**, and do not reach for a temporary
+directory either: `tests/test-cmos-slots.sh` is useless unless it survives a
+reboot, since identifying a CMOS slot means reading it, rebooting into BIOS
+setup, and reading it again.
 
 ### The driver is `gigabyte-laptop`, renamed from `aorus-laptop`
 
@@ -2653,10 +2696,10 @@ distinguishes nothing. The restore ran, and the nodes read 0 and 100 again.
 ~~**Re-run it from below the ceiling**~~ — **done, and it returned `HONOURED`;
 this is the reasoning that produced the script, not a pending action.** Starting
 below the ceiling was the condition the test needed in the first place, and
-`scripts/test-charge-limit.sh` is what does it properly:
+`tests/test-charge-limit.sh` is what does it properly:
 
 ```sh
-sudo bash scripts/test-charge-limit.sh        # or pass a ceiling, default 80
+sudo bash tests/test-charge-limit.sh        # or pass a ceiling, default 80
 ```
 
 It is a script and not a list of commands for a concrete reason: the
@@ -4115,7 +4158,7 @@ recording as a defect in the method rather than a detail.** It left the profile
 on `performance`, which maps the fans to *normal* — so the machine stayed
 audible after the test with nothing saying why, and the fans had to be put back
 by hand. Any sweep that moves fan policy needs to end by restoring it, the way
-`scripts/test-charge-limit.sh` restores on every exit path including Ctrl-C.
+`tests/test-charge-limit.sh` restores on every exit path including Ctrl-C.
 This is the second time a hand-written test has been handed over without one.
 
 ### Settled: the Mode key owns fan policy, profiles own it only on `auto`
@@ -4226,7 +4269,7 @@ The reading of *this* case is unchanged — `0xED` is genuinely absent from
 WMBC — but see "A BUFFER reply does not mean absent" below for why the old
 wording was wrong in general. One incidental improvement: the negative string
 no longer contains the substring `implemented` at all, so the parsing hazard
-that caught `scripts/test-charge-limit.sh` can no longer bite.
+that caught `tests/test-charge-limit.sh` can no longer bite.
 
 `0xED` echoes the sentinel, confirming on this machine's firmware that
 performance mode is write-only exactly as the ASL said. `0xE7` does not echo,
