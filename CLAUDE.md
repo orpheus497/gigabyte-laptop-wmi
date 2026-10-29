@@ -420,6 +420,23 @@ and the earlier write-up did not separate them.
   `a16-5th` and `a16-5th-kbd-charge-uevent` and exists because those two are
   the last refs for hashes this file quotes.
 
+**Both were done and verified the same day, including the remote**, which is
+the half a local check cannot see:
+
+```
+origin/a16-5th-gmate   4d664c2   clean      <- pushed; 0 commits behind local
+origin/p4-rem-a15      deleted
+p4-rem-a15 (local)     deleted
+every remaining ref, local and remote       clean
+```
+
+**The verification enumerated refs rather than branches**, which is the same
+correction the audit method needed one level up: `git for-each-ref refs/heads
+refs/remotes` and a literal search against each. That covers `upstream/*` and
+`a16/*` as well — the two other forks this checkout tracks — and all of them
+come back clean, so the serial is not reachable from any ref this clone can
+see.
+
 **The remaining audit gap is closed too.** The four root-only DMI identifiers
 — `product_serial`, `board_serial`, `chassis_serial`, `product_uuid` — were
 read from a privileged shell and searched against all 39 commits of this
@@ -1519,13 +1536,19 @@ defect, not a review.
 | `a16-5th-gmate` | **Integration branch. All work lands here.** |
 | `a16-5th` | Retired 24 Oct 2026. Local only; deleted on the fork. **Do not delete.** |
 | `a16-5th-kbd-charge-uevent` | PR #2's feature branch, merged. Local only; deleted on the fork. **Do not delete.** |
-| `p4-rem-a15` | Scratch branch, **redundant and due for deletion**: zero unique commits, fully contained in `a16-5th-gmate`, no tag points into it, and no hash this file cites depends on it — checked against all eleven. It is the **last branch tip still carrying the battery serial**, which is the reason to remove it rather than leave it lying about. Not covered by the do-not-delete rule |
-| `a16-5th-phase-a` | The 29 Oct session's 40 commits. **Merged into `a16-5th-gmate` by fast-forward on 29 Oct 2026**, so it is now identical to it and carries nothing unique. Safe to delete once `gmate` is pushed |
+| ~~`p4-rem-a15`~~ | **Deleted 29 Oct 2026, locally and on the fork.** It carried zero unique commits, was fully contained in `a16-5th-gmate`, and no hash this file cites depended on it — checked against all eleven. It was the **last branch tip still carrying the battery serial**, which is why it went rather than being left lying about. It was never covered by the do-not-delete rule |
+| `a16-5th-phase-a` | The 29 Oct session's 40 commits. **Merged into `a16-5th-gmate` by fast-forward on 29 Oct 2026**, so it is identical to `gmate`'s parent and carries nothing unique. Local only, never pushed, and safe to delete at any time |
 
 **The checkout is on `a16-5th-gmate` as of 29 Oct 2026**, which is where it
 should be: the session's work was fast-forwarded onto it, so the integration
-branch is once again both the newest and the right place to commit. It is
-**41 commits ahead of `origin/a16-5th-gmate`** and unpushed.
+branch is once again both the newest and the right place to commit.
+
+**It is pushed and in sync as of 29 Oct 2026** — `origin/a16-5th-gmate` is at
+`4d664c2`, zero commits behind, so the clean tip is the published one. That
+matters beyond tidiness: until the push, the fork's integration branch still
+served the battery serial in its working copy to anyone who cloned it, which is
+the gap "Decided: history keeps it, the present must not" exists to close. **A
+removal is not landed until it is pushed.**
 
 **The integration branch changed on 24 Oct 2026, and the old name is a trap.**
 PR #3 squash-merged the whole of `a16-5th` onto `a16-5th-gmate` as `8dad4e1`,
