@@ -374,16 +374,26 @@ unsafe ones, which would amount to removing the feature. The authority is the
 graphics stack's own tooling, so **check before you detach:**
 
 ```sh
-nvidia-smi --query-compute-apps=pid,name --format=csv
+nvidia-smi          # read the Processes table at the bottom
 ```
+
+**Use the plain output, not `--query-compute-apps`.** That query lists compute
+contexts only, so a process using the GPU purely for graphics does not appear
+in it. The `Processes` table shows both, and its `Type` column tells you which:
+`C` compute, `G` graphics, `C+G` both.
 
 **Expect your desktop to be on the list.** On a hybrid-graphics machine the
 compositor itself commonly holds the discrete GPU:
 
 ```
-pid, process_name
-<pid>, /usr/bin/kwin_wayland       <- detaching now takes the GPU from your session
+|  GPU   GI   CI    PID   Type   Process name                  GPU Memory |
+|    0   N/A  N/A  <pid>   C+G   /usr/bin/kwin_wayland               6MiB |
 ```
+
+That is a measured example from a GAMING A16 5TH, and note the `C+G` — the
+compositor happened to hold a compute context too, which is the only reason
+the compute-only query would have caught it. A `G`-only process would have been
+missed entirely.
 
 If anything is listed, stop it first — or accept that it loses the device.
 There is a real safety net below this: the kernel services the eject request
@@ -422,11 +432,16 @@ echo '1' | sudo tee /sys/devices/platform/gigabyte_laptop/gpu_boost
 
 ## dGPU ejector presence
 
-Reports whether the driver believes this model can detach its discrete GPU. The
-value is decided from the model name when the driver loads, not by asking the
-firmware. It is read-only, and **ejection itself is deliberately not
-implemented** — the node exists so userspace can tell which models the firmware
-offers it on.
+An informational flag, read-only. It reports whether the driver believes this
+model line can detach its discrete GPU, decided from the **model name** when
+the driver loads — it is not read from the firmware and nothing in the driver
+gates on it.
+
+**It does not control whether detaching works.** Detach and restore are
+available through `gpu_boost` values 3 and 4 regardless of what this reads; see
+"Detaching and restoring the discrete GPU" above. The interlock that actually
+decides whether a detach can happen is in the firmware, which refuses while the
+internal panel is driven by the discrete GPU.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/has_dgpu_ejector`
 
@@ -612,12 +627,25 @@ is nothing for the daemon to apply. Check with
 cases, because the platform owns the power limit on laptop GPUs; that is
 normal and is why this node exists.
 
-**Only the GPU half of that is settled.** The same method also programs the
-**APU's own power limits** through a separate controller channel that does not
-involve the graphics card or `nvidia-powerd` at all — roughly 45 W, 65 W and
-70 W for the three modes on mains power. Whether those land has never been
-measured, so "the write does nothing" is proven for the GPU and unproven for
-the CPU.
+**The same method also programs the APU's own power limits**, through a
+separate controller channel that does not involve the graphics card or
+`nvidia-powerd` at all — roughly 45 W, 65 W and 70 W for the three modes on
+mains power.
+
+**That half was measured on 29 Oct 2026 and the sustained limit is not
+enforced.** Stepping the three modes under a sustained all-core load on mains,
+the all-core clock stayed flat at about 4.32 GHz and package power at about
+62 W throughout. Mode 0 writes a 45 W sustained limit and the part sustained
+62 W, which it could not do if that limit were in force.
+
+**The two short-burst limits are still untested**, because the load drew about
+62 W and never reached the 65 W figures that would have exercised them. They
+govern brief excursions rather than sustained behaviour.
+
+So the three-way picture is: **GPU power works on mains**, the GPU half is
+blocked on battery, and the APU sustained limit does not take effect either
+way. Do not read any of that as the write failing — the write lands and the
+firmware executes it; what differs is whether anything downstream acts on it.
 
 **Node:** `/sys/devices/platform/gigabyte_laptop/perf_mode`
 

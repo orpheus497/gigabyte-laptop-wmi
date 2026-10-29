@@ -1487,10 +1487,21 @@ static ssize_t gpu_boost_store(struct device *dev, struct device_attribute *attr
 	 * removal. What nothing can catch is a driver that offlines cleanly
 	 * while its users do not, which is why this says so out loud.
 	 */
-	if (mode == 3)
-		pr_warn("dGPU detach requested. Anything holding the GPU -- a compositor, CUDA, a running game -- loses it now. Restore with 'echo 4' or a PCI rescan\n");
-	else if (mode == 4)
-		pr_info("dGPU restore requested\n");
+	/*
+	 * Only claim detach/restore on firmware that has those branches. 0x51
+	 * means something entirely different on the older ranges -- on
+	 * Aero-15-Classic it writes PEG0.PEGP.TEMQ, a GPU temperature target, so
+	 * 3 and 4 are a 3 C and a 4 C target there and this wording would be a
+	 * lie in the kernel log. The values are still passed through, because
+	 * upstream range-checks nothing here and narrowing them would remove
+	 * behaviour on firmware where they do something.
+	 */
+	if (gigabyte->gaming_family) {
+		if (mode == 3)
+			pr_warn("dGPU detach requested. Anything holding the GPU -- a compositor, CUDA, a running game -- loses it now. Restore with 'echo 4' or a PCI rescan\n");
+		else if (mode == 4)
+			pr_info("dGPU restore requested\n");
+	}
 
 	ret = gigabyte_laptop_set_devstate(GPU_QBOOST, mode, &output);
 	if (ret)
@@ -1940,14 +1951,22 @@ static ssize_t debug_method_show(struct device *dev, struct device_attribute *at
 	 * hands back the argument, a real buffer almost never will. It is
 	 * suggestive rather than conclusive, since a sentinel can collide with
 	 * a real reading, which is why both are printed and neither is hidden.
+	 *
+	 * It is only meaningful for a non-INTEGER reply. Plenty of implemented
+	 * methods legitimately answer with the value just passed -- read 0x65
+	 * with the argument the ceiling already holds and BCPC hands the same
+	 * number straight back -- so applying the echo note to an INTEGER reply
+	 * labelled a working method "absent" alongside "implemented" in the same
+	 * line.
 	 */
-	echoed = gigabyte->debug_arg && output == (int)gigabyte->debug_arg;
+	echoed = type != ACPI_TYPE_INTEGER && gigabyte->debug_arg &&
+		output == (int)gigabyte->debug_arg;
 
 	return sysfs_emit(buf, "method 0x%02x arg 0x%x -> 0x%x (%d) [%s]%s\n",
 			gigabyte->debug_method, gigabyte->debug_arg, output, output,
 			type == ACPI_TYPE_INTEGER ? "implemented" :
 				"reply was not an integer: absent, or a method that returns a buffer",
-			echoed ? " [argument echoed back -- absent]" : "");
+			echoed ? " [argument echoed back -- probably absent]" : "");
 }
 
 /*
@@ -2360,7 +2379,8 @@ static int gigabyte_laptop_profile_set(struct device *dev,
 				enum platform_profile_option profile)
 {
 	struct gigabyte_laptop_wmi *gigabyte = dev_get_drvdata(dev);
-	int ret, mode;
+	enum platform_profile_option old_profile;
+	int ret = 0, mode;
 
 	mode = gigabyte_laptop_profile_to_fan_mode(profile);
 	if (mode < 0)
@@ -2399,6 +2419,7 @@ static int gigabyte_laptop_profile_set(struct device *dev,
 	 * whose fans were held is still remembered, which is the behaviour the
 	 * fan-hold path always had.
 	 */
+	old_profile = gigabyte->profile;
 	gigabyte->profile = profile;
 
 	/*
@@ -2412,18 +2433,29 @@ static int gigabyte_laptop_profile_set(struct device *dev,
 		// Anything but auto is a deliberate hold; the profile is recorded
 		// above and applies on the next switch once the ring is back
 		if (gigabyte->power_preset == POWER_PRESET_AUTO) {
-			/*
-			 * A failure here is logged rather than returned. The fan
-			 * half has already landed, and the platform_profile core
-			 * stops at the first handler that fails -- so reporting
-			 * failure would leave the aggregate claiming that nothing
-			 * applied when half of it did.
-			 */
 			ret = apply_power_preset(gigabyte);
 			if (ret)
-				pr_warn("Could not apply the GPU power tier for this profile: %d\n",
-					ret);
+				break;
 		}
+	}
+
+	/*
+	 * A failed GPU write is reported to the caller rather than only logged,
+	 * for the same reason the fan half returns its errors: silently
+	 * succeeding on a half-applied switch is worse than an error, and
+	 * profile_get must not report a profile that did not fully land. The
+	 * recorded profile is rolled back for that reason.
+	 *
+	 * The fan change has already happened and is not undone -- unwinding it
+	 * could fail in turn, and the fan state it would restore is what the
+	 * next successful switch overwrites anyway. The log line says so, since
+	 * the return code alone cannot.
+	 */
+	if (ret) {
+		gigabyte->profile = old_profile;
+		pr_warn("Profile switch applied fan policy but not the GPU tier: %d\n",
+			ret);
+		return ret;
 	}
 
 	return 0;

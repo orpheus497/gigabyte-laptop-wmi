@@ -3594,7 +3594,7 @@ Sorted by how likely each is to be accepted, for when that time comes:
 |---|---|
 | `gpu_boost_store()` oops (#45) | Dereferenced `gigabyte` before assigning it; any write oopsed the kernel |
 | `gpu_boost` split detach/restore pair | **Fixed 29 Oct 2026 — the node now takes the full 0-4 the firmware implements.** Was: `mode >= 3` blocked only when `has_dgpu_ejector` is set, then `if (mode > 3)` permitted 3 — a dGPU eject — while rejecting 4, its restore. The defect was the asymmetry, not the feature. See Hazards |
-| Typed read refuses a BUFFER | An unimplemented ID echoes its argument into an `int` and returns success, so an absent method reads as a genuine `0`. Five lines, and it fixes a live `0xFA` silent-fan misdetection on every model outside the three early-exit DMI families |
+| Typed read refuses a BUFFER | An unimplemented ID echoes its argument into an `int` and returns success, so an absent method reads as a genuine `0`. **Pitch it as a latent correctness hole, not a live misdetection** — ~~it fixes a live `0xFA` silent-fan misdetection on every model outside the three early-exit DMI families~~, which was checked on 29 Oct 2026 and does not hold: the models that reach that read are old Aero and P-series, and the one dump from that range implements `0xFA` in `WMBC` (`Aero-15-Classic-DSDT.dsl:60296`), so the read works there. Must also exempt the two methods that legitimately answer with a BUFFER — `0x63` and `0xFC` |
 | Duty clamp (#46) | Duties above `FAN_DUTY_MAX` stop the fans on an AERO 17-XA |
 | Void-WMBD tolerance | `set_devstate()` reported `-EINVAL` for a third of this firmware's setters; see below |
 | Probe hardening | One absent optional method no longer aborts the whole module |
