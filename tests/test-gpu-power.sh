@@ -146,13 +146,26 @@ checks cannot run. Put the fans back on an embedded-controller preset first:
 fi
 
 restored=0
+RESTORE_OK=1
+# Report a restore that did not land. These four writes used to discard both
+# stderr and their exit status, so a failed one left the setting changed while
+# "== restored ==" printed and the script exited on the test result alone. This
+# test moves fan policy and a power tier, so a silent half-restore is the one
+# failure that matters more than the verdict -- it leaves the machine audible,
+# or pinned, with nothing saying why.
+put_back() {   # put_back <value> <path> <label>
+	if ! echo "$1" > "$2" 2>/dev/null; then
+		echo "  RESTORE FAILED: $3 could not be set back to '$1'" >&2
+		RESTORE_OK=0
+	fi
+}
 restore() {
 	[ "$restored" -eq 1 ] && return
 	restored=1
-	echo "$BOOST_WAS"       > "$P/gpu_boost"    2>/dev/null
-	echo "$PRESET_WAS"      > "$P/power_preset" 2>/dev/null
-	echo "$FAN_PRESET_WAS"  > "$P/fan_preset"   2>/dev/null
-	echo "$PROFILE_WAS"     > "$PROFILE"        2>/dev/null
+	put_back "$BOOST_WAS"      "$P/gpu_boost"    gpu_boost
+	put_back "$PRESET_WAS"     "$P/power_preset" power_preset
+	put_back "$FAN_PRESET_WAS" "$P/fan_preset"   fan_preset
+	put_back "$PROFILE_WAS"    "$PROFILE"        platform_profile
 	sleep "$SETTLE"
 
 	# Restoring the preset and the profile usually restores the mode with them,
@@ -162,10 +175,14 @@ restore() {
 	# not be the mode the profile maps to. Writing it back explicitly covers
 	# that, and is a no-op whenever the two already agree.
 	if [ "$(cat "$P/fan_mode")" != "$FAN_MODE_AT_START" ]; then
-		echo "$FAN_MODE_AT_START" > "$P/fan_mode" 2>/dev/null
+		put_back "$FAN_MODE_AT_START" "$P/fan_mode" fan_mode
 		sleep 1
 	fi
-	printf '\n== restored ==\n'
+	if [ "$RESTORE_OK" -eq 1 ]; then
+		printf '\n== restored ==\n'
+	else
+		printf '\n== RESTORE INCOMPLETE -- check the values below by hand ==\n' >&2
+	fi
 	printf '  profile=%s power_preset=%s fan_preset=%s\n' \
 		"$(cat "$PROFILE")" "$(cat "$P/power_preset")" "$(cat "$P/fan_preset")"
 	printf '  perf_mode=%s gpu_boost=%s fan_mode=%s\n' \
@@ -212,10 +229,25 @@ else
 fi
 
 say "power_preset pins a tier against the profile"
-echo boost > "$P/power_preset"; check "power_preset boost" "70.00"
-echo "low-power" > "$PROFILE"
+# Check this write. The preceding loop leaves perf_mode at 2, which is already
+# 70 W, so a write that failed here would leave the limit at the expected value
+# and the row would print ok for a preset that was never applied.
+echo boost > "$P/power_preset" || die "write to power_preset failed"
+check "power_preset boost" "70.00"
+echo "low-power" > "$PROFILE" || die "write to $PROFILE failed"
 check "low-power while pinned to boost" "70.00"
-printf '  %-34s %s\n' "(preset still reads)" "$(cat "$P/power_preset")"
+
+# Assert the readback rather than printing it. The limit checks above cannot
+# see a getter that reports 'auto' while the tier is still applied, so without
+# this the pinning contract is only half tested.
+got_preset=$(cat "$P/power_preset")
+if [ "$got_preset" = boost ]; then
+	printf '  %-34s %-10s ok\n' "power_preset reads back pinned" "$got_preset"
+	pass=$((pass + 1))
+else
+	printf '  %-34s %-10s EXPECTED boost\n' "power_preset reads back pinned" "$got_preset"
+	fail=$((fail + 1))
+fi
 
 say "auto re-tethers to the profile"
 echo auto > "$P/power_preset"; check "auto, profile is low-power" "50.00"
@@ -253,4 +285,8 @@ else
 fi
 
 restore
+if [ "$RESTORE_OK" -ne 1 ]; then
+	echo "  The machine was NOT fully restored -- see RESTORE FAILED above." >&2
+	exit 1
+fi
 exit $((fail > 0))

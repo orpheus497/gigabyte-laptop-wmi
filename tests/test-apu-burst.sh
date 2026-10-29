@@ -131,6 +131,14 @@ save() {   # save <path> <description>
 PRESET_WAS=$(save "$S/fan_preset" "fan preset")           || exit 1
 PROFILE_WAS=$(save "$PROFILE" "platform profile")         || exit 1
 POWER_PRESET_WAS=$(save "$S/power_preset" "power preset") || exit 1
+# fan_mode too, not just fan_preset. This test writes `fan_preset gaming`, which
+# moves fan_mode to 2, and putting the PRESET back does not always put the MODE
+# back: with the preset on auto it is the profile that decides the mode, so a
+# machine that started on auto with a mode the profile does not map to comes
+# back on the profile's mode instead of its own. Restoring it explicitly covers
+# that and is a no-op whenever the two already agree. Same reasoning, and the
+# same FAN_MODE_AT_START pattern, as tests/test-gpu-power.sh.
+FAN_MODE_WAS=$(save "$S/fan_mode" "fan mode")             || exit 1
 LOAD_PID=""
 LOAD_LOG=$(mktemp) || die "cannot create a temporary file for the load's output"
 
@@ -155,6 +163,13 @@ cleanup() {
 	echo "$PRESET_WAS"        > "$S/fan_preset"   2>/dev/null
 	echo "$POWER_PRESET_WAS"  > "$S/power_preset" 2>/dev/null
 	sleep 3
+	# Last, and only if it did not come back on its own: writing fan_mode moves
+	# fan_preset with it, so doing this unconditionally would undo the preset
+	# restore above.
+	if [ "$(cat "$S/fan_mode" 2>/dev/null)" != "$FAN_MODE_WAS" ]; then
+		echo "$FAN_MODE_WAS" > "$S/fan_mode" 2>/dev/null
+		sleep 1
+	fi
 	printf '\n== restored ==\n'
 	printf '   fan_preset=%s power_preset=%s platform_profile=%s\n' \
 		"$(cat "$S/fan_preset")" "$(cat "$S/power_preset")" "$(cat "$PROFILE")"

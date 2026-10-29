@@ -1,9 +1,9 @@
 #!/bin/bash
 # Which way round is dynamic_boost, and does it do anything?
 #
-# The node reads and writes 0 = off / 1 = on, and the driver inverts before
-# sending, so a node write of 1 reaches the firmware as 0. Reading WMBD
-# Case (0xE7) in GAMING-A16-5TH-DSDT.dsl:9524, the two firmware branches are:
+# The node reads and writes 0 = off / 1 = on and passes the value through
+# UNCHANGED. Reading WMBD Case (0xE7) in GAMING-A16-5TH-DSDT.dsl:9524, the two
+# firmware branches are:
 #
 #   raw 0  ->  DBAC = 1, DBDC = 1, AMAT = 0,     PPAB = 0
 #   raw 1  ->  DBAC = 0, DBDC = 0, AMAT = LMAT,  PPAB = 1
@@ -13,10 +13,22 @@
 # the CPU and the GPU. Zeroing it should stop the shifting; restoring it from
 # LMAT should allow it.
 #
-# That is a mechanism argument, not an argument from field names, and it
-# suggests the node is backwards: node 1 reaches the firmware as raw 0, which
-# is the branch that ZEROES the budget. THIS SCRIPT DOES NOT ASSUME THAT. It
-# reports which node value quietens the limit and lets the measurement decide.
+# So the node's documented sense and the firmware's branches now agree: node 1
+# reaches the firmware as raw 1, which restores the budget and lets the limit
+# move; node 0 zeroes it and should hold the limit still.
+#
+# HISTORY, because this script is what found the bug and the bug is now fixed.
+# dynamic_boost_store() used to send !enable, so a node write of 1 arrived as
+# raw 0 -- the branch that ZEROES the budget -- and the node's "on" switched
+# boost off. This test measured exactly that: node 1 pinned the limit at the
+# tier and node 0 let it wander. The write inversion was then removed and a
+# read inversion added, because WMBC 0xE7 returns DBAC, which is a DISABLE
+# flag. Re-running this script against the fixed driver should therefore give
+# the OPPOSITE result -- node 0 quiet, node 1 wandering -- and that is the
+# "CORRECT AS SHIPPED" verdict below, not a regression.
+#
+# THIS SCRIPT STILL ASSUMES NOTHING. It reports which node value quietens the
+# limit and lets the measurement decide.
 #
 # WHY THE LIMIT IS THE OBSERVABLE: enforced.power.limit is the limit Dynamic
 # Boost is currently arbitrating. With boost active it wanders above the tier's
@@ -47,6 +59,17 @@ die() { echo "$*" >&2; exit 1; }
 say() { printf '\n== %s ==\n' "$*"; }
 
 [ "$(id -u)" -eq 0 ] || die "must run as root"
+
+# Validate the window BEFORE any state change. A zero or non-numeric argument
+# made `sample()` run `seq` with no valid count, so every window recorded zero
+# samples; the empty counts then satisfied "at most one distinct value" and the
+# script printed "the limit never moved in any window" -- a false verdict, and
+# printed only after dynamic_boost had already been toggled three times.
+case "$WINDOW" in
+	''|*[!0-9]*) die "window must be a whole number of seconds, got: $WINDOW" ;;
+esac
+[ "$WINDOW" -ge 10 ] || die "window of ${WINDOW}s is too short to see an excursion; use 30 or more"
+
 [ -d "$P" ] || die "driver not loaded: $P does not exist"
 [ -e "$P/dynamic_boost" ] || die "dynamic_boost is absent: not Gigabyte Gaming firmware"
 command -v nvidia-smi >/dev/null || die "needs nvidia-smi to read the power limit"
@@ -131,21 +154,29 @@ if (( a1_n <= 1 && n_1 <= 1 && n_0 <= 1 && a2_n <= 1 )); then
 	Give the discrete GPU sustained work and re-run. An idle card at P8 does
 	not arbitrate.
 	EOF
-elif (( n_1 <= 1 && n_0 > 1 )); then
+elif (( n_1 <= 1 && n_0 > 1 && a2_n > 1 )); then
 	cat <<-'EOF'
-	THE NODE IS INVERTED. Writing 1 ("on") held the limit still; writing 0
-	("off") let it wander. So node 1 reaches the firmware as raw 0, the branch
-	that zeroes AMAT -- and zeroing the budget is what DISABLES boost. The
-	!enable inversion in dynamic_boost_store() and the "write 0 to enable"
-	comment on DYN_BOOST are both the wrong way round.
+	THE NODE IS INVERTED AGAIN -- which would mean the fix is wrong, so check
+	before acting. Writing 1 ("on") held the limit still; writing 0 ("off") let
+	it wander, and the control confirmed the wandering returns.
+
+	dynamic_boost_store() currently passes the value through unchanged, so node
+	1 arrives as raw 1, the branch that RESTORES AMAT from LMAT. That should
+	let the limit move, and this result says it did the opposite.
+
+	Before changing anything: confirm the driver really is the fixed build
+	(check that dynamic_boost_store does NOT send !enable) and re-run once. A
+	single inverted run against the fixed driver is more likely a stale module
+	than a wrong fix.
 	EOF
-elif (( n_0 <= 1 && n_1 > 1 )); then
+elif (( n_0 <= 1 && n_1 > 1 && a2_n > 1 )); then
 	cat <<-'EOF'
 	THE NODE IS CORRECT AS SHIPPED. Writing 0 ("off") held the limit still and
 	writing 1 ("on") let it wander, which is what the node's documented sense
-	promises. Record it and close the question.
+	promises, and the control confirmed the wandering returns. This is the
+	expected result against the fixed driver. Record it and close the question.
 	EOF
-elif (( n_1 <= 1 && n_0 <= 1 && a2_n > 1 )); then
+elif (( n_1 <= 1 && n_0 <= 1 && a1_n > 1 && a2_n > 1 )); then
 	cat <<-'EOF'
 	WRITING 0xE7 PINS THE LIMIT, EITHER WAY -- and the control is what makes
 	that readable. Both test settings held the limit still, and the wandering
@@ -176,6 +207,37 @@ elif (( n_1 <= 1 && n_0 <= 1 && a2_n <= 1 && a1_n > 1 )); then
 	when the limit is wandering more continuously. Check first:
 	  for i in $(seq 60); do nvidia-smi --query-gpu=enforced.power.limit \
 	      --format=csv,noheader; sleep 1; done | sort | uniq -c
+	EOF
+elif (( n_1 <= 1 && n_0 <= 1 && a1_n <= 1 && a2_n > 1 )); then
+	cat <<-'EOF'
+	INCONCLUSIVE -- the wandering only STARTED in the control window. The
+	baseline was quiet, both test settings were quiet, and the limit began
+	moving only after the original setting was restored at the end.
+
+	Nothing can be credited to the writes: a burst that happens to begin in
+	the last window produces exactly this, and so would a setting that
+	un-pinned the limit. The two predict the same output, which distinguishes
+	nothing.
+
+	Re-run once the limit is already wandering -- check before starting, and
+	do not start until more than one value appears:
+	  for i in $(seq 60); do nvidia-smi --query-gpu=enforced.power.limit \
+	      --format=csv,noheader; sleep 1; done | sort | uniq -c
+	EOF
+elif (( a2_n <= 1 && ( (n_1 <= 1 && n_0 > 1) || (n_0 <= 1 && n_1 > 1) ) )); then
+	cat <<-'EOF'
+	SUGGESTIVE BUT NOT ESTABLISHED -- one setting was quiet and the other
+	wandered, which looks like a direction, but THE CONTROL STAYED QUIET.
+
+	That is the one reading this test exists to refuse. With the original
+	setting restored the wandering did not return, so the quiet window under
+	the test setting may simply be where the burst ended. A direction read out
+	of this is the same error as a measurement taken where both hypotheses
+	predict the same output.
+
+	Re-run with a longer window (the first argument is seconds, try 120), or
+	when the limit is wandering more continuously. Do not record a direction
+	from this run.
 	EOF
 else
 	cat <<-'EOF'

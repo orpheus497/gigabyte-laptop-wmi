@@ -206,11 +206,57 @@ trap restore EXIT
 trap 'restore; exit 130' INT TERM
 
 say "preconditions"
-PANEL=$(grep -l '^connected$' /sys/class/drm/card*-eDP-*/status 2>/dev/null || true)
+PANEL=$(grep -l '^connected$' /sys/class/drm/card*-eDP-*/status 2>/dev/null | head -1 || true)
+# Read the driver behind the connected panel rather than printing advice about
+# it. This is the MUX state, and it is the firmware's own interlock: the whole
+# of WMBD Case (0x51) sits inside If (DPMF != 0x02), so with the panel on the
+# discrete GPU the eject branch is skipped entirely and the write lands
+# nowhere. An earlier version named the condition and then detached anyway --
+# the exact "advise rather than refuse" pattern the process check below was
+# rewritten to avoid.
+#
+# Match on the driver NAME, never the card index: the indices renumber across a
+# MUX switch, so card0/card1 are not stable identities.
+PANEL_DRIVER=
+if [ -n "$PANEL" ]; then
+	PANEL_CARD=${PANEL%/*}                      # .../card1-eDP-1
+	PANEL_CARD=/sys/class/drm/$(basename "${PANEL_CARD}" | cut -d- -f1)
+	# Test the link exists before resolving it. `readlink -f` canonicalises a
+	# path whose final component is missing and prints it anyway, so a card
+	# with nothing bound yielded the literal string "driver" rather than an
+	# empty result -- which is neither amdgpu nor nvidia, so it slipped past
+	# the refusal below into the warn-and-proceed branch. Same shape as the
+	# gpu_driver() helper above, which already got this right.
+	if [ -e "$PANEL_CARD/device/driver" ]; then
+		PANEL_DRIVER=$(basename "$(readlink -f "$PANEL_CARD/device/driver")")
+	fi
+fi
 echo "connected panel:  ${PANEL:-none found}"
-echo "  The firmware refuses a detach while the panel is on the discrete GPU,"
-echo "  so this must name a card whose driver is amdgpu."
+echo "  driver behind it: ${PANEL_DRIVER:-unknown}"
 echo "dGPU present:     $(gpu_driver | sed "s|^|$(gpu_present), driver |")"
+
+if [ "${GIGABYTE_DETACH_FORCE:-0}" = 1 ]; then
+	echo "  GIGABYTE_DETACH_FORCE=1 -- skipping the panel/MUX check"
+elif [ -z "$PANEL_DRIVER" ]; then
+	die "
+Could not read which driver owns the connected internal panel, so whether the
+display MUX would block the eject cannot be determined. Refusing to detach
+blind. Set GIGABYTE_DETACH_FORCE=1 to override."
+elif [ "$PANEL_DRIVER" = nvidia ]; then
+	die "
+The internal panel is driven by the DISCRETE GPU (driver $PANEL_DRIVER), so
+DPMF == 2 and the firmware will skip the whole of Case (0x51). The eject would
+not happen, and this test would then report a restore result for a detach that
+never occurred.
+
+Switch the MUX back first: BIOS setup -> Peripherals -> \"Switchable Graphics
+device\" -> MSHybrid, then reboot and run this again.
+
+Set GIGABYTE_DETACH_FORCE=1 to override."
+elif [ "$PANEL_DRIVER" != amdgpu ]; then
+	echo "  WARNING: expected amdgpu behind the panel, found $PANEL_DRIVER." >&2
+	echo "           Proceeding, but the MUX state is not what this test assumes." >&2
+fi
 
 # Refuse rather than advise. The earlier version printed "should be stopped
 # first" and then detached anyway, which is the whole hazard this test is
@@ -332,7 +378,13 @@ say "detaching"
 # lands and the script is then interrupted, the card is already gone and the
 # restore must still run. A flag set afterwards would miss exactly that case.
 DETACHED=1
-echo 3 > "$P/gpu_boost" || die "write to gpu_boost failed"
+# Clear the flag again if the write itself failed. The flag is deliberately set
+# BEFORE the write so an interrupt between a landed eject and the next line
+# still restores -- but a write that FAILED ejected nothing, and leaving the
+# flag set made restore() send gpu_boost 4 to a still-attached card. That is an
+# ACPI BIOS Error in the log plus a restore narrative for a detach that never
+# happened. Both orderings are needed, so set it early and unset it on failure.
+echo 3 > "$P/gpu_boost" || { DETACHED=0; die "write to gpu_boost failed -- nothing was ejected"; }
 sleep "$SETTLE"
 echo "dGPU present: $(gpu_present)"
 echo "kernel log:"

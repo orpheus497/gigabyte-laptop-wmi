@@ -144,6 +144,52 @@ remove_dkms_version() {
 
 cd "$(dirname "$0")/.."
 
+# Build the module BEFORE removing anything, and abort if it fails.
+#
+# The removal below is destructive and irreversible by this script: it drops the
+# DKMS registration, the built module and the /usr/src tree for the current
+# version, and `dkms install` does not run until ~40 lines later. A compile
+# error there used to leave the machine with no driver at all AND an
+# /etc/modules-load.d entry from a previous run still asking for it, so the next
+# boot failed in systemd-modules-load with nothing explaining why.
+#
+# Reordering the removal after the install is not the fix and was considered:
+# DKMS will not hold two installs of one version, and the removal exists
+# precisely to clear the "@PKGVER@" registration that `dkms ldtarball` leaves
+# behind. Building first costs a couple of seconds and makes the failure
+# non-destructive instead, which is the property that was missing.
+#
+# This is also the only compile gate there is -- CI packages the driver without
+# ever compiling it -- so a syntax error reaches this script untouched.
+#
+# It builds in a temporary directory rather than in the checkout, because this
+# script runs as root: an in-tree `make` would leave root-owned .o, .mod and
+# Module.symvers files in the user's working copy, and `make clean` running as
+# root is not a reliable undo for that.
+echo "== Pre-flight build =="
+KBUILD=/lib/modules/$(uname -r)/build
+if [ ! -d "$KBUILD" ]; then
+	echo "No kernel build tree at $KBUILD." >&2
+	echo "DKMS cannot build without it. Install kernel-devel-matched (Fedora)" >&2
+	echo "or linux-headers-\$(uname -r) (Debian/Ubuntu) and run this again." >&2
+	echo "Nothing has been changed." >&2
+	exit 1
+fi
+PREFLIGHT=$(mktemp -d)
+trap 'rm -rf "$PREFLIGHT"' EXIT
+install -m 644 Makefile gigabyte-laptop.c "$PREFLIGHT/"
+if ! make -C "$KBUILD" M="$PREFLIGHT" modules >"$PREFLIGHT/log" 2>&1; then
+	echo >&2
+	echo "The module did not build, so NOTHING has been changed and your" >&2
+	echo "installed driver is intact. The build log:" >&2
+	echo >&2
+	sed 's/^/    /' "$PREFLIGHT/log" | tail -40 >&2
+	exit 1
+fi
+rm -rf "$PREFLIGHT"
+trap - EXIT
+echo "   builds clean"
+
 # The driver was called aorus-laptop until the rename. Anything left from that
 # name has to go, or the machine keeps a second DKMS tree, a second autoload
 # entry and a stale module that still claims the WMI devices.
@@ -157,22 +203,38 @@ if ! module_unload aorus_laptop; then
 	echo "using it, or reboot, then run this again." >&2
 	exit 1
 fi
+if ! old_registered=$(dkms status aorus-laptop); then
+	echo "\`dkms status aorus-laptop\` failed, so its registration cannot be" >&2
+	echo "read. Refusing to delete /var/lib/dkms/aorus-laptop blind." >&2
+	exit 1
+fi
 while read -r ver; do
 	[ -n "$ver" ] || continue
 	echo "   removing aorus-laptop/$ver"
 	remove_dkms_version aorus-laptop "$ver"
-done < <(dkms status aorus-laptop 2>/dev/null | sed -n "s|^aorus-laptop/\([^,:]*\).*|\1|p" | sort -u)
+done < <(printf '%s\n' "$old_registered" | sed -n "s|^aorus-laptop/\([^,:]*\).*|\1|p" | sort -u)
 rm -rf /var/lib/dkms/aorus-laptop
 rm -f /etc/modules-load.d/aorus-laptop.conf
 
 echo "== Removing any previous registration =="
 # Includes the "@PKGVER@" version left behind by `dkms ldtarball` on a tarball
 # whose dkms.conf was not substituted.
+# Capture the query WITH its exit status. A process substitution discards it, so
+# a failing `dkms status` used to yield an empty list, run the loop zero times,
+# and fall straight through to the `rm -rf` below -- deleting the tree while
+# leaving the installed module and its source unmanaged. An absent module is not
+# that case: `dkms status` exits 0 and prints nothing for a name it does not
+# know, so a first install still passes here.
+if ! registered=$(dkms status "$NAME"); then
+	echo "\`dkms status $NAME\` failed, so its registration cannot be read." >&2
+	echo "Refusing to delete /var/lib/dkms/$NAME blind. Inspect DKMS first." >&2
+	exit 1
+fi
 while read -r ver; do
 	[ -n "$ver" ] || continue
 	echo "   removing $NAME/$ver"
 	remove_dkms_version "$NAME" "$ver"
-done < <(dkms status "$NAME" 2>/dev/null | sed -n "s|^$NAME/\([^,:]*\).*|\1|p" | sort -u)
+done < <(printf '%s\n' "$registered" | sed -n "s|^$NAME/\([^,:]*\).*|\1|p" | sort -u)
 rm -rf "/var/lib/dkms/$NAME"
 
 echo "== Installing source to $SRC =="

@@ -4177,6 +4177,100 @@ page-gated, so it will not see this device. Its `GigabyteAorusLaptopController`
 is USB-only on page `0xFF01` with an 8-byte report `0x08`. `opengigabyte`
 supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 
+### PR #4's review: 20 findings, and two of them caught my own regressions
+
+**Raised 29 Oct 2026 as `master <- a16-5th-gmate`** — a review surface, not a
+merge, exactly as PR #1 was. **The never-merge rule still covers `master`**;
+see "Why the fork is ported, not merged". CI was green on all four jobs with no
+conflict, which means the packaging is well-formed and says **nothing** about
+whether the driver builds — see "CI never compiles the driver".
+
+Two were marked **major** and both were real:
+
+- **`USAGE.md` promised a dGPU restore that does not work here.** It said
+  restoring "either way works" via `gpu_boost 4` or a PCI rescan. This session
+  had already measured both failing, and the obvious next step — the PCI bind —
+  wedging in D state. So the document was telling a user to do the thing that
+  costs a reboot, then the thing that cannot be killed. **This is the worst
+  defect found in the whole session**, because it was in the one file written
+  for someone else to act on, and the correct content was already sitting in
+  this file.
+- **`install-dkms.sh` removed the installed driver before building the new
+  one.** A compile error left the machine with no driver *and* a
+  `modules-load.d` entry still asking for it, so the next boot failed in
+  `systemd-modules-load` with nothing explaining why.
+
+  **The reviewer's own fix was wrong and they said so**: reordering the removal
+  after the install needs "a separate path for same-version reinstalls, which
+  DKMS does not allow to coexist". Correct — and the removal exists precisely
+  to clear the `@PKGVER@` registration. **The fix was to build first**, in a
+  temp directory (the script runs as root, so an in-tree `make` would leave
+  root-owned objects in the checkout). The failure becomes non-destructive
+  instead of being reordered away. It is also the only compile gate there is.
+
+**Two amber findings were defects this session had introduced**, which is the
+part worth carrying forward — a nit label is about how much it matters to the
+reviewer, not about whose bug it is:
+
+- **`tests/test-dynamic-boost.sh` still described the driver it had just
+  fixed.** Its header said "the driver inverts before sending, so a node write
+  of 1 reaches the firmware as 0", and its verdict recommended adding
+  `!enable` to `dynamic_boost_store()`. That inversion was **removed hours
+  earlier**, by this very script's result. So the script that found the bug
+  would have told the next reader to re-introduce it. **Fixing a driver and
+  leaving the tool's reasoning describing the old one is the same
+  stale-premise failure this file keeps catching** — and here the stale text
+  was an instruction.
+- **`tests/test-dgpu-detach.sh` set `DETACHED=1` before the eject write and
+  never cleared it on failure**, so a *failed* write sent `gpu_boost 4` to a
+  still-attached card and reported a restore for a detach that never happened.
+  The early flag is deliberate and stays — an interrupt between a landed eject
+  and the next line must still restore — so the fix is to unset it on the
+  failure path. **Both orderings were needed; only one had been thought
+  through.**
+
+  The same file also *advised* that the panel must be on the iGPU and then
+  detached anyway. That is the "advise rather than refuse" pattern the process
+  check in the same script had already been rewritten to eliminate, so it now
+  reads the connected eDP's driver and refuses, honouring
+  `GIGABYTE_DETACH_FORCE` like every other gate.
+
+**One fix opened a hole, caught by replaying the logic rather than by reading
+it.** Gating the `dynamic_boost` direction verdicts on the control window left
+two combinations falling through to an `else` whose text asserted "both test
+settings let the limit wander" — false for both of them. Enumerating all 16
+quiet/wander combinations found it immediately, and two branches were added so
+every branch's text is true of its own numbers. **Adding a condition to one
+branch of a chain changes what reaches the others**, and a four-variable chain
+is past the size where reading it is enough.
+
+**And the new refusal was itself broken, caught by testing it rather than
+reading it.** `readlink -f` canonicalises a path whose *final* component is
+missing and prints it anyway, so
+
+```sh
+basename "$(readlink -f /sys/class/drm/card1/device/driver)"   # card with nothing bound
+#   -> "driver"        not "" as expected
+```
+
+A card with no driver bound therefore yielded the literal string `driver` —
+neither empty, nor `amdgpu`, nor `nvidia` — so it slipped past the refusal into
+the warn-and-proceed branch, and the "cannot determine the MUX" case was
+**unreachable**. Use `readlink -e`, or test `[ -e ... ]` first, which is what
+the `gpu_driver()` helper ten lines above had already been doing. **A guard
+written and not exercised is not a guard**, and this one was written in the
+same commit as a fix for a guard that advised instead of refusing.
+
+**Declined, with reasons**, so they are not re-investigated:
+
+| Finding | Why not |
+|---|---|
+| `test-apu-burst.sh` baseline flatness | The reviewer offers no threshold and says "a safe correction is not established". The conclusion it guards was re-derived anyway by the 300 s `--hold 0` run |
+| `test-charge-limit.sh` HONOURED wording | Wants the verdict to stop claiming a cause. The result is twice corroborated — a 1171 s flatline *and* KDE dropping "Time To Full" — and the current-based detection exists because of exactly this concern |
+| `notify.c` timeout-read race | Real but microseconds wide, and the suggested fix risks announcing ordinary sysfs writes, which the header forbids. The reviewer labels its own tradeoff "Poor tradeoff" |
+| `notify.c` `execlp` PATH warning (ast-grep) | Not a privilege boundary: a user-session binary running as the user, who can already run anything. `execlp` over `system()` is a deliberate recorded choice |
+| `test-gpu-power.sh` preset/mode both-states | Correctly identifies a genuine tension and asks for a decision rather than a fix. The choice is documented in the restore comment |
+
 ### Two review findings declined, with reasons — 23 Oct 2026
 
 Recorded so they are not re-raised and re-investigated:
@@ -5905,6 +5999,13 @@ causes were in the measurement, and both are now fixed or absent:
 
   14 passed, 0 failed
 ```
+
+**That run was 14 checks; the script now has 15.** A review finding on PR #4
+pointed out that nothing asserted `power_preset`'s own readback after pinning
+— the limit checks cannot see a getter reporting `auto` while the tier is
+still applied — so an assertion was added. The recorded run above is
+unchanged and still valid; expect `15 passed` from here. **Read the count off
+the run, not off this file.**
 
 **Two independent things were wrong before and neither was the driver.** The
 single-sample reads landed inside arbitration excursions — fixed by taking the

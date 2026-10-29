@@ -93,7 +93,14 @@ gigabyte_laptop: Mode key: fan preset gaming
 the preset. It is a small C program — about 150 lines with comments — that
 `poll()`s the `fan_preset` attribute and runs `notify-send`.
 
+**`notify-send` is a prerequisite and nothing checks for it.** It ships in
+libnotify (`libnotify` on Fedora, `libnotify-bin` on Debian and Ubuntu).
+Without it the watcher starts, runs and reports healthy, and simply never puts
+anything on screen — the failure goes to the service's stderr and nowhere a
+user would look.
+
 ```sh
+command -v notify-send || sudo dnf install libnotify   # or your distro's package
 cd tools && make && sudo make install
 systemctl --user enable --now gigabyte-fan-preset-notify.path
 ```
@@ -309,9 +316,9 @@ knowing anything about this driver.
 
 ```sh
 # Stop charging at 80 %
-echo 80  | sudo tee /sys/class/power_supply/BAT1/charge_control_end_threshold
+echo 80  | sudo tee /sys/class/power_supply/BAT*/charge_control_end_threshold
 # No limit
-echo 100 | sudo tee /sys/class/power_supply/BAT1/charge_control_end_threshold
+echo 100 | sudo tee /sys/class/power_supply/BAT*/charge_control_end_threshold
 ```
 
 The firmware has **two** fields where the ABI has one number — a ceiling byte
@@ -401,10 +408,12 @@ level.** Reading the firmware for that generation, the accepted values are:
 | `1` | enable it |
 | `2` | **nothing — no branch exists for it** |
 | `3` | **detach the discrete GPU** — an ACPI eject request the kernel services with an orderly unbind |
-| `4` | restore the discrete GPU and rescan the bus |
+| `4` | restore the discrete GPU and rescan the bus — **broken in the firmware on a GAMING A16 5TH**, see below |
 
-**The driver accepts the full 0-4 range.** Values 3 and 4 are a matched
-detach/restore pair rather than boost levels, and both are available.
+**The driver accepts the full 0-4 range.** Values 3 and 4 are the firmware's
+matched detach/restore pair rather than boost levels, and both are available —
+but on this generation only the detach half works. See below before using
+either.
 
 ### Detaching and restoring the discrete GPU
 
@@ -474,16 +483,54 @@ echo '3' | sudo tee /sys/devices/platform/gigabyte_laptop/gpu_boost
 
 The detach is logged at warning level, so `dmesg` carries a record of it.
 
-**Restoring it**, either way works:
+**Restoring it is the part that does not work on a GAMING A16 5TH, and that
+is measured rather than feared.** Value 4 is the firmware's own restore and it
+has never once succeeded on this machine: `PEGP._ON` is declared `External` in
+the DSDT and is never defined, so the call aborts `WMBD` with `AE_NOT_FOUND`
+and throws an ACPI BIOS Error into the kernel log.
+
+| Route | What happens here |
+|---|---|
+| `gpu_boost 4` | `AE_NOT_FOUND` on `PEGP._ON`; `WMBD` aborts, nothing restored |
+| `echo 1 > /sys/bus/pci/rescan` | no-op — the eject unbinds the driver but leaves the card **on the bus**, so there is nothing to rediscover |
+| `echo <addr> > /sys/bus/pci/drivers/nvidia/bind` | **do not** — the write hangs in uninterruptible sleep (`D` state) and cannot be killed, not even with `SIGKILL` |
+| `modprobe -r nvidia …` | refused; the refcount stays non-zero after a half-eject |
+| **reboot** | **the only thing that works** |
+
+**So treat `gpu_boost 3` as costing a reboot — not "a reboot if something goes
+wrong", but as the normal outcome.** The end state after a detach is
+*present but unbound*: the card is still at its PCI address, `nvidia_drm` has
+removed the device and unloaded, and the HDA function on `.1` has gone with it.
+
+Try these first anyway, in this order, in case your firmware resolves
+`PEGP._ON` where this one does not — both are harmless and both report what
+happened to the kernel log:
 
 ```sh
 echo '4' | sudo tee /sys/devices/platform/gigabyte_laptop/gpu_boost
-# or, if the driver is not loaded:
 echo '1' | sudo tee /sys/bus/pci/rescan
 ```
 
-Both the detach and the restore are logged to the kernel ring buffer, so
-`dmesg | tail` shows what happened.
+Then check whether the driver came back, rather than assuming it did:
+
+```sh
+cat /sys/bus/pci/devices/0000:01:00.0/driver 2>/dev/null \
+	|| basename "$(readlink /sys/bus/pci/devices/0000:01:00.0/driver)" \
+	|| echo UNBOUND
+```
+
+If it reads `UNBOUND`, reboot. A reboot may itself be slow if anything is
+already wedged, so use `sudo systemctl reboot`, and `sudo reboot -f` if that
+stalls for more than a couple of minutes.
+
+Both the detach and the restore attempt are logged to the kernel ring buffer,
+so `dmesg | tail` shows what happened.
+
+**Linux offers a weaker form of the same thing that needs none of this**, and
+it is the better choice unless you specifically want the firmware path:
+`/sys/bus/pci/devices/0000:01:00.0/remove` plus `/sys/bus/pci/rescan`. Runtime
+D3 is also already working fine-grained on this card, so measure what a detach
+actually saves before relying on it.
 
 **If the MUX is switched to discrete**, `DPMF` becomes 2, the firmware skips
 the entire routine, and *every* value of this node — including the ordinary
