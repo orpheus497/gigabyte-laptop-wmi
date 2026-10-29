@@ -2261,7 +2261,17 @@ actually support:
   would have pulled it down later. The earlier `yes(1)` sweep is no help here
   either: it ran 40 s per mode and never reached any ceiling. **So the honest
   statement is that `0x30` did not bind within 30 s**, and settling it means
-  holding one mode for several minutes and watching for a step down.
+  holding one mode for several minutes and watching for a step down. That is
+  what `tests/test-apu-burst.sh --hold 0` does, added 29 Oct 2026 for exactly
+  this. **Mode 0 is the mode to use**: its SPL is 45 W against a 65 W sPPT, so
+  if the sustained limit engages at all the step is 20 W and unmistakable.
+
+**Reproduced a second time, 29 Oct 2026**, same figures to the watt — 64–65,
+64–65, 79–80 W with the clock at ~4050 / ~4050 / ~4200 MHz. Two independent
+runs agreeing is what lifts the sPPT decode from a single observation.
+Temperature reached **98 °C** in mode 2 on the repeat, a degree above the
+first run, which is worth knowing before anyone holds mode 2 for minutes
+rather than seconds.
 
 **Why the first attempt missed it, and the lesson is a sharp one.** The earlier
 sweep used `yes(1)`, which drew ~62 W — **three watts under the 65 W ceiling.**
