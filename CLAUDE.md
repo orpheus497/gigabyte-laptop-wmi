@@ -1916,7 +1916,7 @@ Both commits build clean with `-Wall -Wextra`.
 | ~~14~~ | ~~GPU TGP on AC~~ **done 29 Oct 2026 — `perf_mode` controls GPU power on mains.** 0→50 W, 1→60 W, 2→70 W against a 50 W default. The "firmware-blocked" verdict was drawn from readings taken on DC or unannotated. Only the DC path is blocked | low |
 | 16 | **Should `platform_profile` drive `perf_mode` again?** Step 3 was redesigned over fan policy *because* `perf_mode` was believed inert. It is not. Profiles could now set GPU power as well as fan policy, which is what the original design intended. A design decision, not a bug | low |
 | 15 | **The dGPU never reaches D3cold.** `nvidia_drm.modeset=1` makes it a KMS device with an HDMI connector, so the compositor holds it open; it idles at 3.1 W in P8 instead of powering off. Not a driver defect — but it is what decides whether the detach feature is worth anything (row 12) | low |
-| ~~7~~ | ~~`perf_mode`'s APU-power half via `ECPT`~~ **closed 29 Oct 2026 — it does nothing measurable.** Swept 0→1→2 under sustained all-core AC load: package power sat at **~62 W in all three modes** and the all-core clock at **~4.32 GHz**, flat. Mode 0's `ECPT` SPL is 45 W and sustained draw was 62 W, so that limit is not being applied | low |
+| ~~7~~ | ~~`perf_mode`'s APU-power half via `ECPT`~~ **closed 29 Oct 2026 — no mode's limit bound under load.** Swept 0→1→2 with 16 threads loaded on AC: the all-core clock stayed at **~4.32 GHz, flat in all three modes**, and package power at ~62 W. A binding limit would force the clock down. Caveat on the load type recorded below | low |
 | ~~17~~ | ~~`gpu_boost` on AC~~ **done 29 Oct 2026 — it is a real second power axis**, and the `ACBT` decode predicted it exactly: `gpu_boost 0` → 50 W, `1` → back to the tier's value, 4/4 predictions correct | low |
 | 8 | **`amd_pmf.force_load=1`** — one kernel parameter and a reboot, fully reversible. Settles whether APMF binds and what a second `platform_profile` handler does to the aggregate | medium |
 | ~~10~~ | ~~dGPU attach/detach — fix the `0x51` bounds~~ **done 29 Oct 2026** — the node takes the full 0-4 and the detach/restore pair is whole again; detach is logged, not refused, and the firmware supplies the interlock. See "`DPMF` is the display-MUX flag" | low |
@@ -2048,6 +2048,47 @@ findings.** `pkgW` showed `-65469` once, which is the RAPL energy counter
 wrapping. And the single-sample spikes to 71 and 72 W land exactly on the two
 `perf_mode` writes, so they are the `sudo`/`tee` overhead inflating that
 second's energy delta, not a real power excursion.
+
+### What the 29 Oct run does and does not establish
+
+**Written out explicitly so none of it is re-litigated later.** Three results
+came from that session and they are not equally tight.
+
+**Conclusive — `gpu_boost` and the `ACBT` decode.** The predictions were
+written down *before* the test, derived from firmware constants, and came back
+4/4 exact. The run was repeated and gave identical output. Crucially the
+competing hypotheses predict **different** numbers here (50 vs 60 vs 70), so
+this is not the trap that produced the `temp2` error — a measurement where
+both explanations predict the same value. Nothing is left open.
+
+**Conclusive on the question asked — `temp1` lags rather than freezes.** The
+question was binary: freeze predicts the value never changes, lag predicts it
+changes slowly. It changed. **What is not measured is the time constant.**
+"On the order of minutes" is a floor derived from 120 s of no movement plus one
+change in a further 60 s; it is not a figure, and nothing here distinguishes a
+moving average from a slow poll. Neither distinction changes any decision, and
+the practical conclusion — unusable for anything responsive — is settled.
+
+**Conclusive, but rest it on the clock and not on the power reading — and
+there is one real caveat.** The argument is that the **all-core clock stayed at
+~4.32 GHz in all three modes with 16 threads loaded**, read from `cpufreq`,
+needing no root and no assumption about measurement scope. A power limit that
+actually bound would force the clock down; none did.
+
+The package-power figure corroborates but should not carry the argument:
+`/sys/class/powercap/intel-rapl:0` is named `package-0` and `intel-rapl:0:0`
+is named `core`, and **it was not verified that the package domain is truly
+package-wide on this AMD part** rather than core power reported under a package
+name. So the tempting arithmetic — "62 W drawn against mode 0's 45 W `ECPT`
+SPL, therefore not applied" — depends on something unchecked and is dropped.
+
+**The caveat that could legitimately reopen this: the load was `yes
+> /dev/null` on 16 threads.** That is integer work, light on the vector units,
+so it draws less than an AVX or memory-bound load would. A limit that only
+binds at higher draw would not have shown. The honest statement is therefore
+**no mode's limit bound under this load**, not "`ECPT` does nothing at all".
+Re-testing with a heavier load is the one thing that could change the answer,
+and it is cheap if it ever matters.
 
 ### Open: the fans did not respond to a sustained CPU load — 26 Oct 2026
 
