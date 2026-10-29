@@ -10,15 +10,27 @@
 # RUN THIS FROM A TEXT CONSOLE, NOT INSIDE A DESKTOP SESSION.
 #
 #   Ctrl+Alt+F3, log in, then:
-#     sudo systemctl stop display-manager
+#     systemctl --user stop graphical-session.target     # no sudo
 #     sudo bash tests/test-dgpu-detach.sh
-#     sudo systemctl start display-manager
+#     sudo systemctl start display-manager               # desktop back
 #
-# Why: on a hybrid machine the compositor holds the discrete GPU, because
-# nvidia_drm.modeset=1 makes it a KMS device owning the chassis HDMI port.
-# Measured on a GAMING A16 5TH, nvidia-smi reports kwin_wayland against it with
-# type C+G. Detaching a GPU out from under a live compositor is the one part of
-# this that can hang a session; with the session stopped nothing holds it.
+# NOT `systemctl stop display-manager`. That is the obvious command and it does
+# not work on a systemd user session: it stops the login greeter while the
+# session's own units carry on under user@1000.service. Measured on a GAMING
+# A16 5TH -- display-manager went inactive, the session went to "closing", and
+# kwin_wayland kept the card at an unchanged PID. The compositor is a user
+# service (plasma-kwin_wayland.service, PartOf graphical-session.target), so
+# the user target is what ends it.
+#
+# If the preconditions refuse, the message names the exact unit to stop, read
+# from the holding PID's own cgroup rather than guessed -- so follow that in
+# preference to the line above, which is only the common case.
+#
+# Why any of this matters: on a hybrid machine the compositor holds the
+# discrete GPU, because nvidia_drm.modeset=1 makes it a KMS device owning the
+# chassis HDMI port, and nvidia-smi reports kwin_wayland against it as type
+# C+G. Detaching a GPU out from under a live compositor is the one part of this
+# that can hang a session; with the session stopped nothing holds it.
 #
 # For the power comparison, run it on BATTERY -- on mains the battery gauge
 # reports nothing useful and the measurement is skipped.
@@ -201,14 +213,70 @@ else
 	echo "$PROCS" | sed 's/^/  /'
 fi
 
+# Name the systemd unit behind each holding PID rather than guessing at the
+# display manager. On a Fedora/KDE Wayland session the compositor is a systemd
+# USER service under user@1000.service, so stopping display-manager takes down
+# the login greeter and leaves the running session untouched. Measured on this
+# machine: display-manager went inactive, the session went to "closing", and
+# kwin_wayland kept the card at the same PID throughout. A PID's cgroup line
+# names its unit exactly and costs nothing to read, so there is no reason to
+# guess.
+#
+# SUDO_USER is what makes the user-manager lookup work: this script runs as
+# root, and `systemctl --user` as root talks to root's own manager, which does
+# not own the desktop.
+holder_units() {
+	local pid unit seen="" owner="${SUDO_USER:-}" uid
+	[ -n "$owner" ] && uid=$(id -u "$owner" 2>/dev/null)
+
+	for pid in $(printf '%s\n' "$PROCS" |
+			awk '{for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/ && $i > 300) { print $i; break } }'); do
+		[ -r "/proc/$pid/cgroup" ] || continue
+		# The cgroup v2 line is 0::/path/to/unit, so the unit is the last
+		# component. Parameter expansion rather than sed: the unit name and
+		# the alternation both want characters that collide with sed's
+		# delimiters, and this has nothing to escape.
+		unit=$(cat "/proc/$pid/cgroup" 2>/dev/null)
+		unit=${unit##*/}
+		case "$unit" in *.service|*.scope) ;; *) continue ;; esac
+		case " $seen " in *" $unit "*) continue ;; esac
+		seen="$seen $unit"
+
+		# A unit that is PartOf graphical-session.target comes down with the
+		# target, and stopping the target is what actually ends the session.
+		if [ -n "$uid" ] && [ "$(runuser -u "$owner" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+				systemctl --user show "$unit" -p PartOf --value 2>/dev/null)" \
+				= graphical-session.target ]; then
+			printf '    systemctl --user stop graphical-session.target   # owns %s\n' "$unit"
+		else
+			printf '    systemctl --user stop %s\n' "$unit"
+		fi
+	done
+}
+
 if ! printf '%s' "$PROCS" | grep -q 'No running processes found'; then
+	ADVICE=$(holder_units)
+	[ -n "$ADVICE" ] || ADVICE="    (could not identify the owning unit -- log out of the desktop)"
+
 	[ "$FORCED" -eq 1 ] || die "
 Something is still using the discrete GPU, listed above. Detaching now takes
 the card away from it -- for a compositor that means your session.
 
-Stop it first. If you are already on a text console, the usual culprit is the
-display manager:
-    sudo systemctl stop display-manager
+Stop it first. These are the systemd units behind the processes listed above,
+read from each PID's own cgroup:
+
+$ADVICE
+
+Run those WITHOUT sudo -- they are user units, and as root you would be
+talking to root's manager instead of yours.
+
+NOT 'systemctl stop display-manager'. On a systemd user session that stops the
+login greeter only: the session's own units live under user@1000.service and
+keep the card. Verified on a GAMING A16 5TH, where it left kwin_wayland
+running at an unchanged PID.
+
+Afterwards, to get the desktop back:
+    sudo systemctl start display-manager
 
 To detach anyway, knowing what it costs:
     GIGABYTE_DETACH_FORCE=1 sudo -E bash tests/test-dgpu-detach.sh"

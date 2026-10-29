@@ -5474,6 +5474,65 @@ reason enough. See "Settled: the MUX caused the arbitration, not `amd_pmf`".
 
 
 
+
+### `systemctl stop display-manager` does not end a Plasma Wayland session
+
+**Found 29 Oct 2026 when the detach test refused twice in a row**, the second
+time after the display manager had been stopped exactly as instructed. The
+instruction was wrong, not the machine.
+
+```
+systemctl is-active display-manager   ->  inactive        <- the stop worked
+loginctl show-session 2 -p State      ->  closing         <- stuck there
+nvidia-smi                            ->  kwin_wayland, PID 2242, unchanged
+```
+
+**Thirteen `plasma-*` user services were still `active running`**, including
+`plasma-kwin_wayland.service`, and `graphical-session.target` was still
+active.
+
+**The reason is where the session lives.** On Fedora/KDE the compositor is a
+systemd **user** unit:
+
+```
+/proc/2242/cgroup
+  0::/user.slice/user-1000.slice/user@1000.service/session.slice/plasma-kwin_wayland.service
+```
+
+`user@1000.service` is a separate session of class `manager` and does not
+depend on the display manager, so stopping `plasmalogin.service` takes down the
+**greeter** and leaves the running session alone. The login session goes to
+`closing` and then waits, because the thing holding it open is in a slice the
+display manager never owned.
+
+**What actually works**, since `plasma-kwin_wayland.service` is
+`PartOf=graphical-session.target`:
+
+```sh
+systemctl --user stop graphical-session.target     # no sudo
+```
+
+**No `sudo`.** As root, `systemctl --user` talks to *root's* user manager,
+which owns nothing on the desktop. That is a silent no-op, not an error, which
+is exactly how it would waste the next twenty minutes.
+
+Then `sudo systemctl start display-manager` brings the greeter back.
+
+**The test now derives this rather than advising it.** `holder_units()` reads
+each holding PID's own cgroup line, takes the last path component as the unit
+name, and asks that unit whether it is `PartOf graphical-session.target` —
+printing the target when it is and the unit itself otherwise. It looks the
+unit up through `runuser -u "$SUDO_USER"` with `XDG_RUNTIME_DIR` set, for the
+root-vs-user reason above. So the refusal message names the real thing to stop
+on whatever desktop it is run from, instead of repeating a guess that is wrong
+here.
+
+**One implementation note worth keeping**, because it cost a debugging round:
+the cgroup line is parsed with `${unit##*/}` rather than `sed`. The obvious
+`sed -nE 's|^0::.*/([^/]+\.(service|scope))$|\1|p'` **fails silently** — the
+unescaped `|` in the alternation closes the `s|...|` delimiter early, and with
+`-n` the result is empty output rather than an error. Parameter expansion has
+nothing to escape.
 ### `gpu_boost 4` aborts in firmware: `PEGP._ON` does not resolve — 29 Oct 2026
 
 **Found by accident, from a test that correctly refused to run.** The detach
