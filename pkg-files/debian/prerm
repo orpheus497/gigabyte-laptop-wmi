@@ -24,7 +24,24 @@ case "$1" in
         #
         # Unreachable before the fix above, which is why it arrives with it: the
         # broken test was always false, so `dkms remove` never ran at all.
-        if [ -n "$(dkms status -m "$NAME" -v "$VERSION")" ]; then
+        #
+        # The status is captured separately because a FAILED query is not an
+        # absent registration. `$(...)` inside a test discards the exit status,
+        # so `dkms status` erroring while printing nothing looks exactly like it
+        # succeeding and finding nothing -- and the latter means "skip", which
+        # would leave the registration and the installed module behind while
+        # dpkg reports the package removed. scripts/install-dkms.sh separates
+        # the two for the same reason.
+        #
+        # It differs from that script in not aborting: a prerm that exits
+        # non-zero blocks dpkg from removing the package at all, which is worse
+        # than a stale registration. So this warns and carries on -- a reported
+        # skip rather than a silent one.
+        if ! registered=$(dkms status -m "$NAME" -v "$VERSION"); then
+            echo "prerm: 'dkms status -m $NAME -v $VERSION' failed, so the DKMS" >&2
+            echo "       registration could not be read and is left in place." >&2
+            echo "       Inspect with: dkms status -m $NAME" >&2
+        elif [ -n "$registered" ]; then
             dkms remove -m "$NAME" -v "$VERSION" --all
         fi
     ;;
