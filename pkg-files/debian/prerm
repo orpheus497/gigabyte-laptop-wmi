@@ -42,7 +42,33 @@ case "$1" in
             echo "       registration could not be read and is left in place." >&2
             echo "       Inspect with: dkms status -m $NAME" >&2
         elif [ -n "$registered" ]; then
-            dkms remove -m "$NAME" -v "$VERSION" --all
+            # Do not trust `dkms remove`'s exit code on its own. A version that
+            # was added but never built has nothing installed to orphan, and
+            # dkms still reports failure removing it -- so a bare call here
+            # aborts prerm under `set -e` and dpkg cannot complete the removal,
+            # even though the registration is gone. scripts/install-dkms.sh
+            # documents this same contract and answers it the same way: ask dkms
+            # what it thinks afterwards rather than reading the status.
+            #
+            # A removal that genuinely did NOT happen stays fatal, deliberately.
+            # prerm failing aborts the package removal, which keeps the package
+            # and its module together and tells the operator -- better than
+            # letting the package go while a built module stays resident
+            # claiming the same WMI devices this driver needs. The installer
+            # makes the same choice for the same reason.
+            if ! out=$(dkms remove -m "$NAME" -v "$VERSION" --all 2>&1); then
+                if still=$(dkms status -m "$NAME" -v "$VERSION" 2>/dev/null) &&
+                   [ -z "$still" ]; then
+                    echo "prerm: dkms remove reported failure, but $NAME/$VERSION" >&2
+                    echo "       is gone from dkms, so the removal did happen." >&2
+                else
+                    echo "$out" >&2
+                    echo "prerm: could not remove $NAME/$VERSION and dkms still" >&2
+                    echo "       lists it. Refusing to let the package go while a" >&2
+                    echo "       built module may still be resident." >&2
+                    exit 1
+                fi
+            fi
         fi
     ;;
     *)

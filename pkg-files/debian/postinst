@@ -50,10 +50,19 @@ remove_legacy_dkms() {
     while read -r ver; do
         [ -n "$ver" ] || continue
         echo "postinst: removing the pre-rename aorus-laptop/$ver registration"
-        dkms remove -m aorus-laptop -v "$ver" --all || {
-            echo "postinst: could not remove aorus-laptop/$ver. Inspect with:" >&2
-            echo "          dkms status aorus-laptop" >&2
-        }
+        # Same contract as prerm: a version added but never built makes dkms
+        # report failure while having cleared the registration anyway, so ask
+        # dkms what it thinks rather than warning off the exit code. Unlike
+        # prerm, a genuine failure still only warns here.
+        if ! out=$(dkms remove -m aorus-laptop -v "$ver" --all 2>&1); then
+            if ! { still=$(dkms status -m aorus-laptop -v "$ver" 2>/dev/null) &&
+                   [ -z "$still" ]; }; then
+                echo "$out" >&2
+                echo "postinst: could not remove aorus-laptop/$ver and dkms" >&2
+                echo "          still lists it. Inspect with:" >&2
+                echo "          dkms status aorus-laptop" >&2
+            fi
+        fi
     done
     return 0
 }
