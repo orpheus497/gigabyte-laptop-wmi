@@ -16,8 +16,51 @@ dkms_configure() {
     return 1
 }
 
+# The driver was called aorus-laptop until the rename, and debian/control
+# declares Conflicts/Breaks/Replaces on aorus-laptop-dkms -- so dpkg removes
+# that package and runs ITS prerm, which is upstream 4b817ea's and still has the
+# `[ "$x"]` bug our own prerm fixes. That test is always false, so the old
+# package never runs `dkms remove`.
+#
+# dpkg then deletes what the old package owns, and upstream's debian/rules put
+# the source in usr/src/$(MODULE)-$(VERSION), so /usr/src/aorus-laptop-* goes.
+# /var/lib/dkms/aorus-laptop and the built aorus_laptop.ko are created by dkms,
+# not by dpkg, so they stay. The result is a registration pointing at sources
+# that no longer exist -- the next kernel's autoinstall fails on it -- plus a
+# stale module that still claims the same WMI devices this driver needs.
+# scripts/install-dkms.sh clears the same leftovers for the manual install path.
+#
+# It has to happen here: the old package's prerm cannot be changed after the
+# fact. `dkms remove --all` drops the registration and uninstalls the built
+# module, which is the whole harm; the possibly-empty /var/lib/dkms directory it
+# leaves is cosmetic and is deliberately not rm -rf'd, because that path can be
+# package-owned and the installer gates the same deletion behind an ownership
+# check for exactly that reason.
+#
+# Nothing here may fail the postinst. A postinst that exits non-zero leaves the
+# package half-configured and dpkg complaining on every later operation, which
+# is worse than a leftover registration -- so failures warn and continue.
+remove_legacy_dkms() {
+    if ! legacy=$(dkms status aorus-laptop 2>/dev/null); then
+        echo "postinst: 'dkms status aorus-laptop' failed, so a pre-rename" >&2
+        echo "          registration could not be read and is left alone." >&2
+        return 0
+    fi
+    printf '%s\n' "$legacy" | sed -n 's|^aorus-laptop/\([^,:]*\).*|\1|p' | sort -u |
+    while read -r ver; do
+        [ -n "$ver" ] || continue
+        echo "postinst: removing the pre-rename aorus-laptop/$ver registration"
+        dkms remove -m aorus-laptop -v "$ver" --all || {
+            echo "postinst: could not remove aorus-laptop/$ver. Inspect with:" >&2
+            echo "          dkms status aorus-laptop" >&2
+        }
+    done
+    return 0
+}
+
 case "$1" in
     configure)
+        remove_legacy_dkms
         dkms_configure
     ;;
 
