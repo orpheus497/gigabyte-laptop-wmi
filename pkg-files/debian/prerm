@@ -13,7 +13,18 @@ case "$1" in
         # `dkms remove` was SKIPPED on every remove and upgrade, leaving the
         # registration behind. Inherited from upstream 4b817ea, not introduced
         # by the rename -- see the upstreaming list in CLAUDE.md.
-        if [ -n "$(dkms status -m "$NAME")" ]; then
+        #
+        # The guard is scoped to -v "$VERSION" so it asks the same question the
+        # removal answers. `dkms status -m "$NAME"` alone is non-empty whenever
+        # ANY version is registered, while the removal targets only $VERSION --
+        # so with another version present and $VERSION absent, the guard passes
+        # and `dkms remove` dies 3 ("The module/version combo ... is not located
+        # in the DKMS tree", dkms 3.4.4 remove -> module_is_added_or_die). Under
+        # `set -e` that aborts prerm, and dpkg fails the remove or upgrade.
+        #
+        # Unreachable before the fix above, which is why it arrives with it: the
+        # broken test was always false, so `dkms remove` never ran at all.
+        if [ -n "$(dkms status -m "$NAME" -v "$VERSION")" ]; then
             dkms remove -m "$NAME" -v "$VERSION" --all
         fi
     ;;
