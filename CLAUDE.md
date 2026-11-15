@@ -1902,10 +1902,29 @@ learned the hard way:
   it is removed on completion. Naming it as the completion test was backwards.
 
   **So there is no field that confirms a clean review of a given head**, and
-  that is the durable conclusion rather than a gap to fill later. A clean run
-  leaves *"No actionable comments"* with nothing attributing it to a commit,
-  and the Merge Risk block untouched — which is byte-for-byte what an
-  **unreviewed** head sitting behind an earlier clean review looks like.
+  that is the durable conclusion rather than a gap to fill later. **A clean run
+  can leave no trace whatsoever** — measured on `bb2cb5b`, 23:32: no review
+  object, no thread, the Merge Risk block unmoved at the previous head, and
+  **not even the *"No actionable comments"* line.**
+
+  ```
+  banner for f4e7700..bb2cb5b   appeared 23:30:30, gone by 23:32:22
+  review objects on PR #5       6, newest at f4e7700 — none at bb2cb5b
+  threads with commit_id bb2cb5b 0
+  recent_review_status block     absent
+  coveredCommitId                f4e7700  (not the head)
+  ```
+
+  **That retired the last candidate signal.** The table above says the result
+  line is *present* after a clean run, which is what the `494ec73` run did —
+  and the `bb2cb5b` run was equally clean and left the line **absent**. So its
+  presence tracks something other than cleanliness, and it cannot be used
+  either. Both halves of that table row were observed; the row is kept as a
+  record of what the field does, not as a test.
+
+  The upshot is unchanged in substance and now has no exceptions: a completed
+  clean run and a run that **never happened** are byte-for-byte identical in
+  the comment and in the API.
 
   **The procedure, which ends in "unknown" rather than in a guess:**
 
@@ -1914,7 +1933,8 @@ learned the hard way:
   | `Currently processing` | a run is in flight. Wait |
   | `Reviews paused` / `Review limit reached` | nothing was reviewed. Resume or trigger |
   | Merge Risk sha **== your head** | a run completed on your head **and found something**. Read the threads |
-  | a thread whose **`commit_id`** is your head | the same, from the API side |
+  | a thread or review object whose **`commit_id`** is your head | the same, from the API side |
+  | you watched the banner name your head and then vanish, **and** no thread or review object carries that `commit_id` | it completed and found nothing — **the only way to establish clean** |
   | anything else | **unknown.** Do not record it as clean |
 
   **The one way to confirm a *completed* run on a specific head is to watch
