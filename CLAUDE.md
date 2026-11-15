@@ -2057,11 +2057,19 @@ Field (ERAM, ByteAcc, Lock, Preserve)
 }
 ```
 
-**So `ec_read(0xB4)` here would be the dead `temp3` failure exactly.** The
-address is inside `ERAM`'s declared `0xFF` size and far past its last field, so
-it reads an undefined EC byte — the same thing `ec_read(0x62)` does. It does not
-touch `GDTY`, which lives at a *physical memory* address (`0xFC7E0800 + 0x26`)
-in a region the EC command interface cannot address at all.
+**So `ec_read(0xB4)` here reaches nothing the firmware describes.** The address
+is inside `ERAM`'s declared `0xFF` size and far past its last *named* field, so
+no AML field covers it — structurally the same position as `0x62`, which is why
+`temp3` is dead. **What that byte actually returns is not recorded here**: an
+`ec_read(0xB4)` has never been run on this machine, so the comparison is one of
+position, not of measured value. Flagged by review on PR #5, and the correction
+is worth taking — asserting a read's result from a field list is the same
+over-claim this file keeps catching.
+
+**The conclusion does not rest on it.** `ec_read` of *any* address cannot reach
+`GDTY`, which lives at a *physical memory* address (`0xFC7E0800 + 0x26`) in a
+region the EC command interface does not address at all — and the DMI gating
+rules the code path out before that even matters.
 
 **Three things this settles, and the first is the durable one:**
 
@@ -4927,7 +4935,7 @@ Sorted by how likely each is to be accepted, for when that time comes:
 | `hwmon_read()` error propagation | Returned success with `*val` unwritten on a failed read |
 | NULL-safe DMI family match | Four unchecked `strcmp`s on `DMI_PRODUCT_FAMILY` |
 | `fan_lock` | Three entry points doing read-modify-write on `fan_mode` unserialised |
-| **Debian `prerm` never ran `dkms remove`** | `if [ "$(dkms status -m $NAME)"]; then` — **the space before `]` is missing**, so `[` never sees its terminator, exits with `missing ']'`, and the if-condition reads false. `dkms remove` was therefore **skipped on every remove and upgrade**, leaving the registration behind. Verified by running it: `sh: [: missing ']'`. **Present verbatim in upstream `4b817ea`**, so it is upstream's bug and not the rename's, and it hits any Debian user who removes or upgrades the package. The smallest possible patch and the easiest of this list to argue. **Still present on `upstream/master` as of 15 Nov 2026** — `d184209` edited that very `case` statement (the `dconfigure` typo one line above) and the broken test survived the edit, which is evidence it will not be found without a patch. The typo half is fixed here; see "The prerm typo, taken" |
+| **Debian `prerm` never ran `dkms remove`** | `if [ "$(dkms status -m $NAME)"]; then` — **the space before `]` is missing**, so `[` never sees its terminator, exits with `missing ']'`, and the if-condition reads false. `dkms remove` was therefore **skipped on every remove and upgrade**, leaving the registration behind. Verified by running it: `sh: [: missing ']'`. **Present verbatim in upstream `4b817ea`**, so it is upstream's bug and not the rename's, and it hits any Debian user who removes or upgrades the package. The smallest possible patch and the easiest of this list to argue. **Fixed here, and still present on `upstream/master` as of 15 Nov 2026.** Locally `pkg-files/debian/prerm` captures the status into `registered` and tests `[ -n "$registered" ]`, so the bracket is terminated and `dkms remove` runs — verified by CI, which installs the package, removes it and asserts the DKMS registration is gone. Upstream's `d184209` edited that very `case` statement (the `dconfigure` typo one line above) and the broken test survived the edit, which is evidence it will not be found without a patch. The typo half is fixed here too; see "The prerm typo, taken". Both halves of this row describe upstream's state, not ours |
 
 The rename, the `fan_preset` ring and the hotkey input device are this fork's
 own direction and should **not** be offered upstream without asking first — the

@@ -78,15 +78,31 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install build and packaging dependencies
+        id: deps
         run: |
           set -eu
-          # kmodtool and buildsys-build-rpmfusion-kerneldevpkgs-* live in RPM
-          # Fusion, not Fedora proper, and gigabyte-laptop-kmod.spec BuildRequires
-          # both. debug-driver.yml gets them by pointing mock at the RPM Fusion
-          # repo; a plain container has to enable it.
-          dnf -y install "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
           dnf -y install kernel-devel gcc make rpm-build dkms \
                          dnf-plugins-core redhat-rpm-config elfutils-libelf-devel
+          # kmodtool and buildsys-build-rpmfusion-kerneldevpkgs-* live in RPM
+          # Fusion, not Fedora proper, and gigabyte-laptop-kmod.spec needs both:
+          # it *calls* kmodtool from %{expand:%(...)}, so without it the spec
+          # cannot even be parsed. debug-driver.yml gets them by pointing mock at
+          # an explicit RPM Fusion URL; a container has to enable the repo.
+          #
+          # Tolerated, not required. A Fedora release past EOL has no live RPM
+          # Fusion metadata -- fc42 fails with "Usable URL not found" and then
+          # "No match for argument: buildsys-build-rpmfusion-kerneldevpkgs-akmod"
+          # -- and that is a fact about the release, not a defect in this repo.
+          # The DKMS half needs none of it, so it still runs; only the kmod and
+          # akmod steps are skipped, and loudly.
+          KMOD=yes
+          dnf -y install "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" || KMOD=no
+          [ "$KMOD" = yes ] && { dnf -y install kmodtool || KMOD=no; }
+          command -v kmodtool >/dev/null 2>&1 || KMOD=no
+          echo "kmod=$KMOD" >> "$GITHUB_OUTPUT"
+          [ "$KMOD" = yes ] \
+            && echo "::notice::RPM Fusion and kmodtool available -- kmod and akmod steps will run" \
+            || echo "::warning::RPM Fusion/kmodtool unavailable on this release (EOL?); skipping the kmod and akmod steps, testing the DKMS package only"
 
       - name: Record the kernel this release ships
         id: kver
@@ -119,10 +135,10 @@ jobs:
           cp pkg-files/rpm/*.spec ~/rpmbuild/SPECS/
           echo "VER=$VER" >> "$GITHUB_ENV"
 
-      - name: Build all three RPMs
+      - name: Build the two kmodtool-free RPMs
         run: |
           set -eu
-          for s in gigabyte-laptop-dkms gigabyte-laptop-kmod-common gigabyte-laptop-kmod; do
+          for s in gigabyte-laptop-dkms gigabyte-laptop-kmod-common; do
             echo "=== $s ==="
             # builddep rather than --nodeps, so BuildRequires is genuinely
             # validated here as well as in mock.
@@ -149,19 +165,31 @@ jobs:
       - name: Compile through DKMS, the way a user gets it
         run: |
           set -eu
-          # --kernelsourcedir is required here. Fedora's kernel-devel unpacks to
-          # /usr/src/kernels/<ver>, and the /lib/modules/<ver>/build symlink that
-          # DKMS looks for by default is created when the matching KERNEL is
-          # installed -- which it is not, in a container. Without this, DKMS
-          # exits 21 "Your kernel headers ... cannot be found".
-          dkms build -m gigabyte-laptop -v "$VER" \
-                     -k "${{ steps.kver.outputs.kver }}" \
-                     --kernelsourcedir "/usr/src/kernels/${{ steps.kver.outputs.kver }}"
+          # Fedora's kernel-devel unpacks to /usr/src/kernels/<ver>, while the
+          # /lib/modules/<ver>/build symlink comes from the matching KERNEL
+          # package -- which a container does not install. Create it, so the
+          # container looks like a real Fedora system.
+          #
+          # --kernelsourcedir is NOT the fix, and trying it first showed why:
+          # it got DKMS past its own header check, then the build still failed
+          # because dkms.conf hardcodes KDIR=/lib/modules/${kernelver}/build
+          # (dkms.conf:4), so that is the path `make` receives whatever DKMS was
+          # told. Supplying the symlink tests the shipped dkms.conf exactly as
+          # users get it, rather than overriding it to make the test pass.
+          KVER="${{ steps.kver.outputs.kver }}"
+          mkdir -p "/lib/modules/$KVER"
+          ln -sfn "/usr/src/kernels/$KVER" "/lib/modules/$KVER/build"
+          dkms build -m gigabyte-laptop -v "$VER" -k "$KVER"
           find /var/lib/dkms/gigabyte-laptop -name 'gigabyte-laptop.ko*' -print
 
-      - name: Rebuild the akmod SRPM, which is what akmods does at boot
+      - name: Build the kmod spec and rebuild its akmod SRPM
+        if: steps.deps.outputs.kmod == 'yes'
         run: |
           set -eu
+          # This spec calls kmodtool, so it is built here rather than in the
+          # loop above, which must work on a release with no live RPM Fusion.
+          dnf -y builddep "$HOME/rpmbuild/SPECS/gigabyte-laptop-kmod.spec"
+          rpmbuild -bb "$HOME/rpmbuild/SPECS/gigabyte-laptop-kmod.spec"
           # The akmod package's whole payload is a source RPM; akmods rebuilds it
           # for the running kernel. Passing --define "kernels <ver>" is what makes
           # kmodtool emit kernel_versions, so this is the one route that exercises
