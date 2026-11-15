@@ -1788,7 +1788,16 @@ learned the hard way:
   else — `master`, which is where the full-diff review surfaces live — is
   **never** reviewed, and needs the 🔍 Trigger review checkbox or an
   `@coderabbitai review` comment. On a `master`-based PR, silence means
-  nothing; on a default-based one, silence is a real result.
+  nothing at all.
+
+  **On a default-based one, silence still is not a result** — and this said
+  *"silence is a real result"* until the next review caught it, which is an
+  over-correction in the opposite direction from the headline it was fixing. A
+  default-branch review can be rate-limited or auto-paused just like any other,
+  and both of those clear their banner without reviewing anything. So an
+  auto-review being *possible* is not evidence that one *happened*: the status
+  still has to be established by the procedure below, and until it is, it is
+  **unknown**.
 - **The included-review allowance is not a fixed number — it is derived from
   your own trailing usage, and no figure recorded here will stay true.** The
   bot states it in each review's **Review info**, and on PR #5 it said, two
@@ -1893,7 +1902,7 @@ learned the hard way:
   |---|---|---|
   | `Currently processing new changes` | absent | absent |
   | `Reviewing files ... between X and Y` | **absent** | absent |
-  | `No actionable comments were generated` | **present** | **absent** |
+  | `No actionable comments were generated` | **inconsistent** — present after `494ec73`, **absent** after `bb2cb5b`, both clean | **absent** |
   | Merge Risk `sourceCommitId` / `coveredCommitId` | **unchanged** | **both == head** |
   | `get_reviews` from the API | **no object created** | object created |
 
@@ -1934,7 +1943,7 @@ learned the hard way:
   | `Reviews paused` / `Review limit reached` | nothing was reviewed. Resume or trigger |
   | Merge Risk sha **== your head** | a run completed on your head **and found something**. Read the threads |
   | a thread or review object whose **`commit_id`** is your head | the same, from the API side |
-  | you watched the banner name your head and then vanish, **and** no thread or review object carries that `commit_id` | it completed and found nothing — **the only way to establish clean** |
+  | you watched the banner name your head and then vanish, **and** no `Review limit reached` or `Reviews paused` notice appeared at any point, **and** no thread or review object carries that `commit_id` | it completed and found nothing — **the only way to establish clean** |
   | anything else | **unknown.** Do not record it as clean |
 
   **The one way to confirm a *completed* run on a specific head is to watch
@@ -1946,10 +1955,17 @@ learned the hard way:
 
   **It says nothing about the outcome, and this paragraph said "a clean run"
   until the next review corrected it.** The transition it cites as its example
-  produced **a finding**, three lines above. Read completion from the
-  transition and the outcome from the result fields: *"No actionable
-  comments"* for clean, a Merge Risk sha at your head for a run that found
-  something.
+  produced **a finding**, three lines above. Take completion from the
+  transition and the outcome from the table: a Merge Risk sha or a
+  `commit_id` at your head for a run that found something, and the
+  transition-plus-nothing-recorded row for one that did not.
+
+  **This sentence named *"No actionable comments"* as the clean test until the
+  review after that**, which it could not be: the `bb2cb5b` measurement
+  recorded twenty lines above had already retired that field. Adding the
+  observation and leaving the sentence it falsified is the specific way this
+  section keeps going wrong — not over-claiming this time, but **failing to
+  propagate a correction through the document that states it.**
 
   **And a timestamp is not an identity — the same review proved it with its own
   data.** The table row above said to match a thread whose `created_at` is
