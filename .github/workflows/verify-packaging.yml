@@ -21,6 +21,15 @@
 #             the one that would have caught the `[ "$x"]` prerm bug, which
 #             survived upstream and every green run here because nothing in CI
 #             had ever read that file.
+#   arch      parse and lint the PKGBUILD, build it, install it, compile
+#             through DKMS, remove it. The PKGBUILD cannot be built from its
+#             own source= line -- it fetches an UPSTREAM release and installs
+#             gigabyte-laptop.c out of it, and upstream's published 0.2.0
+#             tarball carries aorus-laptop.c, measured -- so the job stages the
+#             repo's own tarball and uses the shipped PKGBUILD otherwise
+#             verbatim. The assertion that matters is on the built package's
+#             CONTENTS, because package() ends with a command that always
+#             succeeds and so swallows a failed install.
 #
 # Kernel floor: the driver needs APIs newer than 6.8 (the platform_profile
 # class API, power_supply_ext, devm_battery_hook_register). Each job prints the
@@ -505,3 +514,270 @@ jobs:
           dpkg --purge gigabyte-laptop-dkms
           test ! -f /etc/modules-load.d/gigabyte-laptop.conf \
             || { echo "purge left the conffile behind"; exit 1; }
+
+  arch:
+    name: Arch (build, install, dkms)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install build and packaging dependencies
+        run: |
+          set -eu
+          pacman -Syu --noconfirm --needed dkms linux-headers namcap git
+          # makepkg refuses to run as root, by design. base-devel supplies
+          # fakeroot, so a plain user is all that is missing.
+          useradd -m builder
+          install -d -o builder -g builder /tmp/build
+
+      - name: Parse the shipped PKGBUILD and lint it
+        run: |
+          set -eu
+          cp pkg-files/archlinux/PKGBUILD /tmp/build/
+          chown builder:builder /tmp/build/PKGBUILD
+          cd /tmp/build
+          # --printsrcinfo is the cheapest proof the file parses at all, and it
+          # prints the metadata makepkg derives. Nothing had ever run it.
+          su builder -s /bin/bash -c 'cd /tmp/build && makepkg --printsrcinfo' \
+            | sed -e 's/^/  /'
+          # namcap is advisory, so it reports and never fails the job.
+          namcap PKGBUILD | sed -e 's/^/  namcap: /' || true
+
+      - name: Record what parsing costs, because it reaches the network
+        run: |
+          set -eu
+          # sha256sums is computed by a `curl` INSIDE the PKGBUILD, so it runs
+          # on every parse -- makepkg, namcap, any AUR tooling. Two consequences
+          # measured locally before this job existed:
+          #   * offline, or GitHub down, the checksum comes back EMPTY
+          #   * online, the sum is fetched from the same host as the tarball,
+          #     so it cannot detect a tampered release
+          # Reported rather than asserted: it is a known property of the file,
+          # not a regression, and failing here would be noise on every run.
+          install -d -o builder -g builder /tmp/stub
+          printf '#!/bin/sh\nexit 6\n' > /tmp/stub/curl
+          chmod 0755 /tmp/stub/curl
+          sums=$(su builder -s /bin/bash -c '
+                   cd /tmp/build
+                   PATH="/tmp/stub:$PATH"
+                   . ./PKGBUILD 2>/dev/null
+                   printf "%s" "${sha256sums[0]}"')
+          if [ -z "$sums" ]; then
+            echo "::warning::PKGBUILD computes sha256sums with curl at parse time; with the network down it yields an EMPTY checksum. A literal sum belongs here."
+          else
+            echo "::notice::the offline-parse probe did not reproduce an empty checksum; sha256sums came back as '$sums'"
+          fi
+
+      - name: Stage the tarball, because the shipped source= cannot be fetched
+        run: |
+          set -eu
+          # The PKGBUILD fetches a GitHub release of the UPSTREAM repository and
+          # then installs gigabyte-laptop.c out of it. Measured against the real
+          # release: upstream's published 0.2.0 driver.tar.gz contains
+          #
+          #     Makefile  aorus-laptop.c  dkms.conf
+          #
+          # so the file package() installs is not in it -- upstream never took
+          # the rename, and release-driver.yml has never run here, so no release
+          # with the new name exists anywhere. The PKGBUILD's own comment says
+          # as much. It is therefore UNBUILDABLE from its shipped source= today.
+          #
+          # Stage the repo's own tarball under the name makepkg expects, built
+          # exactly the way debug-driver.yml and release-driver.yml build it.
+          # makepkg finds a source already present in the build directory and
+          # skips the download, so the PKGBUILD itself is used verbatim --
+          # --skipchecksums is needed only because a locally built tarball can
+          # never match a published sum.
+          tar -czf /tmp/build/driver.tar.gz \
+            Makefile gigabyte-laptop.c dkms.conf gigabyte-laptop.conf
+          chown builder:builder /tmp/build/driver.tar.gz
+          tar -tzf /tmp/build/driver.tar.gz | sed -e 's/^/  staged: /'
+
+      - name: Build the package
+        run: |
+          set -eu
+          cd /tmp/build
+          su builder -s /bin/bash -c 'cd /tmp/build && makepkg -f --nodeps --skipchecksums --noconfirm'
+          ls -la ./*.pkg.tar.* | sed -e 's/^/  /'
+
+      - name: Inspect the package before installing it
+        run: |
+          set -eu
+          cd /tmp/build
+          PKG=$(ls -1 ./*.pkg.tar.* | head -1)
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+          # Normalise the listing instead of assuming its shape. makepkg tars
+          # from inside $pkgdir, and whether the entries carry a leading "./"
+          # is not something to guess: an assertion written against the wrong
+          # form fails for a reason that has nothing to do with the package.
+          bsdtar -tf "$PKG" | sed -e 's|^\./||' > /tmp/build/contents
+          grep -v '^\.' /tmp/build/contents | sed -e 's/^/  /'
+          VER=$(su builder -s /bin/bash -c 'cd /tmp/build && . ./PKGBUILD 2>/dev/null && printf %s "$pkgver"')
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          # THE assertion for this job, and it is load-bearing rather than
+          # decorative. package() runs
+          #     install -Dt DIR -m644 Makefile gigabyte-laptop.c dkms.conf
+          # and a function's exit status is its LAST command's -- here the
+          # modules-load.d write, which always succeeds. So a missing source
+          # file is swallowed at the function level, and whether makepkg's own
+          # errexit catches it is measured in the next step. Asserting the
+          # CONTENTS catches a silently incomplete package either way.
+          for f in "usr/src/gigabyte-laptop-${VER}/Makefile" \
+                   "usr/src/gigabyte-laptop-${VER}/gigabyte-laptop.c" \
+                   "usr/src/gigabyte-laptop-${VER}/dkms.conf" \
+                   "etc/modules-load.d/gigabyte-laptop.conf"; do
+            grep -qx "$f" /tmp/build/contents \
+              || { echo "::error::the package does not contain $f"; exit 1; }
+          done
+          # @PKGVER@ must have been substituted. Note this only bites for a
+          # tarball built straight from the repo: release-driver.yml substitutes
+          # it before tarring, so on a real release the PKGBUILD's sed is a
+          # no-op and this would pass for the wrong reason.
+          conf=$(grep -m1 -E "(^|\./)usr/src/gigabyte-laptop-${VER}/dkms\.conf$" \
+                   <(bsdtar -tf "$PKG"))
+          bsdtar -xOf "$PKG" "$conf" \
+            | grep -q "PACKAGE_VERSION=\"${VER}\"" \
+            || { echo "::error::@PKGVER@ was not substituted"; exit 1; }
+
+      - name: Does makepkg abort when a source file is missing?
+        run: |
+          set -eu
+          # Answers the question the step above leaves open, and decides whether
+          # that content assertion is the only guard or merely a second one.
+          # Build again from a tarball with gigabyte-laptop.c removed -- which
+          # is precisely upstream's published release -- in a throwaway
+          # directory so the real package is untouched.
+          install -d -o builder -g builder /tmp/probe
+          cp /tmp/build/PKGBUILD /tmp/probe/
+          tar -czf /tmp/probe/driver.tar.gz Makefile dkms.conf gigabyte-laptop.conf
+          chown -R builder:builder /tmp/probe
+          cd /tmp/probe
+          if su builder -s /bin/bash -c 'cd /tmp/probe && makepkg -f --nodeps --skipchecksums --noconfirm' \
+               > /tmp/probe/log 2>&1; then
+            echo "::warning::makepkg exited 0 with gigabyte-laptop.c absent -- package() swallows the install failure and makepkg does not catch it. The content assertion in the previous step is the ONLY thing standing between this and an inert package."
+            bsdtar -tf /tmp/probe/*.pkg.tar.* | grep -v '^\.' | sed -e 's/^/  built anyway: /'
+          else
+            echo "::notice::makepkg aborted on the missing source file, so its errexit does catch this; the content assertion is a second guard rather than the only one"
+            tail -5 /tmp/probe/log | sed -e 's/^/  /'
+          fi
+
+      - name: Record the kernel this image ships, and whether it is new enough
+        id: kver
+        run: |
+          set -eu
+          KVER=$(ls -1 /usr/lib/modules | sort -V | tail -1)
+          echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+          echo "::notice::Arch headers $KVER"
+          # dkms.conf hardcodes KDIR=/lib/modules/${kernelver}/build, so that
+          # exact path has to resolve. On Arch /lib is a symlink to /usr/lib, so
+          # it should -- asserted rather than assumed, because this is the very
+          # thing that needed a hand-made symlink on the Fedora containers.
+          test -d "/lib/modules/$KVER/build" \
+            || { echo "::error::/lib/modules/$KVER/build does not resolve, so the shipped dkms.conf cannot work here"; exit 1; }
+          # Same kbuild probe as the Debian job: ask the kernel's own build
+          # system, never a guessed header path, and DEFINE objects of the two
+          # types rather than pointers to them -- a pointer to an incomplete
+          # type is legal C and would answer "yes" on a kernel that cannot
+          # build the driver.
+          K="/lib/modules/$KVER/build"
+          probe=$(mktemp -d)
+          printf 'obj-m += t.o\n' > "$probe/Kbuild"
+          printf '#include <linux/module.h>\nMODULE_LICENSE("GPL");\n' > "$probe/t.c"
+          if ! make -C "$K" M="$probe" modules > "$probe/empty.log" 2>&1; then
+            cat "$probe/empty.log"
+            echo "::error::an empty module will not build against $KVER, so this job cannot tell an old kernel from a broken toolchain"
+            exit 1
+          fi
+          printf '%s\n' \
+            '#include <linux/module.h>' \
+            '#include <linux/platform_profile.h>' \
+            '#include <linux/power_supply.h>' \
+            'static const struct platform_profile_ops probe_ops;' \
+            'static const struct power_supply_ext probe_ext;' \
+            'const unsigned long gigabyte_floor_probe[] =' \
+            '        { sizeof(probe_ops), sizeof(probe_ext) };' \
+            'MODULE_LICENSE("GPL");' > "$probe/t.c"
+          if make -C "$K" M="$probe" modules > "$probe/api.log" 2>&1; then
+            echo "modern=yes" >> "$GITHUB_OUTPUT"
+            echo "::notice::$KVER has platform_profile_ops and power_supply_ext -- compiling"
+          else
+            echo "modern=no" >> "$GITHUB_OUTPUT"
+            cat "$probe/api.log"
+            echo "::warning::$KVER lacks platform_profile_ops or power_supply_ext; skipping the compile steps and testing the packaging only"
+          fi
+
+      - name: Install it and see whether it registers with DKMS
+        id: install
+        run: |
+          set -eu
+          cd /tmp/build
+          pacman -U --noconfirm "$PKG"
+          test -f /etc/modules-load.d/gigabyte-laptop.conf
+          # Unlike the .deb and the RPMs, this package carries NO install
+          # scriptlet -- there is no .install file in pkg-files/archlinux at
+          # all. On Arch that is usually fine, because the dkms package ships
+          # pacman hooks keyed on usr/src/*/dkms.conf. Whether they fired is a
+          # question about this image, so print the evidence and let the run
+          # answer it rather than asserting a guess.
+          ls -1 /usr/share/libalpm/hooks/ 2>/dev/null | sed -e 's/^/  hook: /' || echo "  (no hooks directory)"
+          if ! status=$(dkms status -m gigabyte-laptop 2>&1); then
+            echo "::error::dkms status failed, so registration cannot be judged:"; echo "$status"; exit 1
+          fi
+          case "$status" in
+            *gigabyte-laptop*)
+              echo "registered=yes" >> "$GITHUB_OUTPUT"
+              echo "::notice::a pacman hook registered the module: $status" ;;
+            *)
+              echo "registered=no" >> "$GITHUB_OUTPUT"
+              echo "::warning::installing the package did NOT register it with DKMS -- no .install scriptlet and no hook picked it up, so the module would never be built on a user's machine. Adding it by hand so the source is still proven buildable."
+              dkms add -m gigabyte-laptop -v "$VER" ;;
+          esac
+
+      - name: Compile through DKMS, the way a user gets it
+        if: steps.kver.outputs.modern == 'yes'
+        env:
+          KVER: ${{ steps.kver.outputs.kver }}
+        run: |
+          set -eu
+          dkms build -m gigabyte-laptop -v "$VER" -k "$KVER"
+          find /var/lib/dkms/gigabyte-laptop -name 'gigabyte-laptop.ko*' -print \
+            | sed -e 's/^/  /'
+          find /var/lib/dkms/gigabyte-laptop -name 'gigabyte-laptop.ko*' \
+            | grep -q . || { echo "::error::dkms build produced no module"; exit 1; }
+
+      - name: Remove it and assert the DKMS registration is gone
+        run: |
+          set -eu
+          dkms remove -m gigabyte-laptop -v "$VER" --all 2>/dev/null || true
+          pacman -R --noconfirm gigabyte-laptop-dkms
+          # Judge the QUERY and its CONTENT separately. `dkms status | grep -q`
+          # conflates them: a failed query printing nothing to stdout makes grep
+          # exit non-zero, which reads exactly like a query that succeeded and
+          # found nothing -- so a cleanup failure would pass. Same shape as the
+          # Debian job's assertion and the shipped prerm's own guard.
+          err=$(mktemp)
+          if ! remaining=$(dkms status -m gigabyte-laptop 2>"$err"); then
+            echo "::error::dkms status failed, so the removal cannot be confirmed:"
+            cat "$err"; exit 1
+          fi
+          case "$remaining" in
+            *gigabyte-laptop*)
+              echo "::error::the DKMS registration survived removal:"; echo "$remaining"; exit 1 ;;
+          esac
+          # pacman has no conffile concept: /etc files are deleted on removal
+          # unless the PKGBUILD lists them in backup=(). This one does not, so
+          # the config goes. Asserted as the real behaviour, and flagged --
+          # dpkg keeps it until purge, which is the friendlier contract for a
+          # file a user may have edited.
+          if [ -e /etc/modules-load.d/gigabyte-laptop.conf ]; then
+            echo "::notice::pacman kept /etc/modules-load.d/gigabyte-laptop.conf on removal"
+          else
+            echo "::warning::pacman deleted /etc/modules-load.d/gigabyte-laptop.conf on removal, because the PKGBUILD has no backup=() array. dpkg keeps it until purge."
+          fi
+          if [ -d "/usr/src/gigabyte-laptop-${VER}" ]; then
+            echo "::error::the source tree survived removal"
+            exit 1
+          fi

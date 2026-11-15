@@ -1923,12 +1923,13 @@ covers the `Release: 2` bump, the `Obsoletes` bounds, `Source1:
 gigabyte-laptop.conf`, the `%{_builddir}` fix and the new `%post`/`%preun`
 scriptlets. Treat a red build here as a real regression, not CI noise.
 
-**And it is RPM only — Arch is still untested by anything, Debian no longer
-is.** Corrected 15 Nov 2026: `verify-packaging.yml` builds, installs, compiles
-and removes the Debian package on sid and trixie, so the gap this paragraph
-describes is now **`pkg-files/archlinux/PKGBUILD` alone** — never parsed, let
-alone built. The reasoning below is unchanged and is why the Debian half was
-added first; read `debian/` in it as historical.
+**And it is RPM only — which stopped being true twice on 15 Nov 2026.**
+`verify-packaging.yml` now builds, installs, compiles and removes the Debian
+package on sid and trixie, **and** parses, builds, installs and removes the
+Arch package. So this paragraph's gap is **closed**, and the reasoning below is
+kept because it is why the Debian half was added first — read `debian/` and
+`archlinux/` in it as historical. What the Arch job found is under
+"The Arch package cannot be built from its own PKGBUILD".
 
 ~~The Debian and Arch packaging is untested by anything.~~
 There are **zero** occurrences of `debian`, `dpkg`, `pbuilder` or `sbuild`
@@ -2027,6 +2028,115 @@ rehearsal caught before it was committed. And a pipeline's exit status is its
 **last** command, so `dkms status ... | tee` cannot fail a step without
 `pipefail`; the presence checks work because the `grep` that follows reads an
 empty file.
+
+#### The Arch package cannot be built from its own PKGBUILD — 15 Nov 2026
+
+**`pkg-files/archlinux/PKGBUILD` had never been parsed by anything, and the
+first thing that parsed it found it unbuildable.** Not "needs a tweak" —
+unbuildable from the source it names, today, by anyone.
+
+**Its `source=` fetches an UPSTREAM GitHub release and installs
+`gigabyte-laptop.c` out of it.** Measured against the real release rather than
+inferred from a tag:
+
+```
+$ curl -sSL .../releases/download/0.2.0/driver.tar.gz | tar -tz
+Makefile
+aorus-laptop.c
+dkms.conf
+```
+
+**Upstream never took the rename**, so its tarball carries the old filename and
+`package()` installs a file that is not in it. There is no release with the new
+name anywhere, either: `release-driver.yml` has never run and no tag has ever
+been pushed to the fork. The PKGBUILD's own comment says exactly this — it is a
+*known* waiting-on-a-release state, not a surprise — but nothing had ever
+demonstrated the consequence.
+
+**And the consequence is worse than a failed build, which is the real
+finding.** Running the shipped `package()` against that tarball:
+
+```
+exit=0
+install: cannot stat 'gigabyte-laptop.c': No such file or directory
+resulting package contents:
+  ./etc/modules-load.d/gigabyte-laptop.conf
+  ./usr/src/gigabyte-laptop-0.2.0/Makefile
+  ./usr/src/gigabyte-laptop-0.2.0/dkms.conf
+```
+
+**`package()` exits 0.** A shell function's status is its *last* command's, and
+the last command here is the `modules-load.d` write, which always succeeds. So
+the failed `install` is swallowed at the function level and the result is a
+**package that installs cleanly and contains no driver source** — DKMS would
+then fail later, somewhere else, for a reason with no connection to the cause.
+
+Whether makepkg's own errexit catches it before that is a question about
+makepkg, so the job *measures* it: it builds a second time from a tarball with
+the file removed and reports which way it went. **Either way the assertion is
+on the built package's CONTENTS**, which catches a silently incomplete package
+regardless — assert the outcome, not the mechanism.
+
+**`sha256sums` is computed by a `curl` inside the PKGBUILD**, so it runs on
+every *parse* — `makepkg --printsrcinfo`, `namcap`, any AUR tooling. Measured
+both ways locally:
+
+| | result |
+|---|---|
+| network up | a valid 64-char sum, **fetched from the same host as the tarball** |
+| `curl` fails | `sha256sums=('')` — an **empty** checksum |
+
+So it is useless as integrity (whoever can serve a bad tarball serves a
+matching `sum.txt`) and it turns an offline parse into an integrity error
+rather than a network one. The job reports this and does **not** fail on it:
+it is a documented property of the file, and a red run on every push would be
+noise. **The fix is a literal sum, and it needs a release to be a literal
+of** — which is the owner's call, not CI's.
+
+**Two more differences from the other two families, both reported by the job
+rather than assumed**, because they are facts about Arch and this image:
+
+- **There is no `.install` scriptlet** — `pkg-files/archlinux/` contains the
+  PKGBUILD and nothing else. The `.deb` has `postinst`/`prerm` and the RPMs
+  have `%post`/`%preun`; this has neither. Arch usually does not need one
+  because the `dkms` package ships pacman hooks keyed on `usr/src/*/dkms.conf`,
+  so the job prints the hooks present and the resulting `dkms status` instead
+  of asserting a guess. If nothing registered it, that is the same class of
+  defect as the Debian `prerm` bug and the job says so.
+- **No `backup=()` array**, so pacman deletes
+  `/etc/modules-load.d/gigabyte-laptop.conf` on removal. dpkg keeps it until
+  `--purge`. The job asserts whichever actually happens and flags the
+  difference; dpkg's contract is the friendlier one for a file a user may have
+  edited.
+
+**One trap for anyone reading the `@PKGVER@` assertion.** `release-driver.yml`
+substitutes the version *before* tarring, so on a real release tarball the
+PKGBUILD's own `sed` is a **no-op** and an assertion on `PACKAGE_VERSION` would
+pass for the wrong reason. It only does real work on a tarball built straight
+from the repo — which is what the job stages, so the check means something
+there and would not on a release.
+
+**Rehearsed before it ever ran**, on the parts that do not need Arch — a
+PKGBUILD is a bash script and `package()` only uses `sed` and `install`:
+
+```
+content assertion   listing=bare  complete        -> PASSES
+                    listing=bare  no driver .c    -> FAILS, naming the file
+                    listing=bare  stale @PKGVER@  -> FAILS, naming the cause
+                    listing=dot   (all three)     -> identical
+offline-sum probe   curl fails                    -> warns
+                    curl works                    -> notice, does NOT warn
+```
+
+**The listing format was a guess and is not any more.** The first version
+asserted against `bsdtar -tf` output directly, which bakes in whether makepkg's
+entries carry a leading `./`. Guess wrong and the job fails for a reason with
+nothing to do with the package — so the listing is normalised and the
+assertion was then proven against **both** forms. The rehearsal also caught a
+bug in the rehearsal itself before it caught anything else: the harness left
+the step's own `PKG=$(ls ...)` line in, which overwrote the fixture and failed
+all six cases, including the ones that must pass. **All-fail is as suspicious
+as all-pass.**
 
 #### Building the Debian package: it runs from `pkg-files/`
 
