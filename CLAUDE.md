@@ -1814,22 +1814,39 @@ learned the hard way:
   the `Reviews paused` block disappeared from the comment, and
   *"No actionable comments were generated in the recent review"* stayed, now
   with nothing above it to qualify it. At that moment the comment read like a
-  clean review of the head commit, and the head commit had still never been
+  clean review of the head commit, and the head commit had not yet been
   reviewed.
 
-  **The one field that cannot mislead is the coverage marker**, which names
-  the sha the verdict covers:
+  **I then wrote a rule from that one observation and it was wrong within
+  four minutes**, which is worth the space because the rule sounded better
+  than the thing it replaced. It said: *the one field that cannot mislead is
+  the Merge Risk coverage sha; compare it against HEAD.* Then a review of
+  `084eea4..494ec73` ran, reported **no actionable comments**, and the
+  coverage sha **stayed at `084eea4`** — so the rule would have called a
+  completed clean review "never reviewed".
 
-  ```
-  Merge Risk: Minimal · previous review 084ee
-  <!-- final_review_risk_coverage:{"sourceCommitId":"084eea46...",
-                                   "coveredCommitId":"084eea46..."} -->
-  ```
+  **What the fields actually mean**, checked against the API rather than
+  inferred from the comment:
 
-  Compare that sha against `HEAD`. Everything else in the comment — the
-  banner's presence, the findings count, the walkthrough — can be true of an
-  older commit and say nothing about the current one. **So the rule is: read
-  the sha, not the banner and not the absence of findings.**
+  | Field | What it tracks |
+  |---|---|
+  | `Reviewing files that changed ... between X and Y` | **the scope of the most recent run.** This is the one that answers "was the head reviewed" |
+  | `No actionable comments were generated` | the most recent run's *result* — stale text between runs, and present even mid-review |
+  | Merge Risk `coveredCommitId` | the last review that **produced findings**. A clean run does not advance it |
+  | `get_reviews` from the API | the same: **no review object is created when a run finds nothing.** 4/4 objects on this PR carried findings; the clean run created none |
+
+  **So API silence is not evidence either**, which is the trap one level down
+  from the comment. The honest procedure is to read the `between X and Y`
+  line for the scope and the result line for the verdict, and to treat the
+  coverage sha and the review list as lagging indicators that only move when
+  there is something to report.
+
+  **The meta-lesson is the one this file keeps paying for**: both the original
+  claim and its replacement were written from a single observation, and the
+  replacement was more confident than the thing it corrected. A rule about how
+  a tool behaves needs at least one case of each outcome — here, a run that
+  finds something *and* a run that finds nothing — before it is worth writing
+  down.
   Four ways a review can silently not happen, now: the star count, the base
   not being the default branch, the hourly allowance, and this.
 - The **Autofix** and **Generate docstrings** checkboxes push the bot's own
