@@ -1825,28 +1825,75 @@ learned the hard way:
   coverage sha **stayed at `084eea4`** — so the rule would have called a
   completed clean review "never reviewed".
 
-  **What the fields actually mean**, checked against the API rather than
-  inferred from the comment:
+  **Wrong again, and this is the third version — corrected 15 Nov 2026 by the
+  run that reviewed the correction.** The replacement rule said to read the
+  `between X and Y` scope line for the scope and the result line for the
+  verdict. **Neither field establishes that a review completed**, and this file
+  had already recorded why, twice, in the paragraphs the rule was written
+  between: a rate-limited run *"stops before reviewing at all -- it still
+  prints the scope it would have covered"*, and the result line is *"stale text
+  between runs, and present even mid-review"*. Pairing two fields that are each
+  unreliable does not produce a reliable one.
 
-  | Field | What it tracks |
+  **Caught live, in the worst possible way.** At 23:16:30 that comment carried
+  all three of these at once:
+
+  ```
+  Currently processing new changes in this PR ...        <- still running
+  Reviewing files that changed ... between 084eea4 and 9ff0c7e
+  No actionable comments were generated in the recent review.
+  ```
+
+  Read by the rule above, that says "9ff0c7e reviewed, clean". The run was
+  mid-flight and its actual outcome was **a finding** — on the very paragraph
+  stating the rule.
+
+  **What the fields actually do**, with both outcomes now observed for each,
+  which is the standard the previous correction set and did not meet:
+
+  | Field | after a **clean** run | after a run with **findings** |
+  |---|---|---|
+  | `Currently processing new changes` | absent | absent |
+  | `Reviewing files ... between X and Y` | **absent** | absent |
+  | `No actionable comments were generated` | **present** | **absent** |
+  | Merge Risk `sourceCommitId` / `coveredCommitId` | **unchanged** | **both == head** |
+  | `get_reviews` from the API | **no object created** | object created |
+
+  The scope line is the one that matters here: **it lives inside the
+  in-progress block**, so it is visible only while the answer is "not yet", and
+  it is removed on completion. Naming it as the completion test was backwards.
+
+  **So there is no field that confirms a clean review of a given head**, and
+  that is the durable conclusion rather than a gap to fill later. A clean run
+  leaves *"No actionable comments"* with nothing attributing it to a commit,
+  and the Merge Risk block untouched — which is byte-for-byte what an
+  **unreviewed** head sitting behind an earlier clean review looks like.
+
+  **The procedure, which ends in "unknown" rather than in a guess:**
+
+  | What you can see | What it means |
   |---|---|
-  | `Reviewing files that changed ... between X and Y` | **the scope of the most recent run.** This is the one that answers "was the head reviewed" |
-  | `No actionable comments were generated` | the most recent run's *result* — stale text between runs, and present even mid-review |
-  | Merge Risk `coveredCommitId` | the last review that **produced findings**. A clean run does not advance it |
-  | `get_reviews` from the API | the same: **no review object is created when a run finds nothing.** 4/4 objects on this PR carried findings; the clean run created none |
+  | `Currently processing` | a run is in flight. Wait |
+  | `Reviews paused` / `Review limit reached` | nothing was reviewed. Resume or trigger |
+  | Merge Risk sha **== your head** | a run completed on your head **and found something**. Read the threads |
+  | a thread whose `created_at` is after your push | the same, from the API side |
+  | anything else | **unknown.** Do not record it as clean |
 
-  **So API silence is not evidence either**, which is the trap one level down
-  from the comment. The honest procedure is to read the `between X and Y`
-  line for the scope and the result line for the verdict, and to treat the
-  coverage sha and the review list as lagging indicators that only move when
-  there is something to report.
+  **The one way to confirm a clean run on a specific head is to watch the
+  transition**: see the in-progress banner appear with your head in its scope
+  line, then see it gone. That ties a completion to a scope, which no
+  single later reading can do. It is what happened here — banner at 23:16:30
+  naming `9ff0c7e`, gone by 23:21:56 — and it is why this run's outcome is
+  known rather than inferred.
 
-  **The meta-lesson is the one this file keeps paying for**: both the original
-  claim and its replacement were written from a single observation, and the
-  replacement was more confident than the thing it corrected. A rule about how
-  a tool behaves needs at least one case of each outcome — here, a run that
-  finds something *and* a run that finds nothing — before it is worth writing
-  down.
+  **The meta-lesson, now paid for three times.** Each version of this rule was
+  written from a single observation and was more confident than the one it
+  replaced. The second even stated the right standard — *a rule about how a
+  tool behaves needs at least one case of each outcome before it is worth
+  writing down* — and then failed it, because "a clean run" and "a run that
+  finds something" were the two cases it enumerated, when the case that breaks
+  everything is **a run that has not happened yet**. Enumerate the states the
+  tool can be in, not just the outcomes it can report.
   Four ways a review can silently not happen, now: the star count, the base
   not being the default branch, the hourly allowance, and this.
 - The **Autofix** and **Generate docstrings** checkboxes push the bot's own
