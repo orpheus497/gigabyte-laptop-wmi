@@ -1784,6 +1784,33 @@ learned the hard way:
   review on a batch of real work, not a docs-only push, and do not fire several
   triggers in quick succession: three in a row exhausted it on 22 Oct 2026 and
   the fourth, which covered the actual fixes, never ran.
+- **Reviews AUTO-PAUSE on a branch under active development — a third skip
+  mechanism, seen 15 Nov 2026.** After two pushes in quick succession the bot
+  edited its summary in place to say:
+
+  ```
+  Reviews paused
+  It looks like this branch is under active development. To avoid overwhelming
+  you with review comments due to an influx of new commits, CodeRabbit has
+  automatically paused this review.
+    - Last reviewed commit: 084eea4
+    - Latest commit, not reviewed: 23ed9e5
+  ```
+
+  **It names the unreviewed commit, which is the one useful thing about it** —
+  the other skip mechanisms do not. Resume with `@coderabbitai resume`, or get
+  one review with `@coderabbitai review`; the setting behind it is
+  `reviews.auto_review.auto_pause_after_reviewed_commits`.
+
+  **And the same comment carried the line "No actionable comments were
+  generated in the recent review."** That reads as a clean bill of health and
+  sits directly above the notice saying nothing was reviewed. So this is the
+  third mechanism and the third time the same trap applies: **the bot edits one
+  comment in place, so an unreviewed push and a clean push look identical from
+  the thread list.** Read the banner, not the absence of findings.
+
+  Four ways a review can silently not happen, now: the star count, the base
+  not being the default branch, the hourly allowance, and this.
 - The **Autofix** and **Generate docstrings** checkboxes push the bot's own
   commits to the branch. Leave both unticked; the docstring one in particular
   would act on a Docstring Coverage check that does not apply to kernel C.
