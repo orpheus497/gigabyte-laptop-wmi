@@ -1940,11 +1940,29 @@ learned the hard way:
   | What you can see | What it means |
   |---|---|
   | `Currently processing` | a run is in flight. Wait |
-  | `Reviews paused` / `Review limit reached` | nothing was reviewed. Resume or trigger |
+  | any notice that the run did not review — `Reviews paused`, `Review limit reached`, `Review failed` | nothing was reviewed. Resume or trigger |
   | Merge Risk sha **== your head** | a run completed on your head **and found something**. Read the threads |
-  | a thread or review object whose **`commit_id`** is your head | the same, from the API side |
-  | you watched the banner name your head and then vanish, **and** no `Review limit reached` or `Reviews paused` notice appeared at any point, **and** no thread or review object carries that `commit_id` | it completed and found nothing — **the only way to establish clean** |
+  | a thread, or a **`coderabbitai[bot]`** review object **carrying a finding**, whose `commit_id` is your head | the same, from the API side |
+  | you watched the banner name your head and then vanish, **and** the comment carries no notice of a run that did not review, **and** nothing above matches that `commit_id` | it completed and found nothing — **the only way to establish clean** |
   | anything else | **unknown.** Do not record it as clean |
+
+  Two refinements from the review of the commit that added this row, both
+  worth the space because of *why* they were needed:
+
+  - **The exclusion is stated generally, not as a list of notices.** It named
+    `Reviews paused` and `Review limit reached`, the two mechanisms this
+    session happened to hit, and a `Review failed` notice would have cleared
+    the banner and been read as clean. **An enumeration of the ways a thing
+    can fail is always one short**, so the row asks instead that the comment
+    carry *no* such notice. `Review failed` is named as an example on the
+    reviewer's word; it has not been observed here, and the general form does
+    not depend on it.
+  - **A review object must be CodeRabbit's and must carry a finding.** A human
+    approval creates a review object with the head's `commit_id`, which the
+    earlier row would have read as "CodeRabbit reviewed and found something" —
+    on a fork where the owner can approve their own PR, that is not
+    hypothetical. All 8 objects on PR #5 are `coderabbitai[bot]`/`COMMENTED`,
+    so nothing here was misread; the rule was simply wrong for the next PR.
 
   **The one way to confirm a *completed* run on a specific head is to watch
   the transition**: see the in-progress banner appear with your head in its
