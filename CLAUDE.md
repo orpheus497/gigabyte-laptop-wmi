@@ -1809,6 +1809,27 @@ learned the hard way:
   comment in place, so an unreviewed push and a clean push look identical from
   the thread list.** Read the banner, not the absence of findings.
 
+  **And "read the banner" is not enough on its own — the banner goes away
+  before the stale line does.** Seen 15 Nov 2026 when the pause was lifted:
+  the `Reviews paused` block disappeared from the comment, and
+  *"No actionable comments were generated in the recent review"* stayed, now
+  with nothing above it to qualify it. At that moment the comment read like a
+  clean review of the head commit, and the head commit had still never been
+  reviewed.
+
+  **The one field that cannot mislead is the coverage marker**, which names
+  the sha the verdict covers:
+
+  ```
+  Merge Risk: Minimal · previous review 084ee
+  <!-- final_review_risk_coverage:{"sourceCommitId":"084eea46...",
+                                   "coveredCommitId":"084eea46..."} -->
+  ```
+
+  Compare that sha against `HEAD`. Everything else in the comment — the
+  banner's presence, the findings count, the walkthrough — can be true of an
+  older commit and say nothing about the current one. **So the rule is: read
+  the sha, not the banner and not the absence of findings.**
   Four ways a review can silently not happen, now: the star count, the base
   not being the default branch, the hourly allowance, and this.
 - The **Autofix** and **Generate docstrings** checkboxes push the bot's own
