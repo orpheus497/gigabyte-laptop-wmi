@@ -2800,8 +2800,27 @@ static struct wmi_driver gigabyte_laptop_event_driver = {
 	},
 	.id_table = gigabyte_laptop_event_ids,
 	.notify = gigabyte_laptop_wmi_notify,
-	// This firmware's events carry a 4-byte buffer, but tolerate none
-	.min_event_size = 0,
+	/*
+	 * This firmware's events carry a 4-byte buffer, but tolerate none.
+	 *
+	 * Commented out rather than deleted, because the intent is worth
+	 * keeping and the line is worth nothing. A static struct initialised
+	 * with designators zero-fills every member not named, so setting this
+	 * one to 0 is identical to omitting it -- there is no way for a plain
+	 * struct field to distinguish "unset" from "0". It never bought the
+	 * tolerance the comment claims; the zero does, and the zero is free.
+	 *
+	 * What it did cost is portability. `min_event_size` postdates kernel
+	 * 7.0, whose wmi.h has `notify_new` and `wmi_buffer` but not this
+	 * field, so naming it is a hard compile error there. With it out, the
+	 * driver builds clean against 7.0, which is what lets the packaging CI
+	 * compile-test on distro kernels rather than only on this machine's.
+	 *
+	 * Restore it only if a future kernel makes zero-size event delivery an
+	 * explicit opt-in -- and then behind a LINUX_VERSION_CODE guard, since
+	 * the field does not exist on everything this driver still builds for.
+	 */
+	// .min_event_size = 0,
 };
 
 static bool gigabyte_laptop_event_driver_live;
