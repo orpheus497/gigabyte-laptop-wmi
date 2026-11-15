@@ -1770,9 +1770,15 @@ learned the hard way:
 
   Either way: the 🔍 Trigger review checkbox or an `@coderabbitai review`
   comment. Pushes do not auto-review.
-- **The free tier allows one included review per hour**, and the bot says so
-  exactly: *"Review limit reached ... Next included review available in N
-  minutes"*. A run that hits the limit stops **before reviewing at all** -- it
+- **The included-review allowance is five per hour, not one — corrected
+  15 Nov 2026.** The bot stated it itself on PR #5: *"Included review
+  availability: This review used your included allowance. 3 included reviews
+  remain after this review. Your current allowance at 5 reviews per hour."* It
+  reviewed three times within forty minutes that day, so the October figure
+  below is stale. **The shape of the warning still matters** even though the
+  number moved, which is why the rest of this bullet stays: ~~the free tier
+  allows one included review per hour~~, and the bot says so exactly:
+  *"Review limit reached ... Next included review available in N minutes"*. A run that hits the limit stops **before reviewing at all** -- it
   still prints the scope it would have covered, which reads like a review that
   ran. Check for that warning before trusting an empty result. Spend the hour's
   review on a batch of real work, not a docs-only push, and do not fire several
@@ -1798,9 +1804,17 @@ Two consequences of using a PR this way:
 
 ### CI is green, it validates the packaging — and it never compiles the driver
 
-> **Read the third clause first if you are about to change code.** Everything
+> **Superseded 15 Nov 2026 as a statement about the present, and kept because
+> the diagnosis is still the reason the new workflow exists.** CI *does* compile
+> the driver now, on six jobs across three Fedora releases and two Debian
+> suites. See "The packaging is verified end to end now". Everything below is
+> accurate about `debug-driver.yml`, which is unchanged and still the only thing
+> that builds in mock — so read it as a description of that workflow rather than
+> of CI as a whole.
+>
+> ~~**Read the third clause first if you are about to change code.** Everything
 > below about greenness is accurate and still means nothing about whether
-> `gigabyte-laptop.c` builds. See "CI never compiles the driver".
+> `gigabyte-laptop.c` builds.~~
 
 Every pushed head has run the `Release driver (debug)` workflow to success on
 all four jobs. `920ca3b` and `75f870d` were the first two; `fc61b85`, `7e0ad94`,
@@ -1825,10 +1839,11 @@ squash orphans CI history, so **read greenness off the live branch** — the API
 or the Actions tab — and never off hashes recorded in this file. A hash here
 tells you what passed once; it cannot tell you what the branch is.
 
-#### CI never compiles the driver
+#### `debug-driver.yml` never compiles the driver — and this is why the other workflow exists
 
 **Found 26 Oct 2026, and it is the single most practically useful thing in this
-section.** Four green ticks on a code change mean the packaging is well-formed.
+section** — it is the finding `verify-packaging.yml` was built to answer, so it
+is now a *cause* rather than an outstanding hazard. Four green ticks on a code change mean the packaging is well-formed.
 They do **not** mean the driver compiles — nothing in CI ever invokes the
 compiler on it.
 
@@ -1851,7 +1866,11 @@ machine compiles it later. That is correct akmod behaviour and exactly what is
 wanted for distribution; it is also why a syntax error, a wrong type or a `W=1`
 warning shows four green ticks.
 
-**The local `make` is the only compile gate there is**, and every queued code
+~~**The local `make` is the only compile gate there is**~~ — **true until
+15 Nov 2026, and no longer: `verify-packaging.yml` compiles on six jobs,
+including `W=1 -Werror`.** Run it locally anyway, because it answers in seconds
+where CI answers in minutes. What is no longer true is that a push is
+unprotected. At the time this was written, every queued code
 change — the `gpu_boost` cap, the typed-read fix, a `battery_cycle` gate — is
 unprotected by CI until it is run. Run it before pushing; do not read a green
 run as a build.
@@ -1877,7 +1896,14 @@ covers the `Release: 2` bump, the `Obsoletes` bounds, `Source1:
 gigabyte-laptop.conf`, the `%{_builddir}` fix and the new `%post`/`%preun`
 scriptlets. Treat a red build here as a real regression, not CI noise.
 
-**And it is RPM only — the Debian and Arch packaging is untested by anything.**
+**And it is RPM only — Arch is still untested by anything, Debian no longer
+is.** Corrected 15 Nov 2026: `verify-packaging.yml` builds, installs, compiles
+and removes the Debian package on sid and trixie, so the gap this paragraph
+describes is now **`pkg-files/archlinux/PKGBUILD` alone** — never parsed, let
+alone built. The reasoning below is unchanged and is why the Debian half was
+added first; read `debian/` in it as historical.
+
+~~The Debian and Arch packaging is untested by anything.~~
 There are **zero** occurrences of `debian`, `dpkg`, `pbuilder` or `sbuild`
 anywhere under `.github/`, and the one composite action is `build-rpm`. So the
 three trees in `pkg-files/` get wildly unequal coverage: `rpm` is built in mock
@@ -1912,6 +1938,183 @@ check without testing it against the bug it is meant to find is the same
 failure mode as a guard written and never exercised** — see the `readlink -f`
 episode under PR #4's review, where a refusal that could not fire was committed
 in the same change as a fix for a refusal that only advised.
+
+### The packaging is verified end to end now — 15 Nov 2026
+
+**`.github/workflows/verify-packaging.yml` compiles the driver and exercises
+both package families, which is what `debug-driver.yml` never did.** Six jobs,
+all green on runs #7 and #8:
+
+```
+compile                                  make, then again with W=1 -Werror
+Fedora 42 / 43 / 44  (build, install, akmod)
+Debian sid / trixie  (build, install, remove)
+```
+
+**What each job asserts**, because "green" is only worth what it checked:
+
+| Job | Chain |
+|---|---|
+| `compile` | `make` against Fedora `kernel-devel`, then `W=1 KCFLAGS=-Werror`. Fails in seconds, so it fails first |
+| `fedora` | both kmodtool-free RPMs built with `dnf builddep` (so `BuildRequires` is validated outside mock) → install the DKMS package → assert the payload landed and `@PKGVER@` was substituted → `dkms build` → build the kmod spec → rebuild its akmod SRPM with `--define kernels` → assert a rebuilt kmod package holds a real `.ko` |
+| `debian` | `dpkg-buildpackage` → inspect the `.deb` before installing → install → assert DKMS registration → `dkms build` → exercise every `prerm` job name → remove → **assert the DKMS registration is gone** → purge |
+
+**The akmod SRPM rebuild is the load-bearing step on the Fedora side.** In
+akmod mode the kmod spec's `%prep`/`%build`/`%install` iterate zero times, so
+nothing else exercises them. Defining `kernels` makes kmodtool emit
+`kernel_versions`, which is exactly what `akmods` does on a user's machine at
+boot — so that one invocation is both the akmod test and the only coverage that
+spec's build section gets.
+
+**The Debian removal assertion is the load-bearing step on the other side, and
+it was exercised in both directions before it was committed.** Against a `.deb`
+built with upstream's `prerm` restored verbatim it fires and the registration is
+left behind; against the fixed one it passes. **A guard that has not been shown
+to fail is not a guard**, which is this file's own rule and the reason the test
+was run that way rather than merely written.
+
+#### Building the Debian package: it runs from `pkg-files/`
+
+**Undocumented anywhere until now, and not guessable from the tree.**
+`debian/rules` refers to `../dkms.conf`, `../Makefile`, `../gigabyte-laptop.c`
+and `../gigabyte-laptop.conf`, so `..` has to resolve to the repo root, which
+means the build runs one level down:
+
+```sh
+cd pkg-files && dpkg-buildpackage -us -uc -b
+```
+
+From the repo root those paths land outside the checkout and the build fails.
+The `.deb`, `.buildinfo` and `.changes` are then dropped in the repo **root**,
+which is why `.gitignore` gained entries for them plus six paths under
+`pkg-files/debian/`.
+
+#### The driver's kernel floor, measured
+
+**Between 6.12 and 7.0**, established by compiling rather than by reading a
+changelog:
+
+| kernel | result |
+|---|---|
+| 6.8 | fails: `platform_profile_ops`, `power_supply_ext`, `devm_platform_profile_register`, `devm_battery_hook_register` |
+| **6.12** (Debian trixie) | fails: `storage size of 'gigabyte_laptop_battery_ext' isn't known`, same for `gigabyte_laptop_profile_ops` |
+| 7.0 (Ubuntu) | **builds clean**, 708 KB module |
+| 7.3 (Fedora 43/44) | **builds clean**, including `W=1 -Werror` |
+
+`min_event_size` used to put the floor above 7.0 on its own, and it is now
+commented out — a field set to the value a designated initialiser already gives
+it, so writing it and omitting it produce an identical driver. See the comment
+in `gigabyte_laptop_event_driver`.
+
+**The Debian job probes for this rather than hardcoding a version.** It greps
+the installed headers for `struct platform_profile_ops` and
+`struct power_supply_ext`, and skips only the compile steps when either is
+absent, with a `::warning::` naming the kernel. The packaging half is
+kernel-independent and is what catches the `prerm` bug class, so trixie still
+runs it. The probe was validated against 6.8 and 7.0 locally, whose real
+compile outcomes are known, and answers no and yes to match.
+
+#### `dkms.conf` hardcodes `KDIR`, so `--kernelsourcedir` does nothing here
+
+`dkms.conf:4` is `MAKE[0]="make KDIR=/lib/modules/${kernelver}/build"`. DKMS
+uses that string as written, so `--kernelsourcedir` changes only DKMS's own
+header check and never the path `make` receives. Passing it got DKMS past
+`exit 21 "Your kernel headers ... cannot be found"` and the build then failed
+anyway on the same missing path.
+
+**Harmless on this machine**, where `kernel-core` supplies
+`/lib/modules/<ver>/build`. It bites a headers-only environment, which is what
+a container is. CI therefore creates the symlink — making the container look
+like a real Fedora install — and runs the shipped `dkms.conf` unmodified, rather
+than overriding it to go green. **Testing what ships beats accommodating it.**
+Using DKMS's own `${kernel_source_dir}` would make the option work, and would
+diverge from upstream; not done, recorded as an option.
+
+**`ln -sfn TARGET DIR` is the wrong way to create it**, from a review finding
+and verified here: when `DIR` is a *real* directory it is not replaced, a link
+appears *inside* it, and DKMS then fails against a path that looks correct. It
+is `test -e ... || ln -s ...` now.
+
+#### kmodtool emits two packages, and only one holds the module
+
+```
+module in     kmod-gigabyte-laptop-7.3.3-100.fc43.x86_64-0.2.0-2.fc43.x86_64.rpm
+no module in  kmod-gigabyte-laptop-0.2.0-2.fc43.x86_64.rpm      <- the meta package
+```
+
+So **anything matching `kmod-gigabyte-laptop-*.rpm` and taking the first hit is
+a coin flip.** This is not hypothetical: an assertion written that way passed on
+Fedora 43 and failed on 44 with identical code, packages and spec. Both releases
+were producing a module the whole time; only the check was broken. **Green by
+luck is worse than red**, because it reports a guard where there is none.
+
+#### Fedora 42 is missing one RPM Fusion package, and is not dead
+
+`buildsys-build-rpmfusion-kerneldevpkgs-akmod-x86_64` is absent from that
+release's RPM Fusion, so `dnf builddep` on the kmod spec fails there while
+`rpmfusion-free-release` and `kmodtool` both install fine. The job falls back to
+`rpmbuild --nodeps` for that one spec with a warning, rather than skipping: the
+metapackage exists to drag in kernel-devel sets for `buildforkernels current`,
+which neither the akmod build nor the SRPM rebuild uses, and skipping would drop
+the only coverage that spec's build section gets. Mock in `debug-driver.yml`
+still validates dependencies properly against an explicit RPM Fusion URL.
+
+**An earlier note here said fc42's RPM Fusion was dead at EOL. That was wrong**
+and is recorded because of how it happened: the first run showed
+`Usable URL not found` — transient mirror noise — and a whole EOL story was
+built on that one reading. The next run disproved it by getting nine steps
+further on the same release. **One observation is not a cause.**
+
+#### The container `%post` scriptlets cannot succeed, and that is not a defect
+
+Both the DKMS and akmod packages run `dkms`/`akmods` for the **running** kernel
+in `%post`. In a container that is the host's kernel with no headers, so both
+exit non-zero and `rpm` reports `scriptlet failed`. Tolerated with `|| true` in
+both places, and nothing is taken on trust in exchange: the steps assert the
+payload landed, the module registered, the SRPM shipped, and the rebuild
+produced a module.
+
+The Debian `postinst` is the opposite case and is **not** tolerated. It is
+written never to fail — a `postinst` that exits non-zero leaves the package
+half-configured — so a non-zero `dpkg -i` there would be a real regression in
+that contract.
+
+#### Four Debian packaging defects, found by building the package for the first time
+
+Nothing had ever built `pkg-files/debian`, so every dpkg tool had been reporting
+these to nobody:
+
+| Defect | Consequence |
+|---|---|
+| `debian/rules` committed mode **644** | Debian requires it executable. The build worked only because `dpkg-buildpackage` chmod'd it in passing, which is also why a build left a *tracked* file showing as modified |
+| changelog trailer had **one** space before the date, needs two | `dpkg-parsechangelog`, `dpkg-gencontrol`, `dpkg-genbuildinfo`, `dpkg-genchanges` and `dpkg-source` each warned |
+| `Version:` in the binary stanza of `debian/control` | Not valid there — the version comes from the changelog — so it was ignored with a warning |
+| no `Section:` or `Priority:` | `dpkg-genchanges` filled both with `-` and warned. A DKMS kernel module is `Section: kernel`, `Priority: optional` |
+
+Fixed and re-verified from a clean checkout: the build is **warning-free** and
+the package contents are unchanged.
+
+**And `/etc/modules-load.d/gigabyte-laptop.conf` is a conffile**, which dpkg
+lists with its md5sum because `dh_installdeb` marks everything under `/etc` as
+one. `dpkg -r` keeps conffiles by design and only `--purge` removes them — so a
+test asserting its absence after remove is testing documented behaviour
+backwards. CI now checks that remove keeps it and purge removes it.
+
+#### It took eight runs, and every one found something
+
+Recorded because the ratio is the point, not the count. **Four were bugs in the
+tests themselves**: the spec not being in `%{_specdir}` (which
+`%{?akmod_install}` needs, since it shells out to `rpmbuild -bs` on that path),
+the inverted conffile semantics, a `prerm` step that ran `dkms remove` and so
+destroyed the state the next step asserted, and the readdir-order assertion
+above. **Three were facts about the environment**: the kernel floor, the
+hardcoded `KDIR`, the missing fc42 metapackage. **Two were wrong diagnoses of
+mine**, both from explaining a single reading — the fc42 EOL story, and nearly
+the readdir one, which was left unasserted so the run could answer it instead.
+
+**Every one of them was found by running, not reading.** That is the same
+lesson as the `prerm` bracket bug, which `sh -n` passes and only execution
+fails, and it is the argument for this workflow existing at all.
 
 #### What actually triggers each workflow — and the `--tags` hazard
 
