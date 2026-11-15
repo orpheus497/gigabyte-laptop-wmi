@@ -1973,6 +1973,34 @@ left behind; against the fixed one it passes. **A guard that has not been shown
 to fail is not a guard**, which is this file's own rule and the reason the test
 was run that way rather than merely written.
 
+**And it had a hole of its own, found by review — an assertion of ABSENCE falls
+the wrong way when the query fails.** It was
+`dkms status -m gigabyte-laptop | grep -q gigabyte-laptop`, negated. A query
+that fails while printing nothing to stdout makes `grep` exit non-zero, which
+is indistinguishable from a query that succeeded and found nothing — so a
+cleanup failure would have reported a clean removal. Fixed by capturing the
+output and judging the **query** and its **content** separately, which is
+exactly the discrimination the shipped `prerm` already makes and says so in its
+own comment.
+
+**The asymmetry is the durable part, and the rest of the workflow is clean
+because of it.** The other three `dkms status` checks assert **presence**, so a
+broken query makes them fail loudly — the safe side. Only this one asserted
+absence. Audited all four; this was the only instance:
+
+| Assertion | A failed query lands on |
+|---|---|
+| presence, lines 177 / 379 / 413 | **failure** — fail-safe, no change needed |
+| **absence, the removal check** | **success** — the hole, now fixed |
+
+Two details worth keeping. `stderr` is deliberately kept **out** of the content
+check: `dkms` writes warnings there that can carry the module name inside a
+path, so folding it in with `2>&1` would false-fail a clean removal — which a
+rehearsal caught before it was committed. And a pipeline's exit status is its
+**last** command, so `dkms status ... | tee` cannot fail a step without
+`pipefail`; the presence checks work because the `grep` that follows reads an
+empty file.
+
 #### Building the Debian package: it runs from `pkg-files/`
 
 **Undocumented anywhere until now, and not guessable from the tree.**

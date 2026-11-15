@@ -420,11 +420,30 @@ jobs:
           # THE assertion. The bracket bug meant `dkms remove` was skipped on
           # every remove and upgrade, leaving the registration behind while dpkg
           # reported the package gone.
-          if dkms status -m gigabyte-laptop 2>/dev/null | grep -q gigabyte-laptop; then
-            echo "prerm left the DKMS registration behind:"
-            dkms status -m gigabyte-laptop
+          #
+          # Capture the status output and judge the QUERY and its CONTENT
+          # separately. `dkms status ... | grep -q` conflates them: a query that
+          # fails while printing nothing to stdout makes grep exit non-zero,
+          # which reads exactly like a query that succeeded and found nothing,
+          # so a cleanup failure would pass. That is the same discrimination the
+          # shipped prerm makes for the same reason -- see the comment there.
+          # Rehearsed against a stub `dkms` in all four states before landing.
+          #
+          # stderr is kept OUT of the content check deliberately: dkms writes
+          # warnings there that can carry the module name in a path, which would
+          # false-fail a clean removal. It is only reported on a failed query.
+          err=$(mktemp)
+          if ! remaining=$(dkms status -m gigabyte-laptop 2>"$err"); then
+            echo "dkms status failed, so the removal cannot be confirmed:"
+            cat "$err"
             exit 1
           fi
+          case "$remaining" in
+            *gigabyte-laptop*)
+              echo "prerm left the DKMS registration behind:"
+              echo "$remaining"
+              exit 1 ;;
+          esac
           # The modules-load.d entry is a CONFFILE -- dh_installdeb marks
           # everything under /etc as one, and dpkg lists it with its md5sum.
           # `dpkg -r` leaves conffiles behind on purpose; that is the whole
