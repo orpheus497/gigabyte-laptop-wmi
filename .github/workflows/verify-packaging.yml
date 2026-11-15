@@ -194,7 +194,16 @@ jobs:
           # for the running kernel. Passing --define "kernels <ver>" is what makes
           # kmodtool emit kernel_versions, so this is the one route that exercises
           # the kmod spec's %prep/%build/%install for real.
-          rpm -Uvh --nodeps ~/rpmbuild/RPMS/x86_64/akmod-gigabyte-laptop-*.rpm
+          # The akmod package's %post invokes akmods to build for the RUNNING
+          # kernel, which in a container is the host's and has no headers, so it
+          # exits 1 and rpm reports "scriptlet failed". That is a container
+          # artifact, exactly like the DKMS package's %post above, so it is
+          # tolerated -- and nothing is taken on trust: the assertions below are
+          # that the SRPM landed and that it rebuilds into a kmod containing a
+          # real module, which is the whole contract of an akmod package.
+          rpm -Uvh --nodeps ~/rpmbuild/RPMS/x86_64/akmod-gigabyte-laptop-*.rpm || true
+          rpm -q akmod-gigabyte-laptop \
+            || { echo "the akmod package did not install at all"; exit 1; }
           SRPM=$(find /usr/src/akmods -name 'gigabyte-laptop-kmod-*.src.rpm' | head -1)
           test -n "$SRPM" || { echo "akmod package shipped no SRPM"; exit 1; }
           echo "::notice::rebuilding $SRPM for ${{ steps.kver.outputs.kver }}"
