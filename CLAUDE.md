@@ -2034,13 +2034,82 @@ commented out — a field set to the value a designated initialiser already give
 it, so writing it and omitting it produce an identical driver. See the comment
 in `gigabyte_laptop_event_driver`.
 
-**The Debian job probes for this rather than hardcoding a version.** It greps
-the installed headers for `struct platform_profile_ops` and
-`struct power_supply_ext`, and skips only the compile steps when either is
-absent, with a `::warning::` naming the kernel. The packaging half is
-kernel-independent and is what catches the `prerm` bug class, so trixie still
-runs it. The probe was validated against 6.8 and 7.0 locally, whose real
-compile outcomes are known, and answers no and yes to match.
+**The Debian job probes for this rather than hardcoding a version**, and the
+first version of that probe was broken in a way worth recording, because the
+job stayed green while the thing it gates never ran.
+
+**It grepped a guessed header path, and on Debian that path does not resolve.**
+`grep -rqs 'struct platform_profile_ops' "$K/include/linux/platform_profile.h"`,
+where `$K` is `/lib/modules/<ver>/build`. It answered *"too old"* on **every**
+suite — and the sid log proves it wrong three lines later:
+
+```
+##[notice]Debian sid headers 7.3.4+deb14-amd64
+##[warning]7.3.4+deb14-amd64 predates platform_profile_ops/power_supply_ext;
+          skipping the compile steps and testing the packaging only
+...
+Building initial module gigabyte-laptop/0.2.0 for 7.3.4+deb14-amd64
+Building module(s)... done.
+```
+
+**7.3.4 does not predate anything**, and the postinst built the module against
+those very headers. So both Debian compile steps had never once run, on either
+suite, and "six jobs green" did not mean what it looked like.
+
+**Validating it on Ubuntu is exactly what hid it.** Measured here: Ubuntu's
+`linux-headers-<ver>-generic` **does** carry `include/linux/`, so the grep
+resolves and answers `no` for 6.8 and `yes` for 7.0 — correct, and the reason
+the local check passed. Debian splits the generic headers into
+`linux-headers-<ver>-common` while the arch package owns `$K`. That split is
+the likely cause rather than a measured one, so the step now prints the link
+target and whether the header is there, and the next run records it instead of
+this paragraph asserting it.
+
+**The fix is to ask kbuild instead of the filesystem**: build a throwaway
+module against `$K`, which uses the kernel's own include resolution and cannot
+be fooled by where a distro puts things. Three outcomes, kept distinguishable
+because the dangerous one is a broken probe reading as an old kernel:
+
+| probe | meaning | action |
+|---|---|---|
+| an empty module fails to build | the toolchain or headers are broken | **error** |
+| empty builds, API probe fails | the kernel really is too old | warn, skip the compile steps |
+| API probe builds | the APIs are there | compile the driver for real |
+
+**And the first attempt at *that* was wrong too, in the more dangerous
+direction — caught only by testing it against a kernel it had to reject.** It
+declared *pointers*, `static const struct platform_profile_ops *p;`, and **a
+pointer to an incomplete type is legal C**, so it compiled whether or not the
+struct was ever defined: `modern=yes` on 6.8, where the driver demonstrably
+fails. The driver fails on an old kernel precisely because it **defines
+objects** of those types — `gigabyte_laptop_profile_ops`,
+`gigabyte_laptop_battery_ext` — which needs a complete type. The probe now
+does the same, and reproduces the identical error:
+
+```
+error: storage size of 'probe_ops' isn't known
+error: invalid application of 'sizeof' to incomplete type
+       'const struct platform_profile_ops'
+```
+
+**Rehearsed against all three branches before landing**, on the two kernels
+whose real compile outcomes are known, and the verdicts match the driver's own:
+
+```
+6.8.0-149-generic     probe modern=no    driver FAILS     -> agree
+7.0.0-43-generic      probe modern=yes   driver BUILDS    -> agree
+no-such-kernel-9.9.9  probe exit=1       error branch     -> fires
+```
+
+**The lesson is one this file already has a name for**, which is why the
+episode is kept rather than quietly fixed: *a guard that has not been shown to
+fail is not a guard.* Both broken versions were written, read, and looked
+right; the first was tested only on a layout where it works, and the second
+only against a kernel it was supposed to accept. Testing a gate against the
+case it must **reject** is the half that catches it.
+
+The packaging half is kernel-independent and is what catches the `prerm` bug
+class, so trixie runs it regardless of the probe.
 
 #### `dkms.conf` hardcodes `KDIR`, so `--kernelsourcedir` does nothing here
 

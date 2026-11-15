@@ -323,14 +323,66 @@ jobs:
           # remove -- is kernel-independent and is the half that catches the bug
           # class this job exists for, so it runs on every suite regardless. Only
           # the compile steps are skipped, and loudly.
+          #
+          # Ask KBUILD, not the filesystem. This step used to grep
+          # "$K/include/linux/platform_profile.h" and answered "too old" on
+          # EVERY suite, silently skipping both compile steps -- including on
+          # sid, whose 7.3.4 headers then built the module successfully in the
+          # postinst a few log lines later. That is proof the guessed path did
+          # not resolve; the likely reason is Debian shipping the generic
+          # headers in linux-headers-<ver>-common while the arch package owns
+          # $K, which the line below records rather than assumes. Validating
+          # the grep on Ubuntu, whose arch package DOES carry include/linux,
+          # is what hid it. Building a throwaway module uses the kernel's own
+          # include resolution and cannot be fooled by where a distro puts
+          # things.
+          #
+          # Three outcomes, kept distinguishable on purpose, because the failure
+          # that matters is a broken probe quietly reading as an old kernel:
+          #   an empty module fails  -> the environment is broken, so error out
+          #   empty ok, API probe no -> the kernel really is too old, warn+skip
+          #   API probe yes          -> compile the driver for real
           K="/lib/modules/$KVER/build"
-          MODERN=yes
-          grep -rqs 'struct platform_profile_ops' "$K/include/linux/platform_profile.h" || MODERN=no
-          grep -rqs 'struct power_supply_ext'     "$K/include/linux/power_supply.h"     || MODERN=no
+          # Record the layout, so the reason the old grep failed is measured in
+          # the log instead of inferred in a comment.
+          echo "::notice::$K -> $(readlink -f "$K"); include/linux/platform_profile.h $(test -e "$K/include/linux/platform_profile.h" && echo present || echo ABSENT); found under /usr/src at: $(ls -d /usr/src/linux-headers-*/include/linux/platform_profile.h 2>/dev/null | tr '\n' ' ')"
+          probe=$(mktemp -d)
+          printf 'obj-m += t.o\n' > "$probe/Kbuild"
+          printf '#include <linux/module.h>\nMODULE_LICENSE("GPL");\n' > "$probe/t.c"
+          if ! make -C "$K" M="$probe" modules > "$probe/empty.log" 2>&1; then
+            cat "$probe/empty.log"
+            echo "::error::an empty module will not build against $KVER, so this job cannot tell an old kernel from a broken toolchain"
+            exit 1
+          fi
+          # printf, not a heredoc: a heredoc delimiter has to sit at column 0
+          # of the script, which is outside this YAML block scalar and would
+          # end the block.
+          # DEFINE objects of the two types, do not declare pointers to them.
+          # A pointer to an incomplete type is legal C, so a probe built from
+          # pointers compiles whether or not the struct is ever defined -- it
+          # answered "yes" on 6.8, where the driver demonstrably fails. The
+          # driver fails on an old kernel precisely because it defines objects
+          # (gigabyte_laptop_profile_ops, gigabyte_laptop_battery_ext), which
+          # needs a COMPLETE type: "storage size of ... isn't known". sizeof
+          # forces the same requirement and keeps the objects referenced.
+          printf '%s\n' \
+            '#include <linux/module.h>' \
+            '#include <linux/platform_profile.h>' \
+            '#include <linux/power_supply.h>' \
+            'static const struct platform_profile_ops probe_ops;' \
+            'static const struct power_supply_ext probe_ext;' \
+            'const unsigned long gigabyte_floor_probe[] =' \
+            '        { sizeof(probe_ops), sizeof(probe_ext) };' \
+            'MODULE_LICENSE("GPL");' > "$probe/t.c"
+          if make -C "$K" M="$probe" modules > "$probe/api.log" 2>&1; then
+            MODERN=yes
+            echo "::notice::$KVER has platform_profile_ops and power_supply_ext -- compiling"
+          else
+            MODERN=no
+            cat "$probe/api.log"
+            echo "::warning::$KVER lacks platform_profile_ops or power_supply_ext; skipping the compile steps and testing the packaging only"
+          fi
           echo "modern=$MODERN" >> "$GITHUB_OUTPUT"
-          [ "$MODERN" = yes ] \
-            && echo "::notice::$KVER has platform_profile_ops and power_supply_ext -- compiling" \
-            || echo "::warning::$KVER predates platform_profile_ops/power_supply_ext; skipping the compile steps and testing the packaging only"
 
       - name: Compile directly first
         if: steps.kver.outputs.modern == 'yes'
