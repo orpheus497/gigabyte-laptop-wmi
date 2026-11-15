@@ -2053,8 +2053,9 @@ been pushed to the fork. The PKGBUILD's own comment says exactly this — it is 
 *known* waiting-on-a-release state, not a surprise — but nothing had ever
 demonstrated the consequence.
 
-**And the consequence is worse than a failed build, which is the real
-finding.** Running the shipped `package()` against that tarball:
+**`package()` swallows the failure at the function level**, and I wrote this
+up as worse than it is — corrected the same day by the run. Calling the shipped
+`package()` directly against that tarball:
 
 ```
 exit=0
@@ -2066,16 +2067,44 @@ resulting package contents:
 ```
 
 **`package()` exits 0.** A shell function's status is its *last* command's, and
-the last command here is the `modules-load.d` write, which always succeeds. So
-the failed `install` is swallowed at the function level and the result is a
-**package that installs cleanly and contains no driver source** — DKMS would
-then fail later, somewhere else, for a reason with no connection to the cause.
+the last command here is the `modules-load.d` write, which always succeeds.
 
-Whether makepkg's own errexit catches it before that is a question about
-makepkg, so the job *measures* it: it builds a second time from a tarball with
-the file removed and reports which way it went. **Either way the assertion is
-on the built package's CONTENTS**, which catches a silently incomplete package
-regardless — assert the outcome, not the mechanism.
+**What I then claimed, and it is false: "the result is a package that installs
+cleanly and contains no driver source".** That is what happens when the
+function is called *directly*, which is what my local rehearsal did. It is
+**not** what makepkg does. The job builds a second time from a tarball with the
+file removed and the answer is unambiguous:
+
+```
+==> Starting package()...
+install: cannot stat 'gigabyte-laptop.c': No such file or directory
+==> ERROR: A failure occurred in package().
+    Aborting...
+```
+
+**makepkg's errexit catches it**, so the real-world consequence is a failed
+build and no package at all — which is the correct outcome. The swallowed exit
+status is still real and still worth knowing, because anything that calls
+`package()` outside makepkg gets the bad behaviour; it just is not reachable
+through the normal route.
+
+**So the content assertion is a second guard, not the only one** — which is
+what the job's own output says, and the opposite of what I had written before
+measuring. Keeping it is still right: it asserts the *outcome* rather than
+trusting makepkg's mechanism, and it was shown to fail against both a missing
+driver and a stale `@PKGVER@`.
+
+**namcap flags the checksum independently**, which is a second line of evidence
+for the finding below rather than a restatement of it:
+
+```
+namcap: PKGBUILD (gigabyte-laptop-dkms) E: Missing checksums
+```
+
+namcap parses the file without executing it, so the command substitution never
+runs and it sees no literal sum at all — while `makepkg --printsrcinfo`, which
+*does* execute it, prints a valid 64-character one. **The official Arch lint
+calls this an error.**
 
 **`sha256sums` is computed by a `curl` inside the PKGBUILD**, so it runs on
 every *parse* — `makepkg --printsrcinfo`, `namcap`, any AUR tooling. Measured
@@ -2096,13 +2125,27 @@ of** — which is the owner's call, not CI's.
 **Two more differences from the other two families, both reported by the job
 rather than assumed**, because they are facts about Arch and this image:
 
-- **There is no `.install` scriptlet** — `pkg-files/archlinux/` contains the
-  PKGBUILD and nothing else. The `.deb` has `postinst`/`prerm` and the RPMs
-  have `%post`/`%preun`; this has neither. Arch usually does not need one
-  because the `dkms` package ships pacman hooks keyed on `usr/src/*/dkms.conf`,
-  so the job prints the hooks present and the resulting `dkms status` instead
-  of asserting a guess. If nothing registered it, that is the same class of
-  defect as the Debian `prerm` bug and the job says so.
+- **There is no `.install` scriptlet, and that is correct — my warning saying
+  otherwise was wrong and is fixed.** `pkg-files/archlinux/` contains the
+  PKGBUILD and nothing else, where the `.deb` has `postinst`/`prerm` and the
+  RPMs have `%post`/`%preun`. The job's first version warned that "no hook
+  picked it up, so the module would never be built on a user's machine". **The
+  hook exists and ran.** The image carries `70-dkms-install.hook`,
+  `70-dkms-upgrade.hook` and `71-dkms-remove.hook`, pacman printed
+  `(3/3) Install DKMS modules` on install and `(1/1) Remove DKMS modules` on
+  removal, and what the install hook hit was
+
+  ```
+  ==> ERROR: Missing 7.3.4-arch1-2 kernel modules tree for module gigabyte-laptop/0.2.0.
+  ```
+
+  — the image has `linux-headers` but not the `linux` package, so there is no
+  `/usr/lib/modules/<ver>` to install into. **That is the same container
+  limitation the Fedora `%post` hits**, already recorded two sections up as
+  "not a defect", and I failed to recognise it in a new coat. The step now
+  *asserts the two hooks exist* — they are the mechanism this package relies on
+  instead of a scriptlet, so their absence would be the real defect — and
+  treats a hook that ran and could not finish as the container artifact it is.
 - **No `backup=()` array**, so pacman deletes
   `/etc/modules-load.d/gigabyte-laptop.conf` on removal. dpkg keeps it until
   `--purge`. The job asserts whichever actually happens and flags the
@@ -2115,6 +2158,20 @@ PKGBUILD's own `sed` is a **no-op** and an assertion on `PACKAGE_VERSION` would
 pass for the wrong reason. It only does real work on a tarball built straight
 from the repo — which is what the job stages, so the check means something
 there and would not on a release.
+
+**And the removal assertion was self-defeating in the first version** — the
+third correction the run produced, and the least excusable. It ran
+`dkms remove` by hand *before* `pacman -R`, then asserted the registration was
+gone: an absence it had created itself, which a working `71-dkms-remove.hook`
+and a broken one would both pass. **CLAUDE.md already records this exact
+lesson** from the Debian `prerm` probe — "a check a broken prerm and a working
+one would both pass" — and I reproduced it one file away from the comment
+citing it. pacman's hook does the removal now and the assertion follows it.
+
+**Three corrections from one run, and the pattern is the point**: an
+overstated consequence, a defect claimed where there was none, and a repeat of
+a recorded mistake. All three were in text I wrote *before* measuring, and all
+three would have read as confident findings.
 
 **Rehearsed before it ever ran**, on the parts that do not need Arch — a
 PKGBUILD is a bash script and `package()` only uses `sed` and `install`:

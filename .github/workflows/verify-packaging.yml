@@ -716,23 +716,31 @@ jobs:
           cd /tmp/build
           pacman -U --noconfirm "$PKG"
           test -f /etc/modules-load.d/gigabyte-laptop.conf
-          # Unlike the .deb and the RPMs, this package carries NO install
-          # scriptlet -- there is no .install file in pkg-files/archlinux at
-          # all. On Arch that is usually fine, because the dkms package ships
-          # pacman hooks keyed on usr/src/*/dkms.conf. Whether they fired is a
-          # question about this image, so print the evidence and let the run
-          # answer it rather than asserting a guess.
-          ls -1 /usr/share/libalpm/hooks/ 2>/dev/null | sed -e 's/^/  hook: /' || echo "  (no hooks directory)"
+          # This package carries NO install scriptlet -- there is no .install
+          # file in pkg-files/archlinux at all, where the .deb has postinst and
+          # the RPMs have %post. On Arch that is correct, because the dkms
+          # package ships pacman hooks keyed on usr/src/*/dkms.conf. Since the
+          # hooks ARE the mechanism this package depends on in place of a
+          # scriptlet, assert they exist rather than hoping.
+          for h in 70-dkms-install.hook 71-dkms-remove.hook; do
+            test -f "/usr/share/libalpm/hooks/$h" \
+              || { echo "::error::$h is absent, so nothing registers this package with DKMS and it has no scriptlet of its own"; exit 1; }
+          done
           if ! status=$(dkms status -m gigabyte-laptop 2>&1); then
             echo "::error::dkms status failed, so registration cannot be judged:"; echo "$status"; exit 1
           fi
           case "$status" in
             *gigabyte-laptop*)
-              echo "registered=yes" >> "$GITHUB_OUTPUT"
-              echo "::notice::a pacman hook registered the module: $status" ;;
+              echo "::notice::the dkms pacman hook registered the module: $status" ;;
             *)
-              echo "registered=no" >> "$GITHUB_OUTPUT"
-              echo "::warning::installing the package did NOT register it with DKMS -- no .install scriptlet and no hook picked it up, so the module would never be built on a user's machine. Adding it by hand so the source is still proven buildable."
+              # The hook ran -- pacman prints "Install DKMS modules" -- and
+              # failed with "Missing <ver> kernel modules tree", because the
+              # image has linux-headers but not the linux package, so there is
+              # no /usr/lib/modules/<ver> to install into. That is the same
+              # container limitation the Fedora %post hits and is tolerated for
+              # the same reason: it is not a packaging defect. Register by hand
+              # so the compile below still tests the shipped source.
+              echo "::notice::the hook ran and could not complete in a container with headers but no kernel modules tree; adding the module by hand so the compile still runs"
               dkms add -m gigabyte-laptop -v "$VER" ;;
           esac
 
@@ -751,7 +759,13 @@ jobs:
       - name: Remove it and assert the DKMS registration is gone
         run: |
           set -eu
-          dkms remove -m gigabyte-laptop -v "$VER" --all 2>/dev/null || true
+          # Let pacman's own 71-dkms-remove.hook do the work. The first
+          # version of this step ran `dkms remove` by hand FIRST and then
+          # asserted the registration was gone -- which is an absence it had
+          # created itself, and a check a working hook and a broken one would
+          # both pass. The Debian job already learned this exact lesson with
+          # its prerm probe; I repeated it here one file away from the comment
+          # that records it.
           pacman -R --noconfirm gigabyte-laptop-dkms
           # Judge the QUERY and its CONTENT separately. `dkms status | grep -q`
           # conflates them: a failed query printing nothing to stdout makes grep
