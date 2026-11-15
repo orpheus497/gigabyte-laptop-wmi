@@ -1914,15 +1914,39 @@ learned the hard way:
   | `Currently processing` | a run is in flight. Wait |
   | `Reviews paused` / `Review limit reached` | nothing was reviewed. Resume or trigger |
   | Merge Risk sha **== your head** | a run completed on your head **and found something**. Read the threads |
-  | a thread whose `created_at` is after your push | the same, from the API side |
+  | a thread whose **`commit_id`** is your head | the same, from the API side |
   | anything else | **unknown.** Do not record it as clean |
 
-  **The one way to confirm a clean run on a specific head is to watch the
-  transition**: see the in-progress banner appear with your head in its scope
-  line, then see it gone. That ties a completion to a scope, which no
+  **The one way to confirm a *completed* run on a specific head is to watch
+  the transition**: see the in-progress banner appear with your head in its
+  scope line, then see it gone. That ties a completion to a scope, which no
   single later reading can do. It is what happened here — banner at 23:16:30
-  naming `9ff0c7e`, gone by 23:21:56 — and it is why this run's outcome is
-  known rather than inferred.
+  naming `9ff0c7e`, gone by 23:21:56 — which is why that run is known to have
+  finished rather than inferred.
+
+  **It says nothing about the outcome, and this paragraph said "a clean run"
+  until the next review corrected it.** The transition it cites as its example
+  produced **a finding**, three lines above. Read completion from the
+  transition and the outcome from the result fields: *"No actionable
+  comments"* for clean, a Merge Risk sha at your head for a run that found
+  something.
+
+  **And a timestamp is not an identity — the same review proved it with its own
+  data.** The table row above said to match a thread whose `created_at` is
+  after your push. The two findings that corrected these very lines were
+  created at **23:29:46**, after the `bb2cb5b` push, with
+  `commit_id` = **`f4e7700`** — the *previous* head. A run that starts before a
+  push posts its threads after it, so by the `created_at` rule those findings
+  would have been read as "`bb2cb5b` reviewed, found something", when
+  `bb2cb5b` had not been reviewed at all. `commit_id` and
+  `original_commit_id` are both populated on every thread and name the commit
+  actually reviewed; use them.
+
+  **Both of those are one mistake wearing two hats**: treating a signal that a
+  run *happened* as a signal about *what it found*, and treating *when* a
+  record appeared as *what it refers to*. Neither is a subtle distinction —
+  they are the same substitution of a convenient proxy for the field that
+  carries the fact, which is what the whole of this section has been about.
 
   **The meta-lesson, now paid for three times.** Each version of this rule was
   written from a single observation and was more confident than the one it
