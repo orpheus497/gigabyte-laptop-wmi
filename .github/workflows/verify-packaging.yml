@@ -89,12 +89,17 @@ jobs:
           # cannot even be parsed. debug-driver.yml gets them by pointing mock at
           # an explicit RPM Fusion URL; a container has to enable the repo.
           #
-          # Tolerated, not required. A Fedora release past EOL has no live RPM
-          # Fusion metadata -- fc42 fails with "Usable URL not found" and then
-          # "No match for argument: buildsys-build-rpmfusion-kerneldevpkgs-akmod"
-          # -- and that is a fact about the release, not a defect in this repo.
-          # The DKMS half needs none of it, so it still runs; only the kmod and
-          # akmod steps are skipped, and loudly.
+          # Tolerated, not required, so that a release whose RPM Fusion is
+          # genuinely unreachable still gets its DKMS half tested.
+          #
+          # Note what this does and does not detect. kmodtool being installable
+          # does NOT mean every BuildRequires resolves: on Fedora 42 kmodtool
+          # installs while buildsys-build-rpmfusion-kerneldevpkgs-akmod-x86_64
+          # is absent, so this probe says yes and `dnf builddep` still fails
+          # later. That is handled where it happens rather than by widening this
+          # check, because the two failures want different responses -- no
+          # kmodtool means the spec cannot be parsed at all, while a missing
+          # buildsys metapackage is skippable.
           KMOD=yes
           dnf -y install "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" || KMOD=no
           [ "$KMOD" = yes ] && { dnf -y install kmodtool || KMOD=no; }
@@ -188,8 +193,24 @@ jobs:
           set -eu
           # This spec calls kmodtool, so it is built here rather than in the
           # loop above, which must work on a release with no live RPM Fusion.
-          dnf -y builddep "$HOME/rpmbuild/SPECS/gigabyte-laptop-kmod.spec"
-          rpmbuild -bb "$HOME/rpmbuild/SPECS/gigabyte-laptop-kmod.spec"
+          #
+          # builddep first, because validating BuildRequires is worth having --
+          # but fall back to --nodeps rather than skipping the step. On Fedora 42
+          # kmodtool installs fine while
+          # buildsys-build-rpmfusion-kerneldevpkgs-akmod-x86_64 is simply absent
+          # from that release's RPM Fusion, so builddep fails on a metapackage
+          # that contributes nothing here: it exists to drag in kernel-devel sets
+          # for `buildforkernels current`, and neither the akmod build nor the
+          # SRPM rebuild below uses that mode. Skipping the step would drop the
+          # only coverage of this spec's build section; --nodeps keeps it, and
+          # mock in debug-driver.yml does the real dependency validation against
+          # an explicit RPM Fusion URL.
+          if dnf -y builddep "$HOME/rpmbuild/SPECS/gigabyte-laptop-kmod.spec"; then
+            rpmbuild -bb "$HOME/rpmbuild/SPECS/gigabyte-laptop-kmod.spec"
+          else
+            echo "::warning::BuildRequires did not resolve on this release; building the kmod spec with --nodeps (mock still validates deps in debug-driver.yml)"
+            rpmbuild -bb --nodeps "$HOME/rpmbuild/SPECS/gigabyte-laptop-kmod.spec"
+          fi
           # The akmod package's whole payload is a source RPM; akmods rebuilds it
           # for the running kernel. Passing --define "kernels <ver>" is what makes
           # kmodtool emit kernel_versions, so this is the one route that exercises
