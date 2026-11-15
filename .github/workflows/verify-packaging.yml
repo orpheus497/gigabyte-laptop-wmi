@@ -181,9 +181,17 @@ jobs:
           # (dkms.conf:4), so that is the path `make` receives whatever DKMS was
           # told. Supplying the symlink tests the shipped dkms.conf exactly as
           # users get it, rather than overriding it to make the test pass.
+          # Guarded with test -e rather than `ln -sfn`, on a review finding
+          # that is right: `ln -sfn TARGET DIR` where DIR is a REAL directory
+          # does not replace it, it silently creates DIR/TARGET inside it, and
+          # dkms then fails on a path that looks correct. Verified here. It never
+          # triggers in this container, where nothing exists at that path -- but
+          # it would on any runner that has a kernel installed, which is exactly
+          # the case the symlink is imitating.
           KVER="${{ steps.kver.outputs.kver }}"
           mkdir -p "/lib/modules/$KVER"
-          ln -sfn "/usr/src/kernels/$KVER" "/lib/modules/$KVER/build"
+          test -e "/lib/modules/$KVER/build" \
+            || ln -s "/usr/src/kernels/$KVER" "/lib/modules/$KVER/build"
           dkms build -m gigabyte-laptop -v "$VER" -k "$KVER"
           find /var/lib/dkms/gigabyte-laptop -name 'gigabyte-laptop.ko*' -print
 
