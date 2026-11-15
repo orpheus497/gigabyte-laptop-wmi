@@ -106,10 +106,17 @@ jobs:
           echo "::notice::spec version $VER"
           sed -e "s/@PKGVER@/$VER/" -i dkms.conf
           grep -q '@PKGVER@' dkms.conf && { echo "substitution failed"; exit 1; }
-          mkdir -p ~/rpmbuild/SOURCES
+          mkdir -p ~/rpmbuild/SOURCES ~/rpmbuild/SPECS
           tar -czf ~/rpmbuild/SOURCES/driver.tar.gz \
               Makefile gigabyte-laptop.c dkms.conf gigabyte-laptop.conf
           cp gigabyte-laptop.conf ~/rpmbuild/SOURCES/
+          # The specs have to live in %{_specdir}, not just be passed by path.
+          # %{?akmod_install} -- the only thing the kmod spec's %install runs in
+          # akmod mode -- shells out to `rpmbuild -bs %{_specdir}/<name>.spec` to
+          # regenerate the source RPM it ships. Built straight from pkg-files/
+          # that path does not exist and %install dies with
+          # "failed to stat .../SPECS/gigabyte-laptop-kmod.spec". CI found this.
+          cp pkg-files/rpm/*.spec ~/rpmbuild/SPECS/
           echo "VER=$VER" >> "$GITHUB_ENV"
 
       - name: Build all three RPMs
@@ -119,8 +126,8 @@ jobs:
             echo "=== $s ==="
             # builddep rather than --nodeps, so BuildRequires is genuinely
             # validated here as well as in mock.
-            dnf -y builddep "pkg-files/rpm/$s.spec"
-            rpmbuild -bb "pkg-files/rpm/$s.spec"
+            dnf -y builddep "$HOME/rpmbuild/SPECS/$s.spec"
+            rpmbuild -bb "$HOME/rpmbuild/SPECS/$s.spec"
           done
           find ~/rpmbuild/RPMS -name '*.rpm' -printf '%f\n' | sort
 
@@ -287,5 +294,13 @@ jobs:
             dkms status -m gigabyte-laptop
             exit 1
           fi
-          test ! -f /etc/modules-load.d/gigabyte-laptop.conf
+          # The modules-load.d entry is a CONFFILE -- dh_installdeb marks
+          # everything under /etc as one, and dpkg lists it with its md5sum.
+          # `dpkg -r` leaves conffiles behind on purpose; that is the whole
+          # remove-versus-purge distinction. Asserting its absence here was
+          # testing dpkg's documented behaviour backwards, and CI caught it.
+          test -f /etc/modules-load.d/gigabyte-laptop.conf \
+            || { echo "remove deleted a conffile it should have kept"; exit 1; }
           dpkg --purge gigabyte-laptop-dkms
+          test ! -f /etc/modules-load.d/gigabyte-laptop.conf \
+            || { echo "purge left the conffile behind"; exit 1; }
