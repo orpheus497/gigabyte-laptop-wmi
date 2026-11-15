@@ -234,10 +234,30 @@ jobs:
           # akmods runs on a user's machine.
           rpmbuild --rebuild \
                    --define "kernels ${{ steps.kver.outputs.kver }}" "$SRPM"
-          KMOD=$(find ~/rpmbuild/RPMS -name 'kmod-gigabyte-laptop-*.rpm' | head -1)
-          test -n "$KMOD" || { echo "akmod rebuild produced no kmod package"; exit 1; }
-          rpm -qlp "$KMOD" | grep -E 'gigabyte-laptop\.ko' || {
-            echo "the rebuilt kmod package contains no module"; exit 1; }
+          # This assertion used `find ... | head -1`, which is order-dependent
+          # whenever the rebuild emits more than one matching package -- and
+          # kmodtool is expected to, since it generates a kernel-versioned
+          # subpackage alongside a meta one. That is a defect in the check
+          # regardless of cause: Fedora 43 passed it and 44 failed it on the
+          # same code and the same spec, so at least one of those outcomes was
+          # decided by readdir order, and a guard like that is not a guard.
+          #
+          # Which release genuinely produced a module is NOT settled here, and
+          # is deliberately not asserted: it needs kmodtool, which this
+          # environment does not have. The loop below makes the answer visible
+          # instead of guessing -- it names every package it found and whether
+          # each holds a module, and requires that at least one does.
+          FOUND=no
+          for k in $(find ~/rpmbuild/RPMS -name 'kmod-gigabyte-laptop-*.rpm'); do
+            if rpm -qlp "$k" 2>/dev/null | grep -qE 'gigabyte-laptop\.ko'; then
+              echo "  module in $(basename "$k")"
+              FOUND=yes
+            else
+              echo "  (no module in $(basename "$k") -- expected for the meta package)"
+            fi
+          done
+          [ "$FOUND" = yes ] \
+            || { echo "no rebuilt kmod package contains gigabyte-laptop.ko"; exit 1; }
 
   debian:
     name: Debian ${{ matrix.suite }} (build, install, remove)
