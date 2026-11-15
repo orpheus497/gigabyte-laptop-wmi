@@ -1728,11 +1728,26 @@ To get another review later, reopen that PR or raise a fresh one from
 `a16-5th-gmate` — to a scratch branch, not `master`. Two things to expect, both
 learned the hard way:
 
-- **Reviews are manual-trigger on this fork**, so expect to ask for every one.
-  Two reasons were recorded; only the first still applies:
-  - *"fewer than 10 stars"* — the free tier does not auto-review small repos.
-    The fork has **0** stars, checked 26 Oct 2026, so this one is not close to
-    lapsing.
+- **Whether a push is auto-reviewed depends on the PR's base**, and the
+  headline here said the opposite until 15 Nov 2026: *"Reviews are
+  manual-trigger on this fork, so expect to ask for every one."* **That is
+  false for a PR based on the default branch**, and it is what made me report
+  two pushed commits as unreviewed when the bot had already reviewed them
+  unasked. The sub-rule below was right the whole time; the summary above it
+  was not, which is the same shape as the `cmos-slots` finding — **a detailed
+  procedure and its headline are two copies of the same claim, and fixing one
+  is not fixing it.**
+
+  Observed on PR #5, base `a16-5th-gmate` (the default branch): pushes of
+  `9ff0c7e` and `f4e7700` each started a review by themselves, minutes apart,
+  with no checkbox and no comment.
+
+  Two reasons for a skip were recorded. The first is **falsified**; the second
+  holds:
+  - ~~*"fewer than 10 stars"* — the free tier does not auto-review small
+    repos.~~ **Contradicted by observation, 15 Nov 2026.** The fork still has
+    **0** stars and pushes to PR #5 are auto-reviewed regardless, so whatever
+    this gate once did, it is not blocking auto-review here now.
   - *"Auto reviews are disabled on base/target branches other than the default
     branch"* — **live again as of 29 Oct 2026, pointing the other way.** This
     bullet was struck through on 26 Oct as retired, and it was not: it is a
@@ -1768,22 +1783,45 @@ learned the hard way:
     through as "no longer applies" is itself a claim with a shelf life. The
     rule never changed. Our configuration did, twice.
 
-  Either way: the 🔍 Trigger review checkbox or an `@coderabbitai review`
-  comment. Pushes do not auto-review.
-- **The included-review allowance is five per hour, not one — corrected
-  15 Nov 2026.** The bot stated it itself on PR #5: *"Included review
-  availability: This review used your included allowance. 3 included reviews
-  remain after this review. Your current allowance at 5 reviews per hour."* It
-  reviewed three times within forty minutes that day, so the October figure
-  below is stale. **The shape of the warning still matters** even though the
-  number moved, which is why the rest of this bullet stays: ~~the free tier
-  allows one included review per hour~~, and the bot says so exactly:
-  *"Review limit reached ... Next included review available in N minutes"*. A run that hits the limit stops **before reviewing at all** -- it
-  still prints the scope it would have covered, which reads like a review that
-  ran. Check for that warning before trusting an empty result. Spend the hour's
-  review on a batch of real work, not a docs-only push, and do not fire several
-  triggers in quick succession: three in a row exhausted it on 22 Oct 2026 and
-  the fourth, which covered the actual fixes, never ran.
+  **So, scoped properly:** a push to a PR based on the **default branch**
+  (`a16-5th-gmate`) is reviewed automatically. A push to a PR based on anything
+  else — `master`, which is where the full-diff review surfaces live — is
+  **never** reviewed, and needs the 🔍 Trigger review checkbox or an
+  `@coderabbitai review` comment. On a `master`-based PR, silence means
+  nothing; on a default-based one, silence is a real result.
+- **The included-review allowance is not a fixed number — it is derived from
+  your own trailing usage, and no figure recorded here will stay true.** The
+  bot states it in each review's **Review info**, and on PR #5 it said, two
+  hours apart on the same day:
+
+  ```
+  21:3x  "3 included reviews remain after this review.
+          Your current allowance at 5 reviews per hour."
+  23:22  "3 included reviews remain after this review.  Your included PR review
+          attempts over the past 7 days set your current allowance at
+          4 reviews per hour."
+  ```
+
+  **The second sentence is the mechanism** and it is why this bullet has now
+  been wrong three times: ~~one per hour~~ (October), ~~five per hour~~
+  (15 Nov, morning), **four** by that evening. The allowance is a function of
+  **review attempts over the past 7 days**, so heavy use lowers it. **Read the
+  current figure off the newest review's Review info; do not carry a number
+  forward.**
+
+  **The shape of the warning is the durable part**, which is why the rest of
+  this bullet stays. The bot says it exactly: *"Review limit reached ... Next
+  included review available in N minutes"*. A run that hits the limit stops
+  **before reviewing at all** -- it still prints the scope it would have
+  covered, which reads like a review that ran. Check for that warning before
+  trusting an empty result. Spend the allowance on a batch of real work, not a
+  docs-only push, and do not fire several triggers in quick succession: three
+  in a row exhausted it on 22 Oct 2026 and the fourth, which covered the actual
+  fixes, never ran.
+
+  **And a declining allowance makes that advice sharper than it was.** When the
+  rate itself drops with use, firing a run on each small push does not merely
+  spend today's reviews — it lowers tomorrow's ceiling. Batch.
 - **Reviews AUTO-PAUSE on a branch under active development — a third skip
   mechanism, seen 15 Nov 2026.** After two pushes in quick succession the bot
   edited its summary in place to say:
@@ -1894,8 +1932,12 @@ learned the hard way:
   finds something" were the two cases it enumerated, when the case that breaks
   everything is **a run that has not happened yet**. Enumerate the states the
   tool can be in, not just the outcomes it can report.
-  Four ways a review can silently not happen, now: the star count, the base
-  not being the default branch, the hourly allowance, and this.
+  Ways a review can silently not happen: the base not being the default
+  branch, the allowance, and this auto-pause. **It said "four, now: the star
+  count, ..." until 15 Nov 2026**, when the star gate was contradicted by
+  observation — see the first bullet. Counting a falsified mechanism as a live
+  one overstates how many ways there are to be fooled, which sounds
+  conservative and is not: it spends attention on a gate that is not firing.
 - The **Autofix** and **Generate docstrings** checkboxes push the bot's own
   commits to the branch. Leave both unticked; the docstring one in particular
   would act on a Docstring Coverage check that does not apply to kernel C.
