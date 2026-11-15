@@ -149,7 +149,14 @@ jobs:
       - name: Compile through DKMS, the way a user gets it
         run: |
           set -eu
-          dkms build -m gigabyte-laptop -v "$VER" -k "${{ steps.kver.outputs.kver }}"
+          # --kernelsourcedir is required here. Fedora's kernel-devel unpacks to
+          # /usr/src/kernels/<ver>, and the /lib/modules/<ver>/build symlink that
+          # DKMS looks for by default is created when the matching KERNEL is
+          # installed -- which it is not, in a container. Without this, DKMS
+          # exits 21 "Your kernel headers ... cannot be found".
+          dkms build -m gigabyte-laptop -v "$VER" \
+                     -k "${{ steps.kver.outputs.kver }}" \
+                     --kernelsourcedir "/usr/src/kernels/${{ steps.kver.outputs.kver }}"
           find /var/lib/dkms/gigabyte-laptop -name 'gigabyte-laptop.ko*' -print
 
       - name: Rebuild the akmod SRPM, which is what akmods does at boot
@@ -199,15 +206,33 @@ jobs:
             build-essential debhelper dh-dkms dkms fakeroot \
             linux-headers-amd64 kmod
 
-      - name: Record the kernel this suite ships
+      - name: Record the kernel this suite ships, and whether it is new enough
         id: kver
         run: |
           set -eu
           KVER=$(ls -1 /lib/modules | sort -V | tail -1)
           echo "kver=$KVER" >> "$GITHUB_OUTPUT"
           echo "::notice::Debian ${{ matrix.suite }} headers $KVER"
+          # Probe for the two APIs that set the floor rather than guessing a
+          # version number. Measured: trixie ships 6.12 and has NEITHER, so the
+          # driver cannot build there; 7.0 and 7.3 have both and it builds clean.
+          # The floor therefore sits between 6.12 and 7.0.
+          #
+          # The packaging half -- build, install, DKMS registration, prerm,
+          # remove -- is kernel-independent and is the half that catches the bug
+          # class this job exists for, so it runs on every suite regardless. Only
+          # the compile steps are skipped, and loudly.
+          K="/lib/modules/$KVER/build"
+          MODERN=yes
+          grep -rqs 'struct platform_profile_ops' "$K/include/linux/platform_profile.h" || MODERN=no
+          grep -rqs 'struct power_supply_ext'     "$K/include/linux/power_supply.h"     || MODERN=no
+          echo "modern=$MODERN" >> "$GITHUB_OUTPUT"
+          [ "$MODERN" = yes ] \
+            && echo "::notice::$KVER has platform_profile_ops and power_supply_ext -- compiling" \
+            || echo "::warning::$KVER predates platform_profile_ops/power_supply_ext; skipping the compile steps and testing the packaging only"
 
       - name: Compile directly first
+        if: steps.kver.outputs.modern == 'yes'
         run: |
           set -eu
           make KDIR="/lib/modules/${{ steps.kver.outputs.kver }}/build"
@@ -252,6 +277,7 @@ jobs:
           grep -q gigabyte-laptop /tmp/dkms.status
 
       - name: Compile through DKMS
+        if: steps.kver.outputs.modern == 'yes'
         run: |
           set -eu
           dkms build -m gigabyte-laptop -v "$VER" -k "${{ steps.kver.outputs.kver }}"
