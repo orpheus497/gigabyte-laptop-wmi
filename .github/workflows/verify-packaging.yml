@@ -30,6 +30,14 @@ name: Verify packaging
 
 on: push
 
+# Read-only is all this needs: it checks out, installs packages, compiles and
+# builds packages. Nothing uploads an artifact, cuts a release or writes to the
+# repository. Declared explicitly because an absent permissions block inherits
+# the repository default, which is wider -- flagged by zizmor via a review on
+# PR #5. debug-driver.yml keeps write-all because its publish job does upload.
+permissions:
+  contents: read
+
 jobs:
   compile:
     name: Compile the driver
@@ -111,11 +119,13 @@ jobs:
 
       - name: Record the kernel this release ships
         id: kver
+        env:
+          RELEASE: ${{ matrix.version }}
         run: |
           set -eu
           KVER=$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-devel | sort -V | tail -1)
           echo "kver=$KVER" >> "$GITHUB_OUTPUT"
-          echo "::notice::Fedora ${{ matrix.version }} kernel-devel $KVER"
+          echo "::notice::Fedora $RELEASE kernel-devel $KVER"
 
       - name: Stage the source tarball the specs expect
         run: |
@@ -168,6 +178,8 @@ jobs:
           grep -q gigabyte-laptop /tmp/dkms.status
 
       - name: Compile through DKMS, the way a user gets it
+        env:
+          KVER: ${{ steps.kver.outputs.kver }}
         run: |
           set -eu
           # Fedora's kernel-devel unpacks to /usr/src/kernels/<ver>, while the
@@ -188,7 +200,6 @@ jobs:
           # triggers in this container, where nothing exists at that path -- but
           # it would on any runner that has a kernel installed, which is exactly
           # the case the symlink is imitating.
-          KVER="${{ steps.kver.outputs.kver }}"
           mkdir -p "/lib/modules/$KVER"
           test -e "/lib/modules/$KVER/build" \
             || ln -s "/usr/src/kernels/$KVER" "/lib/modules/$KVER/build"
@@ -197,6 +208,8 @@ jobs:
 
       - name: Build the kmod spec and rebuild its akmod SRPM
         if: steps.deps.outputs.kmod == 'yes'
+        env:
+          KVER: ${{ steps.kver.outputs.kver }}
         run: |
           set -eu
           # This spec calls kmodtool, so it is built here rather than in the
@@ -235,13 +248,13 @@ jobs:
             || { echo "the akmod package did not install at all"; exit 1; }
           SRPM=$(find /usr/src/akmods -name 'gigabyte-laptop-kmod-*.src.rpm' | head -1)
           test -n "$SRPM" || { echo "akmod package shipped no SRPM"; exit 1; }
-          echo "::notice::rebuilding $SRPM for ${{ steps.kver.outputs.kver }}"
+          echo "::notice::rebuilding $SRPM for $KVER"
           # With `kernels` defined, the spec's BuildRequires on the rpmfusion
           # buildsys package is skipped by its own %{!?kernels:...} guard, so
           # this rebuild needs no extra repo -- which is the point: it is what
           # akmods runs on a user's machine.
           rpmbuild --rebuild \
-                   --define "kernels ${{ steps.kver.outputs.kver }}" "$SRPM"
+                   --define "kernels $KVER" "$SRPM"
           # This assertion used `find ... | head -1`, which is order-dependent
           # whenever the rebuild emits more than one matching package -- and
           # kmodtool is expected to, since it generates a kernel-versioned
@@ -294,11 +307,13 @@ jobs:
 
       - name: Record the kernel this suite ships, and whether it is new enough
         id: kver
+        env:
+          SUITE: ${{ matrix.suite }}
         run: |
           set -eu
           KVER=$(ls -1 /lib/modules | sort -V | tail -1)
           echo "kver=$KVER" >> "$GITHUB_OUTPUT"
-          echo "::notice::Debian ${{ matrix.suite }} headers $KVER"
+          echo "::notice::Debian $SUITE headers $KVER"
           # Probe for the two APIs that set the floor rather than guessing a
           # version number. Measured: trixie ships 6.12 and has NEITHER, so the
           # driver cannot build there; 7.0 and 7.3 have both and it builds clean.
@@ -319,11 +334,13 @@ jobs:
 
       - name: Compile directly first
         if: steps.kver.outputs.modern == 'yes'
+        env:
+          KVER: ${{ steps.kver.outputs.kver }}
         run: |
           set -eu
-          make KDIR="/lib/modules/${{ steps.kver.outputs.kver }}/build"
+          make KDIR="/lib/modules/$KVER/build"
           test -f gigabyte-laptop.ko
-          make KDIR="/lib/modules/${{ steps.kver.outputs.kver }}/build" clean
+          make KDIR="/lib/modules/$KVER/build" clean
 
       - name: Build the .deb
         run: |
@@ -364,9 +381,11 @@ jobs:
 
       - name: Compile through DKMS
         if: steps.kver.outputs.modern == 'yes'
+        env:
+          KVER: ${{ steps.kver.outputs.kver }}
         run: |
           set -eu
-          dkms build -m gigabyte-laptop -v "$VER" -k "${{ steps.kver.outputs.kver }}"
+          dkms build -m gigabyte-laptop -v "$VER" -k "$KVER"
           find /var/lib/dkms/gigabyte-laptop -name 'gigabyte-laptop.ko*' -print
 
       - name: Exercise every prerm argument dpkg can pass
