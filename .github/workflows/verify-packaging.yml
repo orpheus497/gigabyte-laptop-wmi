@@ -1,0 +1,291 @@
+# Verify the packaging by building, installing and compiling it -- which is what
+# debug-driver.yml does NOT do.
+#
+# debug-driver.yml builds the RPMs in mock and is a real check of the spec's
+# metadata, but it never invokes the compiler on gigabyte-laptop.c. The reason
+# is gigabyte-laptop-kmod.spec setting `%global buildforkernels akmod`: in akmod
+# mode kmodtool emits no `kernel_versions`, so the %prep, %build and %install
+# loops iterate zero times and only %{?akmod_install} runs. That is correct
+# akmod behaviour -- the end user's machine compiles later -- and it is why a
+# syntax error or a wrong struct member showed four green ticks.
+#
+# This workflow closes that, on both package families:
+#
+#   compile   plain `make` against a distro kernel-devel. Cheapest gate, runs
+#             first, and the only one that fails in seconds.
+#   fedora    build the three RPMs, install the DKMS one, compile through DKMS,
+#             then rebuild the akmod SRPM for a named kernel -- which is exactly
+#             the mechanism akmods uses on a user's machine at boot.
+#   debian    build the .deb, install it, compile through DKMS, then REMOVE it
+#             and assert the DKMS registration is gone. That last assertion is
+#             the one that would have caught the `[ "$x"]` prerm bug, which
+#             survived upstream and every green run here because nothing in CI
+#             had ever read that file.
+#
+# Kernel floor: the driver needs APIs newer than 6.8 (the platform_profile
+# class API, power_supply_ext, devm_battery_hook_register). Each job prints the
+# kernel it compiled against, so a failure on an older release is legible as a
+# portability fact rather than a mystery.
+name: Verify packaging
+
+on: push
+
+jobs:
+  compile:
+    name: Compile the driver
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install a kernel-devel and a toolchain
+        run: dnf -y install kernel-devel gcc make
+
+      - name: Compile
+        run: |
+          set -eu
+          # The container's `uname -r` is the HOST kernel and has no headers
+          # here, so the Makefile's default KDIR is wrong by construction.
+          # Take the newest kernel-devel actually installed instead.
+          KVER=$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-devel | sort -V | tail -1)
+          echo "::notice::compiling against kernel-devel $KVER"
+          make KDIR="/usr/src/kernels/$KVER"
+          test -f gigabyte-laptop.ko || { echo "no module produced"; exit 1; }
+          modinfo ./gigabyte-laptop.ko | sed -n '1,8p'
+
+      - name: Compile again with W=1, warnings fatal
+        run: |
+          set -eu
+          KVER=$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-devel | sort -V | tail -1)
+          make KDIR="/usr/src/kernels/$KVER" clean
+          # KCFLAGS rather than editing the Makefile: upstream's Makefile is
+          # four lines and is not the place for a CI-only flag.
+          make KDIR="/usr/src/kernels/$KVER" W=1 KCFLAGS="-Werror"
+
+  fedora:
+    name: Fedora ${{ matrix.version }} (build, install, akmod)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [44, 43, 42]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install build and packaging dependencies
+        run: |
+          set -eu
+          # kmodtool and buildsys-build-rpmfusion-kerneldevpkgs-* live in RPM
+          # Fusion, not Fedora proper, and gigabyte-laptop-kmod.spec BuildRequires
+          # both. debug-driver.yml gets them by pointing mock at the RPM Fusion
+          # repo; a plain container has to enable it.
+          dnf -y install "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
+          dnf -y install kernel-devel gcc make rpm-build dkms \
+                         dnf-plugins-core redhat-rpm-config elfutils-libelf-devel
+
+      - name: Record the kernel this release ships
+        id: kver
+        run: |
+          set -eu
+          KVER=$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-devel | sort -V | tail -1)
+          echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+          echo "::notice::Fedora ${{ matrix.version }} kernel-devel $KVER"
+
+      - name: Stage the source tarball the specs expect
+        run: |
+          set -eu
+          # Version comes from the spec, not a literal. debug-driver.yml hardcodes
+          # `s/@PKGVER@/0.2.0/`, so it tests the substitution against a constant
+          # and would stay green through a version bump that desynced the two.
+          VER=$(rpm -q --qf '%{VERSION}\n' --specfile pkg-files/rpm/gigabyte-laptop-dkms.spec | head -1)
+          echo "::notice::spec version $VER"
+          sed -e "s/@PKGVER@/$VER/" -i dkms.conf
+          grep -q '@PKGVER@' dkms.conf && { echo "substitution failed"; exit 1; }
+          mkdir -p ~/rpmbuild/SOURCES
+          tar -czf ~/rpmbuild/SOURCES/driver.tar.gz \
+              Makefile gigabyte-laptop.c dkms.conf gigabyte-laptop.conf
+          cp gigabyte-laptop.conf ~/rpmbuild/SOURCES/
+          echo "VER=$VER" >> "$GITHUB_ENV"
+
+      - name: Build all three RPMs
+        run: |
+          set -eu
+          for s in gigabyte-laptop-dkms gigabyte-laptop-kmod-common gigabyte-laptop-kmod; do
+            echo "=== $s ==="
+            # builddep rather than --nodeps, so BuildRequires is genuinely
+            # validated here as well as in mock.
+            dnf -y builddep "pkg-files/rpm/$s.spec"
+            rpmbuild -bb "pkg-files/rpm/$s.spec"
+          done
+          find ~/rpmbuild/RPMS -name '*.rpm' -printf '%f\n' | sort
+
+      - name: Install the DKMS package and check it registers
+        run: |
+          set -eu
+          rpm -Uvh --nodeps ~/rpmbuild/RPMS/noarch/gigabyte-laptop-dkms-*.rpm || true
+          # %post runs `dkms install` for the RUNNING kernel, which in a
+          # container is the host's and has no headers -- so a non-zero rpm exit
+          # here is an artifact of the container, not a packaging defect. What
+          # must hold is that the payload landed and the module is registered.
+          test -f "/usr/src/gigabyte-laptop-${VER}/gigabyte-laptop.c"
+          test -f "/usr/src/gigabyte-laptop-${VER}/dkms.conf"
+          test -f /etc/modules-load.d/gigabyte-laptop.conf
+          grep -q "PACKAGE_VERSION=\"${VER}\"" "/usr/src/gigabyte-laptop-${VER}/dkms.conf"
+          dkms status -m gigabyte-laptop | tee /tmp/dkms.status
+          grep -q gigabyte-laptop /tmp/dkms.status
+
+      - name: Compile through DKMS, the way a user gets it
+        run: |
+          set -eu
+          dkms build -m gigabyte-laptop -v "$VER" -k "${{ steps.kver.outputs.kver }}"
+          find /var/lib/dkms/gigabyte-laptop -name 'gigabyte-laptop.ko*' -print
+
+      - name: Rebuild the akmod SRPM, which is what akmods does at boot
+        run: |
+          set -eu
+          # The akmod package's whole payload is a source RPM; akmods rebuilds it
+          # for the running kernel. Passing --define "kernels <ver>" is what makes
+          # kmodtool emit kernel_versions, so this is the one route that exercises
+          # the kmod spec's %prep/%build/%install for real.
+          rpm -Uvh --nodeps ~/rpmbuild/RPMS/x86_64/akmod-gigabyte-laptop-*.rpm
+          SRPM=$(find /usr/src/akmods -name 'gigabyte-laptop-kmod-*.src.rpm' | head -1)
+          test -n "$SRPM" || { echo "akmod package shipped no SRPM"; exit 1; }
+          echo "::notice::rebuilding $SRPM for ${{ steps.kver.outputs.kver }}"
+          # With `kernels` defined, the spec's BuildRequires on the rpmfusion
+          # buildsys package is skipped by its own %{!?kernels:...} guard, so
+          # this rebuild needs no extra repo -- which is the point: it is what
+          # akmods runs on a user's machine.
+          rpmbuild --rebuild \
+                   --define "kernels ${{ steps.kver.outputs.kver }}" "$SRPM"
+          KMOD=$(find ~/rpmbuild/RPMS -name 'kmod-gigabyte-laptop-*.rpm' | head -1)
+          test -n "$KMOD" || { echo "akmod rebuild produced no kmod package"; exit 1; }
+          rpm -qlp "$KMOD" | grep -E 'gigabyte-laptop\.ko' || {
+            echo "the rebuilt kmod package contains no module"; exit 1; }
+
+  debian:
+    name: Debian ${{ matrix.suite }} (build, install, remove)
+    runs-on: ubuntu-latest
+    container:
+      image: debian:${{ matrix.suite }}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [sid, trixie]
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install build and packaging dependencies
+        run: |
+          set -eu
+          apt-get update -qq
+          # dh-sequence-dkms, which debian/control Build-Depends on, is a virtual
+          # package provided by dh-dkms.
+          apt-get install -y --no-install-recommends \
+            build-essential debhelper dh-dkms dkms fakeroot \
+            linux-headers-amd64 kmod
+
+      - name: Record the kernel this suite ships
+        id: kver
+        run: |
+          set -eu
+          KVER=$(ls -1 /lib/modules | sort -V | tail -1)
+          echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+          echo "::notice::Debian ${{ matrix.suite }} headers $KVER"
+
+      - name: Compile directly first
+        run: |
+          set -eu
+          make KDIR="/lib/modules/${{ steps.kver.outputs.kver }}/build"
+          test -f gigabyte-laptop.ko
+          make KDIR="/lib/modules/${{ steps.kver.outputs.kver }}/build" clean
+
+      - name: Build the .deb
+        run: |
+          set -eu
+          # debian/rules refers to ../dkms.conf, ../Makefile and
+          # ../gigabyte-laptop.c, so the build runs from pkg-files/ and `..`
+          # resolves to the repo root. Building from the repo root instead puts
+          # those paths outside the checkout and fails. Nothing documented this.
+          cd pkg-files
+          dpkg-buildpackage -us -uc -b
+          ls -la ../*.deb
+
+      - name: Inspect the package before installing it
+        run: |
+          set -eu
+          DEB=$(ls -1 ./*.deb | head -1)
+          dpkg-deb -c "$DEB"
+          VER=$(dpkg-deb -f "$DEB" Version | sed -e 's/-[^-]*$//')
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          # The DKMS tree must be named without the Debian revision, or it stops
+          # matching the name every other packaging path registers.
+          dpkg-deb -c "$DEB" | grep -q "usr/src/gigabyte-laptop-${VER}/"
+          dpkg-deb --fsys-tarfile "$DEB" \
+            | tar -xO "./usr/src/gigabyte-laptop-${VER}/dkms.conf" \
+            | grep -q "PACKAGE_VERSION=\"${VER}\"" \
+            || { echo "@PKGVER@ was not substituted"; exit 1; }
+
+      - name: Install it and check it registers with DKMS
+        run: |
+          set -eu
+          dpkg -i ./*.deb
+          # postinst deliberately never fails: it runs dkms for the RUNNING
+          # kernel, which in a container is the host's. A non-zero exit here
+          # would be a real regression in that contract, so no `|| true`.
+          test -f /etc/modules-load.d/gigabyte-laptop.conf
+          dkms status -m gigabyte-laptop | tee /tmp/dkms.status
+          grep -q gigabyte-laptop /tmp/dkms.status
+
+      - name: Compile through DKMS
+        run: |
+          set -eu
+          dkms build -m gigabyte-laptop -v "$VER" -k "${{ steps.kver.outputs.kver }}"
+          find /var/lib/dkms/gigabyte-laptop -name 'gigabyte-laptop.ko*' -print
+
+      - name: Exercise every prerm argument dpkg can pass
+        run: |
+          set -eu
+          # `sh -n` passes on both the `dconfigure` typo and the `[ "$x"]`
+          # bracket bug, so a parse check proves nothing here. Running the
+          # script is the only thing that does.
+          #
+          # Run it against a NAME that is not registered, so this tests the
+          # case-label dispatch and nothing else. Invoking the real prerm with
+          # "remove" would actually run `dkms remove`, which would leave the
+          # next step asserting an absence it had itself created -- a check a
+          # broken prerm and a working one would both pass. Found by rehearsing
+          # this job rather than by reading it.
+          sed -e 's/^NAME=.*/NAME=gigabyte-laptop-ci-dispatch-probe/' \
+              /var/lib/dpkg/info/gigabyte-laptop-dkms.prerm > /tmp/prerm-probe
+          for a in remove upgrade deconfigure; do
+            sh /tmp/prerm-probe "$a" \
+              || { echo "prerm rejected the '$a' job"; exit 1; }
+          done
+          sh /tmp/prerm-probe bogus-job \
+            && { echo "prerm accepted an unknown job"; exit 1; } || true
+          # The probe must not have touched the real registration.
+          dkms status -m gigabyte-laptop | grep -q gigabyte-laptop \
+            || { echo "the dispatch probe mutated DKMS state"; exit 1; }
+
+      - name: Remove it and assert the DKMS registration is gone
+        run: |
+          set -eu
+          dpkg -r gigabyte-laptop-dkms
+          # THE assertion. The bracket bug meant `dkms remove` was skipped on
+          # every remove and upgrade, leaving the registration behind while dpkg
+          # reported the package gone.
+          if dkms status -m gigabyte-laptop 2>/dev/null | grep -q gigabyte-laptop; then
+            echo "prerm left the DKMS registration behind:"
+            dkms status -m gigabyte-laptop
+            exit 1
+          fi
+          test ! -f /etc/modules-load.d/gigabyte-laptop.conf
+          dpkg --purge gigabyte-laptop-dkms
