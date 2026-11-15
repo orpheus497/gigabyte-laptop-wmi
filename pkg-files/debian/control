@@ -8,7 +8,8 @@ Vcs-Git: https://github.com/tangalbert919/gigabyte-laptop-wmi
 
 Package: gigabyte-laptop-dkms
 Architecture: amd64
-Version: 0.2.0
+Section: kernel
+Priority: optional
 Depends: dkms
 Conflicts: aorus-laptop-dkms
 Breaks: aorus-laptop-dkms
