@@ -2086,11 +2086,22 @@ suite, and "six jobs green" did not mean what it looked like.
 **Validating it on Ubuntu is exactly what hid it.** Measured here: Ubuntu's
 `linux-headers-<ver>-generic` **does** carry `include/linux/`, so the grep
 resolves and answers `no` for 6.8 and `yes` for 7.0 — correct, and the reason
-the local check passed. Debian splits the generic headers into
-`linux-headers-<ver>-common` while the arch package owns `$K`. That split is
-the likely cause rather than a measured one, so the step now prints the link
-target and whether the header is there, and the next run records it instead of
-this paragraph asserting it.
+the local check passed.
+
+**The Debian split is the cause, and it is measured rather than assumed.** The
+step prints the layout, and the run says:
+
+```
+/lib/modules/7.3.4+deb14-amd64/build -> /usr/src/linux-headers-7.3.4+deb14-amd64
+include/linux/platform_profile.h ABSENT
+found under /usr/src at:
+  /usr/src/linux-headers-7.3.4+deb14-common/include/linux/platform_profile.h
+```
+
+So `build` points at the **arch** directory, the header is **not there**, and
+it ships in the separate **`-common`** package. That line stays in the step on
+purpose: it is one `::notice::` that keeps the explanation a reading rather
+than a story, and it costs nothing.
 
 **The fix is to ask kbuild instead of the filesystem**: build a throwaway
 module against `$K`, which uses the kernel's own include resolution and cannot
@@ -2127,6 +2138,12 @@ whose real compile outcomes are known, and the verdicts match the driver's own:
 7.0.0-43-generic      probe modern=yes   driver BUILDS    -> agree
 no-such-kernel-9.9.9  probe exit=1       error branch     -> fires
 ```
+
+**Confirmed on CI, 15 Nov 2026**, and the prediction written before the push
+held on both suites: sid now runs *"Compile directly first"* and *"Compile
+through DKMS"* for the first time — `CC [M]`, `LD [M]`, `BTF [M]`, then two
+`.ko` files out of `dkms build` — while trixie still skips both, now because
+the probe genuinely cannot build against 6.12.
 
 **The lesson is one this file already has a name for**, which is why the
 episode is kept rather than quietly fixed: *a guard that has not been shown to

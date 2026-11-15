@@ -328,14 +328,13 @@ jobs:
           # "$K/include/linux/platform_profile.h" and answered "too old" on
           # EVERY suite, silently skipping both compile steps -- including on
           # sid, whose 7.3.4 headers then built the module successfully in the
-          # postinst a few log lines later. That is proof the guessed path did
-          # not resolve; the likely reason is Debian shipping the generic
-          # headers in linux-headers-<ver>-common while the arch package owns
-          # $K, which the line below records rather than assumes. Validating
-          # the grep on Ubuntu, whose arch package DOES carry include/linux,
-          # is what hid it. Building a throwaway module uses the kernel's own
-          # include resolution and cannot be fooled by where a distro puts
-          # things.
+          # postinst a few log lines later. The cause is measured, by the
+          # notice below: $K is the ARCH header directory, which does not
+          # carry include/linux at all -- those ship in the separate
+          # linux-headers-<ver>-common package. Validating the grep on Ubuntu,
+          # whose arch package DOES carry include/linux, is what hid it.
+          # Building a throwaway module uses the kernel's own include
+          # resolution and cannot be fooled by where a distro puts things.
           #
           # Three outcomes, kept distinguishable on purpose, because the failure
           # that matters is a broken probe quietly reading as an old kernel:
@@ -343,8 +342,8 @@ jobs:
           #   empty ok, API probe no -> the kernel really is too old, warn+skip
           #   API probe yes          -> compile the driver for real
           K="/lib/modules/$KVER/build"
-          # Record the layout, so the reason the old grep failed is measured in
-          # the log instead of inferred in a comment.
+          # Keep printing the layout. It is what turned the paragraph above
+          # from a plausible story into a reading, and it is one notice.
           echo "::notice::$K -> $(readlink -f "$K"); include/linux/platform_profile.h $(test -e "$K/include/linux/platform_profile.h" && echo present || echo ABSENT); found under /usr/src at: $(ls -d /usr/src/linux-headers-*/include/linux/platform_profile.h 2>/dev/null | tr '\n' ' ')"
           probe=$(mktemp -d)
           printf 'obj-m += t.o\n' > "$probe/Kbuild"
