@@ -1693,6 +1693,11 @@ Note the naming: `upstream` is the *project*, not `origin`. A habitual
 fork, not the project. Upstream updates come from
 `git fetch upstream && git log upstream/master`.
 
+**`upstream/master` itself has moved on, and this paragraph is about our local `master`
+only.** Upstream is at `d184209`, five commits past `4b817ea`, as of 15 Nov 2026; see
+"What upstream has added since the fork point". Our `master` staying put is the point of
+it, but do not read the sentence below as "we are level with upstream".
+
 `master` still sits at upstream's `4b817ea`, untouched — verified after the
 PR #3 merge on both the local and the fork copy. The never-merge rule covers
 `master` only, and PR #3's base was the scratch branch, which is why merging it
@@ -1940,6 +1945,218 @@ the Debian/RPM packaging.
 
 **Cherry-pick features from `a16/master`. Do not merge it.**
 
+### What upstream has added since the fork point — audited 15 Nov 2026
+
+**`upstream/master` is no longer `4b817ea`.** It is **`d184209`**, five commits
+ahead, and nothing in this file recorded that it had moved. The local `master`
+is still at `4b817ea` and should stay there — but "we are level with upstream"
+was an assumption with a shelf life, and it expired on 9 Sep 2026.
+
+```
+d184209  2026-11-06  Debian: fix typo
+f8a9e13  2026-11-06  Handle AORUS 17X VF quirks
+9d480d9  2026-11-06  Lower max fan speed to 229
+c612eec  2026-11-06  Initialize pointer before checking for ejector
+c915f1a  2026-09-09  Remove DSDT files from tree
+```
+
+`4b817ea` is still an ancestor of `upstream/master`, so this is a clean range
+and not a rewrite. **It is the whole delta**, verified by diffing the driver
+file directly from `4b817ea` to `upstream/master` rather than by trusting the
+commit list: the complete change is those three driver commits and nothing more.
+The other upstream branches are either already merged (`debian-pkg`, `fan-pwm`,
+`fix-action`, `untested` — zero unique commits) or abandoned CI experiments
+(`test-rpm`, Feb 2025; `test-workflow`, Apr 2023).
+
+**The direction is take-only.** Upstream is a source of fixes and firmware
+insight for this driver; see "Decided: upstreaming comes last" for what happens
+to the record in the other direction, which is nothing until the goals here are
+met. The question each commit gets asked below is only *does this benefit this
+driver on this machine*.
+
+| Commit | Verdict |
+|---|---|
+| `d184209` prerm `deconfigure` | **taken** — we had the same typo |
+| `c612eec` ejector pointer | already fixed here in `4a96703`, and placed earlier |
+| `9d480d9` 229 duty clamp | not taken — no observable effect on this EC |
+| `f8a9e13` AORUS 17X VF | **cannot work on this firmware.** Not "port later" |
+| `c915f1a` delete the DSDTs | rejected — those dumps are load-bearing here |
+
+**Net: one word.** Three months of upstream work added no capability to this
+laptop, which is the expectation to carry rather than a complaint — upstream is
+working on Intel AORUS hardware.
+
+#### Nothing was lost in the rename and rewrite
+
+**Checked by enumerating, not by reading the diff.** That is the method this
+file arrived at for the privacy audit — enumerate the sources rather than
+guess at patterns — and it transfers: 3309 lines against upstream's 1205 is far
+too big to eyeball, so compare inventories instead.
+
+Every method-ID `#define` upstream declares is declared here, **at the same
+value**, so there is no name that survived with drifted contents. Every sysfs
+node upstream exposes is exposed here, plus six of our own (`perf_mode`,
+`dynamic_boost`, `fan_turbo`, `fan_preset`, `power_preset`,
+`debug_method_write`). Every upstream function has a same-named counterpart. The
+hwmon channel config is identical. The only upstream structure absent here is
+`gigabyte_laptop_aorus_vf[]`, which arrived in `f8a9e13` and is rejected below.
+
+So the divergence is entirely additive on this side. Worth re-running the same
+three comparisons after any future upstream audit; it is cheap and it is the
+only check that would catch a silent loss.
+
+#### `f8a9e13` corroborates the PECM/ERAM split from the other direction
+
+**The one piece of real value in the whole delta, and there is no code in it.**
+Upstream's AORUS commit reads GPU fan duty with `ec_read(0xB4)` instead of going
+through WMI. Asking what byte `0xB4` actually *is* turns the commit into
+independent evidence for a distinction this file already leans on — and it was
+answered entirely out of `AORUS-17X-VF-DSDT.dsl`, the dump upstream deleted in
+`c915f1a`.
+
+`AORUS-17X-VF-DSDT.dsl:125912-125919`, inside
+`OperationRegion (ECF2, EmbeddedControl, Zero, 0x0100)` (`:125728`), which is
+the only field block in that range. **The `//` offsets are added here, not
+firmware text** — these dumps carry no comments on these fields, unlike the
+Aero's genuine `// 0x60 (CPU temp)` annotations quoted under Hazards:
+
+```asl
+Offset (0xB0),
+FAN1,   8,      // EC 0xB0   (annotation)
+FAN2,   8,      // EC 0xB1
+Offset (0xB3),
+FDTY,   8,      // EC 0xB3
+GDTY,   8,      // EC 0xB4   <- what upstream reads
+Offset (0xB7),
+KBBL,   8,      // EC 0xB7
+```
+
+The same names exist on this machine and sit in a **different ACPI address
+space**. `GAMING-A16-5TH-DSDT.dsl:8174-8175` is inside
+`OperationRegion (PECM, SystemMemory, 0xFC7E0800, 0x1000)` (`:8097`), with no
+intervening region or field block (offsets annotated, not firmware text):
+
+```asl
+Offset (0x24),
+PWMB,   8,      // PECM 0x24  (annotation)
+FDTY,   8,      // PECM 0x25
+GDTY,   8,      // PECM 0x26
+Offset (0x29),
+GPUT,   8,      // PECM 0x29  <- matches this file's existing record
+```
+
+and this machine's *entire* `EmbeddedControl` region is two bytes (`:8246`):
+
+```asl
+OperationRegion (ERAM, EmbeddedControl, Zero, 0xFF)
+Field (ERAM, ByteAcc, Lock, Preserve)
+{
+    Offset (0x5F), ERBD, 8,
+    Offset (0x60), SMPR, 8,
+    Offset (0x62)
+}
+```
+
+**So `ec_read(0xB4)` here would be the dead `temp3` failure exactly.** The
+address is inside `ERAM`'s declared `0xFF` size and far past its last field, so
+it reads an undefined EC byte — the same thing `ec_read(0x62)` does. It does not
+touch `GDTY`, which lives at a *physical memory* address (`0xFC7E0800 + 0x26`)
+in a region the EC command interface cannot address at all.
+
+**Three things this settles, and the first is the durable one:**
+
+- **The PECM-versus-`ERAM` distinction now has evidence from a second
+  generation.** It was previously recorded off this machine alone, as the
+  explanation for `temp3`. Here is a sibling firmware where the identical field
+  names sit in EC RAM and `ec_read` genuinely reaches them — so the split is a
+  real generational change in where Gigabyte puts these fields, not a quirk of
+  one dump. **Field offsets do not transfer across generations any more than
+  method IDs do**, and that is now shown rather than assumed.
+- **`f8a9e13` is not "wrong hardware, port later" — the mechanism is absent.**
+  It is also unreachable twice over before that even matters: the flag is set
+  only when `DMI_PRODUCT_NAME` contains `AORUS 17X AZF` or `AORUS 17X AXF`
+  (`DMI_MATCH_GIGABYTE_LAPTOP_NAME` is a substring match on the product name
+  with an exact board-vendor match), and this machine reports
+  `GIGABYTE GAMING A16 5TH`. Do not revisit it.
+- **It is an instance of "the older dumps are a decoder for this firmware", run
+  backwards:** the older dump explained what a *newer upstream commit* was
+  doing, rather than what our own firmware was hiding.
+
+**One error, caught by validating rather than by re-reading.** Those offsets
+were first written up as `FDTY` 0x24 / `GDTY` 0x25, derived by finding the
+nearest preceding `Offset ()` marker and assuming the field followed it
+immediately. `PWMB, 8` sits in between, so the real offsets are **0x25 and
+0x26**. The check that caught it is the one worth copying: the same arithmetic
+puts `GPUT` at PECM `0x29` on line 8177, and this file **already records `GPUT`
+at `0x29`, line 8177** from separate work. Reproducing a figure the record
+already holds is what validated the method — and the nearest-marker shortcut is
+what produced the error. Read the lines; do not interpolate from a marker.
+
+#### The prerm typo, taken — 15 Nov 2026
+
+`pkg-files/debian/prerm` said `dconfigure` where dpkg's job name is
+`deconfigure`, so that invocation fell past the `case` labels to the `*)`
+catch-all, printed "unknown argument" and exited 1 — and a prerm that exits
+non-zero aborts the dpkg operation outright. Fixed, with the reason in the file.
+
+**It is a second, independent bug in the same `case` label as the missing-space
+one**, inherited from `4b817ea` and sitting one line above the comment block
+that documents the bracket bug.
+
+**Upstream fixed this half and still has the other.** `upstream/master`'s prerm
+reads, today:
+
+```sh
+remove|upgrade|deconfigure)
+    if [ "`dkms status -m $NAME`"]; then
+```
+
+so they edited that `case` statement and the broken test one line below it
+survived the edit. The bracket entry in the upstreaming list is unaffected.
+
+Verified by running the script, which is the only check that works on this class
+of bug — `sh -n` passes on both spellings:
+
+```
+before:  prerm deconfigure  -> exit 1   "unknown argument `deconfigure'"
+after:   prerm deconfigure  -> exit 0
+         prerm remove       -> exit 0
+         prerm upgrade      -> exit 0
+         prerm bogus-job    -> exit 1   (the catch-all still catches)
+```
+
+Parses under `sh` and `dash` both; Debian maintainer scripts run under
+`/bin/sh`, which is dash there, and a comment between `case` and the first label
+is legal in both.
+
+**Reachability is low, and that is not the argument for fixing it.** Nothing
+currently declares a relationship that would make dpkg deconfigure this package,
+so this was unlikely to be hit. It is one word, it was broken, and it was
+inherited rather than chosen.
+
+#### Where upstream has drifted, for future cherry-picks
+
+Four standing differences, recorded so none of them is a surprise later:
+
+| | upstream | here |
+|---|---|---|
+| `fan_custom_speed` range | 0–229, enforced and documented | 0–255, enforced and documented |
+| the DSDT dumps | deleted in `c915f1a` | kept, and used — including in this audit |
+| hardware under active work | AORUS 17X, Intel | GAMING A16 5TH, AMD Rembrandt |
+| driver size | 1205 lines | 3309 lines |
+
+Cherry-picking gets harder rather than easier. `f8a9e13` alone lands in three
+functions this fork has rewritten, and the fan-count detection it extends has
+been moved out of `probe()` into `gigabyte_laptop_detect_fan_count()` so that
+the flags are set before hwmon registration — so upstream's insertion point does
+not exist here in the same place.
+
+**`c612eec` and `9d480d9` are upstream independently converging on two entries
+already in the upstreaming list** — the `gpu_boost_store()` oops and the duty
+clamp. That is recorded as a fact about divergence shrinking, not as a reason to
+do anything: the oops is already fixed here and better placed, and the clamp is
+declined on this hardware for the reasons under Hazards.
+
 ### Code style
 
 Match the surrounding file: tabs, `pr_err`/`pr_info`/`pr_warn` with the
@@ -2089,10 +2306,26 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   #46: duties above 229 *stop the fans entirely* on the AERO 17-XA. The driver
   must never program a higher duty for itself, and the one place it picks a duty
   — `fan_turbo` — uses exactly `FAN_DUTY_MAX`. The `fan_custom_speed` node still
-  accepts the full 0–255 as upstream intends, and now **rejects anything above
-  255** rather than passing an arbitrary `u32` to the EC. Deliberately *not*
-  clamped to 229: upstream documents the wider range, and a user asking for a
-  duty above the ceiling on an affected model is making an informed choice.
+  accepts the full 0–255 and **rejects anything above 255** rather than passing
+  an arbitrary `u32` to the EC. Deliberately *not* clamped to 229, ~~because
+  upstream documents the wider range~~ — **that reason expired on 6 Nov 2026
+  and the decision did not.** Upstream `9d480d9` now clamps `fan_custom_speed`
+  at 229 and documents the node as 0–229, so citing upstream for the wider
+  range is simply false now. See "What upstream has added since the fork point".
+
+  **The decision stands on this machine's own measurements instead, which is a
+  better footing than it ever had.** The 255 bound is the one doing real work:
+  the field the value lands in is 8 bits wide, so 255 is the largest number that
+  survives the trip. 229 is a *different* EC's quirk. And nothing on this EC
+  reads the duty proportionally by any route — Step 4 closed four mechanisms,
+  `0x70` ignored targets of 25/50/75 and **stopped both fans at 100** — so a
+  ceiling on a number nothing acts on changes nothing observable here.
+
+  **The code comment still cites upstream and should not.**
+  `fan_custom_speed_store()` reads `// The node's range is 0-255, as upstream
+  documents it`. Left alone deliberately rather than overlooked: this file is the
+  record, the correction is here, and the comment is a one-line fix to make
+  whenever that function is next touched for a real reason.
 
   **The duty scale is read one way and written another, and the halves
   disagree — found 29 Oct 2026, and it is the open question behind this whole
@@ -4683,10 +4916,10 @@ Sorted by how likely each is to be accepted, for when that time comes:
 
 | Candidate | Why it should go up |
 |---|---|
-| `gpu_boost_store()` oops (#45) | Dereferenced `gigabyte` before assigning it; any write oopsed the kernel |
+| `gpu_boost_store()` oops (#45) | Dereferenced `gigabyte` before assigning it; any write oopsed the kernel. **Upstream fixed this itself in `c612eec`, 6 Nov 2026** — no longer a divergence. Ours (`4a96703`) assigns earlier still, right after `kstrtouint`, so no path can reach a use before it |
 | `gpu_boost` split detach/restore pair | **Fixed 29 Oct 2026 — the node now takes the full 0-4 the firmware implements.** Was: `mode >= 3` blocked only when `has_dgpu_ejector` is set, then `if (mode > 3)` permitted 3 — a dGPU eject — while rejecting 4, its restore. The defect was the asymmetry, not the feature. See Hazards |
 | Typed read refuses a BUFFER | An unimplemented ID echoes its argument into an `int` and returns success, so an absent method reads as a genuine `0`. **Pitch it as a latent correctness hole, not a live misdetection** — ~~it fixes a live `0xFA` silent-fan misdetection on every model outside the three early-exit DMI families~~, which was checked on 29 Oct 2026 and does not hold: the models that reach that read are old Aero and P-series, and the one dump from that range implements `0xFA` in `WMBC` (`Aero-15-Classic-DSDT.dsl:60296`), so the read works there. Must also exempt the two methods that legitimately answer with a BUFFER — `0x63` and `0xFC` |
-| Duty clamp (#46) | Duties above `FAN_DUTY_MAX` stop the fans on an AERO 17-XA |
+| Duty clamp (#46) | Duties above `FAN_DUTY_MAX` stop the fans on an AERO 17-XA. **Upstream implemented this itself in `9d480d9`, 6 Nov 2026**, as a bare `229` literal in two places with no constant — so this is no longer a gap, and we still decline the clamp here for the reasons under Hazards |
 | Void-WMBD tolerance | `set_devstate()` reported `-EINVAL` for a third of this firmware's setters; see below |
 | Probe hardening | One absent optional method no longer aborts the whole module |
 | `memcpy` clamp | Size-aware getter; the old `void *` hid a five-byte caller |
@@ -4694,7 +4927,7 @@ Sorted by how likely each is to be accepted, for when that time comes:
 | `hwmon_read()` error propagation | Returned success with `*val` unwritten on a failed read |
 | NULL-safe DMI family match | Four unchecked `strcmp`s on `DMI_PRODUCT_FAMILY` |
 | `fan_lock` | Three entry points doing read-modify-write on `fan_mode` unserialised |
-| **Debian `prerm` never ran `dkms remove`** | `if [ "$(dkms status -m $NAME)"]; then` — **the space before `]` is missing**, so `[` never sees its terminator, exits with `missing ']'`, and the if-condition reads false. `dkms remove` was therefore **skipped on every remove and upgrade**, leaving the registration behind. Verified by running it: `sh: [: missing ']'`. **Present verbatim in upstream `4b817ea`**, so it is upstream's bug and not the rename's, and it hits any Debian user who removes or upgrades the package. The smallest possible patch and the easiest of this list to argue |
+| **Debian `prerm` never ran `dkms remove`** | `if [ "$(dkms status -m $NAME)"]; then` — **the space before `]` is missing**, so `[` never sees its terminator, exits with `missing ']'`, and the if-condition reads false. `dkms remove` was therefore **skipped on every remove and upgrade**, leaving the registration behind. Verified by running it: `sh: [: missing ']'`. **Present verbatim in upstream `4b817ea`**, so it is upstream's bug and not the rename's, and it hits any Debian user who removes or upgrades the package. The smallest possible patch and the easiest of this list to argue. **Still present on `upstream/master` as of 15 Nov 2026** — `d184209` edited that very `case` statement (the `dconfigure` typo one line above) and the broken test survived the edit, which is evidence it will not be found without a patch. The typo half is fixed here; see "The prerm typo, taken" |
 
 The rename, the `fan_preset` ring and the hotkey input device are this fork's
 own direction and should **not** be offered upstream without asking first — the
