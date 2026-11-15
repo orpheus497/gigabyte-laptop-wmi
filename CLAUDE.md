@@ -1870,10 +1870,10 @@ warning shows four green ticks.
 15 Nov 2026, and no longer: `verify-packaging.yml` compiles on six jobs,
 including `W=1 -Werror`.** Run it locally anyway, because it answers in seconds
 where CI answers in minutes. What is no longer true is that a push is
-unprotected. At the time this was written, every queued code
-change — the `gpu_boost` cap, the typed-read fix, a `battery_cycle` gate — is
-unprotected by CI until it is run. Run it before pushing; do not read a green
-run as a build.
+unprotected. ~~Every queued code change — the `gpu_boost` cap, the typed-read
+fix, a `battery_cycle` gate — is unprotected by CI until it is run. Run it
+before pushing; do not read a green run as a build.~~ That was the state on
+26 Oct 2026 and it is what the new workflow exists to end.
 
 **Related, and the same class of silent success:**
 `.github/workflows/debug-driver.yml:15` hardcodes the version —
