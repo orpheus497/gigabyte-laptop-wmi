@@ -1542,6 +1542,21 @@ Ctrl-C.** That is the house rule, and it exists because two hand-written sweeps
 were handed over without it — one left the fans audible with nothing saying why.
 A test that moves fan policy, a power tier or a profile ends by putting it back.
 
+**Restoring the fans means restoring `fan_preset`, not `fan_mode`.** The two are
+coupled: `fan_mode_store()` pins the preset from the mode, so writing the mode
+back can undo the preset restore two lines above it and leave policy pinned to
+nobody. Verified over all 15 reachable combinations:
+
+| saved preset | saved mode | what restores both |
+|---|---|---|
+| pinned | 0-2 | the preset write alone — it sets the mode |
+| `auto` | 0-2 | the preset write **alone**; writing the mode would pin it |
+| `auto` | 3+ custom | the mode write — mode 3+ sets the preset to `auto` itself |
+
+**The preset is the policy and the mode under `auto` is derived**, so the preset
+is the one to protect. A mode write is only ever needed, and only ever safe, for
+a custom mode.
+
 **Do not put a test in `scripts/` again**, and do not reach for a temporary
 directory either: `tests/test-cmos-slots.sh` is useless unless it survives a
 reboot, since identifying a CMOS slot means reading it, rebooting into BIOS
@@ -1614,15 +1629,12 @@ does would retrieve them. The check, for any generated file:
 git ls-files tools/          # a build artifact here is a mistake
 ```
 
-CodeRabbit listed it among the files it reviewed, which is the other tell — a
-review that reports a compiled binary as a reviewed file is reporting a repo
-defect, not a review.
 
 ### Branches
 
 | Branch | Purpose |
 |---|---|
-| `master` | Pristine upstream tracking. **Never commit here.** |
+| `master` | Pristine upstream tracking. **Never commit here, and never merge the integration branch onto it.** Doing so costs the thing it exists for: `git log upstream/master` stops being a clean comparison, the cherry-pick strategy loses its baseline, and the eventual upstream patch series gets harder to extract from a fork point that no longer exists. If a merge is ever genuinely wanted, tag the baseline first — `git branch upstream-pristine 4b817ea` |
 | `a16-5th-gmate` | **Integration branch. All work lands here.** |
 | `a16-5th` | Retired 24 Oct 2026. Local only; deleted on the fork. **Do not delete.** |
 | `a16-5th-kbd-charge-uevent` | PR #2's feature branch, merged. Local only; deleted on the fork. **Do not delete.** |
@@ -1702,337 +1714,6 @@ it, but do not read the sentence below as "we are level with upstream".
 PR #3 merge on both the local and the fork copy. The never-merge rule covers
 `master` only, and PR #3's base was the scratch branch, which is why merging it
 was safe.
-
-### How reviews work on this fork (and PR #1, the first review surface)
-
-[`orpheus497/gigabyte-laptop-wmi#1`](https://github.com/orpheus497/gigabyte-laptop-wmi/pull/1)
-— "[WIP] Functionality for Gigabyte Gaming A16 5th", `master <- a16-5th` — existed
-to be a place CodeRabbit reviewed and the diff could be read, never to be merged.
-**Closed without merging on 2026-10-21**, which honoured that: `merged=False`,
-and `master` is still exactly upstream's `4b817ea` on both the local and the fork
-copy. Verified, not assumed.
-
-**The never-merge rule is the durable part and still stands.** Merging the
-integration branch onto `master` would cost exactly what the table above
-protects: `git log upstream/master` stops being a clean comparison, the
-cherry-pick strategy loses its baseline, and the eventual upstream patch series
-gets harder to extract from a fork point that no longer exists. If a merge is
-ever wanted, preserve the baseline first — `git branch upstream-pristine 4b817ea`
-— and record the decision here.
-
-What the surface produced while it was open: one full-diff review (29 files) and
-one incremental one, four actionable findings, three acted on and one declined
-with reasons. All four are described below under the commits that closed them.
-
-To get another review later, reopen that PR or raise a fresh one from
-`a16-5th-gmate` — to a scratch branch, not `master`. Two things to expect, both
-learned the hard way:
-
-- **Whether a push is auto-reviewed depends on the PR's base**, and the
-  headline here said the opposite until 15 Nov 2026: *"Reviews are
-  manual-trigger on this fork, so expect to ask for every one."* **That is
-  false for a PR based on the default branch**, and it is what made me report
-  two pushed commits as unreviewed when the bot had already reviewed them
-  unasked. The sub-rule below was right the whole time; the summary above it
-  was not, which is the same shape as the `cmos-slots` finding — **a detailed
-  procedure and its headline are two copies of the same claim, and fixing one
-  is not fixing it.**
-
-  Observed on PR #5, base `a16-5th-gmate` (the default branch): pushes of
-  `9ff0c7e` and `f4e7700` each started a review by themselves, minutes apart,
-  with no checkbox and no comment.
-
-  Two reasons for a skip were recorded. The first is **falsified**; the second
-  holds:
-  - ~~*"fewer than 10 stars"* — the free tier does not auto-review small
-    repos.~~ **Contradicted by observation, 15 Nov 2026.** The fork still has
-    **0** stars and pushes to PR #5 are auto-reviewed regardless, so whatever
-    this gate once did, it is not blocking auto-review here now.
-  - *"Auto reviews are disabled on base/target branches other than the default
-    branch"* — **live again as of 29 Oct 2026, pointing the other way.** This
-    bullet was struck through on 26 Oct as retired, and it was not: it is a
-    rule about *the base not being the default branch*, and which PRs that
-    catches flipped when the default branch moved.
-
-    | Date | Default branch | What gets skipped |
-    |---|---|---|
-    | 22 Oct | `master` | a PR **to** the integration branch — seen on PR #2 |
-    | 29 Oct | `a16-5th-gmate` | a PR **to `master`** — seen on PR #4 |
-
-    Both verified against the API rather than assumed:
-    `default_branch` is `a16-5th-gmate`, PR #4's base is `master`, and
-    CodeRabbit edited its summary in place to say *"Review skipped"* on the
-    `cf23ff1` push.
-
-    **This collides with the review-surface strategy**, which is the part that
-    matters. PR #1 and PR #4 both target `master` precisely because the
-    never-merge rule makes it a safe place to read a full diff — and that is
-    now exactly the base that gets auto-skipped. PR #4's 20 findings arrived
-    only because an `@coderabbitai review` comment was posted by hand a few
-    seconds after it was opened.
-
-    **So a push to a `master`-based PR is never reviewed, and silence is not a
-    clean bill of health.** Trigger every review by hand, and read the summary
-    comment for the "Review skipped" banner before believing an empty result —
-    the bot *edits the existing comment in place* rather than adding a new one,
-    so nothing arrives to announce it.
-
-    The lesson the 26 Oct note was reaching for still holds and is sharper
-    now: **a stale reason behind a correct conclusion is how the conclusion
-    survives the day the reason stops being true** — and striking a rule
-    through as "no longer applies" is itself a claim with a shelf life. The
-    rule never changed. Our configuration did, twice.
-
-  **So, scoped properly:** a push to a PR based on the **default branch**
-  (`a16-5th-gmate`) is reviewed automatically. A push to a PR based on anything
-  else — `master`, which is where the full-diff review surfaces live — is
-  **never** reviewed, and needs the 🔍 Trigger review checkbox or an
-  `@coderabbitai review` comment. On a `master`-based PR, silence means
-  nothing at all.
-
-  **On a default-based one, silence still is not a result** — and this said
-  *"silence is a real result"* until the next review caught it, which is an
-  over-correction in the opposite direction from the headline it was fixing. A
-  default-branch review can be rate-limited or auto-paused just like any other,
-  and both of those clear their banner without reviewing anything. So an
-  auto-review being *possible* is not evidence that one *happened*: the status
-  still has to be established by the procedure below, and until it is, it is
-  **unknown**.
-- **The included-review allowance is not a fixed number — it is derived from
-  your own trailing usage, and no figure recorded here will stay true.** The
-  bot states it in each review's **Review info**, and on PR #5 it said, two
-  hours apart on the same day:
-
-  ```
-  21:3x  "3 included reviews remain after this review.
-          Your current allowance at 5 reviews per hour."
-  23:22  "3 included reviews remain after this review.  Your included PR review
-          attempts over the past 7 days set your current allowance at
-          4 reviews per hour."
-  ```
-
-  **The second sentence is the mechanism** and it is why this bullet has now
-  been wrong three times: ~~one per hour~~ (October), ~~five per hour~~
-  (15 Nov, morning), **four** by that evening. The allowance is a function of
-  **review attempts over the past 7 days**, so heavy use lowers it. **Read the
-  current figure off the newest review's Review info; do not carry a number
-  forward.**
-
-  **The shape of the warning is the durable part**, which is why the rest of
-  this bullet stays. The bot says it exactly: *"Review limit reached ... Next
-  included review available in N minutes"*. A run that hits the limit stops
-  **before reviewing at all** -- it still prints the scope it would have
-  covered, which reads like a review that ran. Check for that warning before
-  trusting an empty result. Spend the allowance on a batch of real work, not a
-  docs-only push, and do not fire several triggers in quick succession: three
-  in a row exhausted it on 22 Oct 2026 and the fourth, which covered the actual
-  fixes, never ran.
-
-  **And a declining allowance makes that advice sharper than it was.** When the
-  rate itself drops with use, firing a run on each small push does not merely
-  spend today's reviews — it lowers tomorrow's ceiling. Batch.
-- **Reviews AUTO-PAUSE on a branch under active development — a third skip
-  mechanism, seen 15 Nov 2026.** After two pushes in quick succession the bot
-  edited its summary in place to say:
-
-  ```
-  Reviews paused
-  It looks like this branch is under active development. To avoid overwhelming
-  you with review comments due to an influx of new commits, CodeRabbit has
-  automatically paused this review.
-    - Last reviewed commit: 084eea4
-    - Latest commit, not reviewed: 23ed9e5
-  ```
-
-  **It names the unreviewed commit, which is the one useful thing about it** —
-  the other skip mechanisms do not. Resume with `@coderabbitai resume`, or get
-  one review with `@coderabbitai review`; the setting behind it is
-  `reviews.auto_review.auto_pause_after_reviewed_commits`.
-
-  **And the same comment carried the line "No actionable comments were
-  generated in the recent review."** That reads as a clean bill of health and
-  sits directly above the notice saying nothing was reviewed. So this is the
-  third mechanism and the third time the same trap applies: **the bot edits one
-  comment in place, so an unreviewed push and a clean push look identical from
-  the thread list.** Read the banner, not the absence of findings.
-
-  **And "read the banner" is not enough on its own — the banner goes away
-  before the stale line does.** Seen 15 Nov 2026 when the pause was lifted:
-  the `Reviews paused` block disappeared from the comment, and
-  *"No actionable comments were generated in the recent review"* stayed, now
-  with nothing above it to qualify it. At that moment the comment read like a
-  clean review of the head commit, and the head commit had not yet been
-  reviewed.
-
-  **I then wrote a rule from that one observation and it was wrong within
-  four minutes**, which is worth the space because the rule sounded better
-  than the thing it replaced. It said: *the one field that cannot mislead is
-  the Merge Risk coverage sha; compare it against HEAD.* Then a review of
-  `084eea4..494ec73` ran, reported **no actionable comments**, and the
-  coverage sha **stayed at `084eea4`** — so the rule would have called a
-  completed clean review "never reviewed".
-
-  **Wrong again, and this is the third version — corrected 15 Nov 2026 by the
-  run that reviewed the correction.** The replacement rule said to read the
-  `between X and Y` scope line for the scope and the result line for the
-  verdict. **Neither field establishes that a review completed**, and this file
-  had already recorded why, twice, in the paragraphs the rule was written
-  between: a rate-limited run *"stops before reviewing at all -- it still
-  prints the scope it would have covered"*, and the result line is *"stale text
-  between runs, and present even mid-review"*. Pairing two fields that are each
-  unreliable does not produce a reliable one.
-
-  **Caught live, in the worst possible way.** At 23:16:30 that comment carried
-  all three of these at once:
-
-  ```
-  Currently processing new changes in this PR ...        <- still running
-  Reviewing files that changed ... between 084eea4 and 9ff0c7e
-  No actionable comments were generated in the recent review.
-  ```
-
-  Read by the rule above, that says "9ff0c7e reviewed, clean". The run was
-  mid-flight and its actual outcome was **a finding** — on the very paragraph
-  stating the rule.
-
-  **What the fields actually do**, with both outcomes now observed for each,
-  which is the standard the previous correction set and did not meet:
-
-  | Field | after a **clean** run | after a run with **findings** |
-  |---|---|---|
-  | `Currently processing new changes` | absent | absent |
-  | `Reviewing files ... between X and Y` | **absent** | absent |
-  | `No actionable comments were generated` | **inconsistent** — present after `494ec73`, **absent** after `bb2cb5b`, both clean | **absent** |
-  | Merge Risk `sourceCommitId` / `coveredCommitId` | **unchanged** | **both == head** |
-  | `get_reviews` from the API | **no object created** | object created |
-
-  The scope line is the one that matters here: **it lives inside the
-  in-progress block**, so it is visible only while the answer is "not yet", and
-  it is removed on completion. Naming it as the completion test was backwards.
-
-  **So there is no field that confirms a clean review of a given head**, and
-  that is the durable conclusion rather than a gap to fill later. **A clean run
-  can leave no trace whatsoever** — measured on `bb2cb5b`, 23:32: no review
-  object, no thread, the Merge Risk block unmoved at the previous head, and
-  **not even the *"No actionable comments"* line.**
-
-  ```
-  banner for f4e7700..bb2cb5b   appeared 23:30:30, gone by 23:32:22
-  review objects on PR #5       6, newest at f4e7700 — none at bb2cb5b
-  threads with commit_id bb2cb5b 0
-  recent_review_status block     absent
-  coveredCommitId                f4e7700  (not the head)
-  ```
-
-  **That retired the last candidate signal.** The table above says the result
-  line is *present* after a clean run, which is what the `494ec73` run did —
-  and the `bb2cb5b` run was equally clean and left the line **absent**. So its
-  presence tracks something other than cleanliness, and it cannot be used
-  either. Both halves of that table row were observed; the row is kept as a
-  record of what the field does, not as a test.
-
-  The upshot is unchanged in substance and now has no exceptions: a completed
-  clean run and a run that **never happened** are byte-for-byte identical in
-  the comment and in the API.
-
-  **The procedure, which ends in "unknown" rather than in a guess:**
-
-  | What you can see | What it means |
-  |---|---|
-  | `Currently processing` | a run is in flight. Wait |
-  | any notice that the run did not review — `Reviews paused`, `Review limit reached`, `Review failed` | nothing was reviewed. Resume or trigger |
-  | Merge Risk sha **== your head** | a run completed on your head **and found something**. Read the threads |
-  | a thread, or a **`coderabbitai[bot]`** review object **carrying a finding**, whose `commit_id` is your head | the same, from the API side |
-  | you watched the banner name your head and then vanish, **and** the comment carries no notice of a run that did not review, **and** nothing above matches that `commit_id` | it completed and found nothing — **the only way to establish clean** |
-  | anything else | **unknown.** Do not record it as clean |
-
-  Two refinements from the review of the commit that added this row, both
-  worth the space because of *why* they were needed:
-
-  - **The exclusion is stated generally, not as a list of notices.** It named
-    `Reviews paused` and `Review limit reached`, the two mechanisms this
-    session happened to hit, and a `Review failed` notice would have cleared
-    the banner and been read as clean. **An enumeration of the ways a thing
-    can fail is always one short**, so the row asks instead that the comment
-    carry *no* such notice. `Review failed` is named as an example on the
-    reviewer's word; it has not been observed here, and the general form does
-    not depend on it.
-  - **A review object must be CodeRabbit's and must carry a finding.** A human
-    approval creates a review object with the head's `commit_id`, which the
-    earlier row would have read as "CodeRabbit reviewed and found something" —
-    on a fork where the owner can approve their own PR, that is not
-    hypothetical. All 8 objects on PR #5 are `coderabbitai[bot]`/`COMMENTED`,
-    so nothing here was misread; the rule was simply wrong for the next PR.
-
-  **The one way to confirm a *completed* run on a specific head is to watch
-  the transition**: see the in-progress banner appear with your head in its
-  scope line, then see it gone. That ties a completion to a scope, which no
-  single later reading can do. It is what happened here — banner at 23:16:30
-  naming `9ff0c7e`, gone by 23:21:56 — which is why that run is known to have
-  finished rather than inferred.
-
-  **It says nothing about the outcome, and this paragraph said "a clean run"
-  until the next review corrected it.** The transition it cites as its example
-  produced **a finding**, three lines above. Take completion from the
-  transition and the outcome from the table: a Merge Risk sha or a
-  `commit_id` at your head for a run that found something, and the
-  transition-plus-nothing-recorded row for one that did not.
-
-  **This sentence named *"No actionable comments"* as the clean test until the
-  review after that**, which it could not be: the `bb2cb5b` measurement
-  recorded twenty lines above had already retired that field. Adding the
-  observation and leaving the sentence it falsified is the specific way this
-  section keeps going wrong — not over-claiming this time, but **failing to
-  propagate a correction through the document that states it.**
-
-  **And a timestamp is not an identity — the same review proved it with its own
-  data.** The table row above said to match a thread whose `created_at` is
-  after your push. The two findings that corrected these very lines were
-  created at **23:29:46**, after the `bb2cb5b` push, with
-  `commit_id` = **`f4e7700`** — the *previous* head. A run that starts before a
-  push posts its threads after it, so by the `created_at` rule those findings
-  would have been read as "`bb2cb5b` reviewed, found something", when
-  `bb2cb5b` had not been reviewed at all. `commit_id` and
-  `original_commit_id` are both populated on every thread and name the commit
-  actually reviewed; use them.
-
-  **Both of those are one mistake wearing two hats**: treating a signal that a
-  run *happened* as a signal about *what it found*, and treating *when* a
-  record appeared as *what it refers to*. Neither is a subtle distinction —
-  they are the same substitution of a convenient proxy for the field that
-  carries the fact, which is what the whole of this section has been about.
-
-  **The meta-lesson, now paid for three times.** Each version of this rule was
-  written from a single observation and was more confident than the one it
-  replaced. The second even stated the right standard — *a rule about how a
-  tool behaves needs at least one case of each outcome before it is worth
-  writing down* — and then failed it, because "a clean run" and "a run that
-  finds something" were the two cases it enumerated, when the case that breaks
-  everything is **a run that has not happened yet**. Enumerate the states the
-  tool can be in, not just the outcomes it can report.
-  Ways a review can silently not happen: the base not being the default
-  branch, the allowance, and this auto-pause. **It said "four, now: the star
-  count, ..." until 15 Nov 2026**, when the star gate was contradicted by
-  observation — see the first bullet. Counting a falsified mechanism as a live
-  one overstates how many ways there are to be fooled, which sounds
-  conservative and is not: it spends attention on a gate that is not firing.
-- The **Autofix** and **Generate docstrings** checkboxes push the bot's own
-  commits to the branch. Leave both unticked; the docstring one in particular
-  would act on a Docstring Coverage check that does not apply to kernel C.
-
-Two consequences of using a PR this way:
-
-- **The review scope is the entire diff from upstream**, `4b817ea` to head —
-  including the deleted pre-rename files (`aorus-laptop.c`, both
-  `aorus-laptop-*.spec`). It was 29 files when PR #1 was open and it is **35**
-  as of 24 Oct 2026, so read the figure off `git diff --stat 4b817ea HEAD`
-  rather than from here. So review findings arrive in large batches covering
-  ground already settled, and some describe a state a later commit superseded.
-  That is expected. **Verify every finding against the current code before
-  acting on it** — several have been stale, and two caught real bugs.
-- **CodeRabbit's "Autofix" checkbox pushes its own commits to the branch under
-  review**, now `a16-5th-gmate`. Leave it unticked; it would interleave with
-  work in progress.
 
 ### CI is green, it validates the packaging — and it never compiles the driver
 
@@ -2925,6 +2606,14 @@ unversioned.
 sudo bash scripts/install-dkms.sh            # or --no-autoload to skip boot loading
 ```
 
+**It builds before it removes anything**, in a temp directory rather than the
+checkout, so a compile error is non-destructive: the old driver stays installed
+instead of leaving the machine with no module and a `modules-load.d` entry still
+asking for one. If a later step fails anyway — signing, a full disk — the
+failure path removes that entry too, so the end state is honest: no driver, and
+nothing claiming one loads at boot. It is also the only compile gate that
+answers in seconds.
+
 **Autoload is on by default and should stay that way.** The module registers its
 platform device by hand in `gigabyte_laptop_init()` and exposes no modalias
 (`modinfo -F alias` is empty), so udev has nothing to match and
@@ -3324,6 +3013,14 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   **correction of a wrong conclusion about `temp2`**, not a warning against
   trusting it. `ec_read(0xD)` is suspect for the same reason as `0x62`, but is
   only reached when the machine is already in custom fan mode at load time.
+- **Do not hide `temp3` family-wide because it reads 0 here.** It has been
+  proposed and is wrong: `gaming_family` covers **every** `GIGABYTE GAMING`
+  model and the evidence is one machine, which is the same over-generalisation
+  this file warns about for method IDs. The channel's *meaning* is also pinned
+  by the Aero firmware's own comment — EC `0x62` is the MLB (motherboard)
+  temperature — so upstream's label is correct and hiding it would remove a
+  correctly-named channel. A channel reading 0 is cosmetic and hwmon consumers
+  handle it. Revisit only with a second machine's dump.
 - ~~**hwmon `temp2` is labelled GPU and is not a GPU temperature here.**~~
   **Wrong, and reversed 26 Oct 2026. `temp2` *is* the GPU temperature.** The
   24 Oct conclusion below was reached from a firmware field's **name** plus a
@@ -4291,10 +3988,6 @@ an ancestor of it. The never-merge rule covers `master` only; `a16-5th` was the
 integration branch at the time and was exactly where this was meant to land. It
 is `a16-5th-gmate` now — see Branches.
 
-Eleven CodeRabbit findings were addressed across three review rounds before the
-merge — six in `fc61b85`, two in `7e0ad94`, three in `1e3fc39`. One finding was
-never actioned because its text never arrived intact; if it matters it will
-resurface on the next review of this code.
 
 ### What the branch carried — landed and blocked at the time
 
@@ -4518,7 +4211,7 @@ momentary sub-threshold current or a non-`Charging` status reported
 "HONOURED at 84 %" — four points past, which is the definition of `IGNORED`.
 The capacity-flatline fallback was worse: a full battery resting at 100 % would
 have reported `HONOURED`. Reordering is sufficient because `IGNORED` is the
-stricter window. Found in the third review round, not by running the script.
+stricter window. Found by reading the logic, not by running the script.
 
 A `HONOURED` verdict is what makes the four handler defects worth patching. An
 `IGNORED` one means charge limiting is firmware-blocked on this unit and the
@@ -4577,7 +4270,7 @@ The `60 <= limit <= 100` and `mode > 1` range checks stay. Still no firmware
 basis — there is no clamp — but they keep every written value inside its field
 width, which matters more now that the field is known to be live.
 
-**Two later fixes on the same path, from the third review round.** Both are the
+**Two later fixes on the same path.** Both are the
 kind of thing only a second reader catches:
 
 - **The mode write is skipped when the mode is unchanged.** Re-pointing an
@@ -5285,249 +4978,6 @@ LampArray detector is `REGISTER_HID_DETECTOR_PU_ONLY(..., 0x59, 0x01)` — also
 page-gated, so it will not see this device. Its `GigabyteAorusLaptopController`
 is USB-only on page `0xFF01` with an 8-byte report `0x08`. `opengigabyte`
 supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
-
-### PR #4's review: 20 findings, and two of them caught my own regressions
-
-**Raised 29 Oct 2026 as `master <- a16-5th-gmate`** — a review surface, not a
-merge, exactly as PR #1 was. **The never-merge rule still covers `master`**;
-see "Why the fork is ported, not merged". CI was green on all four jobs with no
-conflict, which means the packaging is well-formed and says **nothing** about
-whether the driver builds — see "CI never compiles the driver".
-
-Two were marked **major** and both were real:
-
-- **`USAGE.md` promised a dGPU restore that does not work here.** It said
-  restoring "either way works" via `gpu_boost 4` or a PCI rescan. This session
-  had already measured both failing, and the obvious next step — the PCI bind —
-  wedging in D state. So the document was telling a user to do the thing that
-  costs a reboot, then the thing that cannot be killed. **This is the worst
-  defect found in the whole session**, because it was in the one file written
-  for someone else to act on, and the correct content was already sitting in
-  this file.
-- **`install-dkms.sh` removed the installed driver before building the new
-  one.** A compile error left the machine with no driver *and* a
-  `modules-load.d` entry still asking for it, so the next boot failed in
-  `systemd-modules-load` with nothing explaining why.
-
-  **The reviewer's own fix was wrong and they said so**: reordering the removal
-  after the install needs "a separate path for same-version reinstalls, which
-  DKMS does not allow to coexist". Correct — and the removal exists precisely
-  to clear the `@PKGVER@` registration. **The fix was to build first**, in a
-  temp directory (the script runs as root, so an in-tree `make` would leave
-  root-owned objects in the checkout). The failure becomes non-destructive
-  instead of being reordered away. It is also the only compile gate there is.
-
-**Two amber findings were defects this session had introduced**, which is the
-part worth carrying forward — a nit label is about how much it matters to the
-reviewer, not about whose bug it is:
-
-- **`tests/test-dynamic-boost.sh` still described the driver it had just
-  fixed.** Its header said "the driver inverts before sending, so a node write
-  of 1 reaches the firmware as 0", and its verdict recommended adding
-  `!enable` to `dynamic_boost_store()`. That inversion was **removed hours
-  earlier**, by this very script's result. So the script that found the bug
-  would have told the next reader to re-introduce it. **Fixing a driver and
-  leaving the tool's reasoning describing the old one is the same
-  stale-premise failure this file keeps catching** — and here the stale text
-  was an instruction.
-- **`tests/test-dgpu-detach.sh` set `DETACHED=1` before the eject write and
-  never cleared it on failure**, so a *failed* write sent `gpu_boost 4` to a
-  still-attached card and reported a restore for a detach that never happened.
-  The early flag is deliberate and stays — an interrupt between a landed eject
-  and the next line must still restore — so the fix is to unset it on the
-  failure path. **Both orderings were needed; only one had been thought
-  through.**
-
-  The same file also *advised* that the panel must be on the iGPU and then
-  detached anyway. That is the "advise rather than refuse" pattern the process
-  check in the same script had already been rewritten to eliminate, so it now
-  reads the connected eDP's driver and refuses, honouring
-  `GIGABYTE_DETACH_FORCE` like every other gate.
-
-**One fix opened a hole, caught by replaying the logic rather than by reading
-it.** Gating the `dynamic_boost` direction verdicts on the control window left
-two combinations falling through to an `else` whose text asserted "both test
-settings let the limit wander" — false for both of them. Enumerating all 16
-quiet/wander combinations found it immediately, and two branches were added so
-every branch's text is true of its own numbers. **Adding a condition to one
-branch of a chain changes what reaches the others**, and a four-variable chain
-is past the size where reading it is enough.
-
-**And the new refusal was itself broken, caught by testing it rather than
-reading it.** `readlink -f` canonicalises a path whose *final* component is
-missing and prints it anyway, so
-
-```sh
-basename "$(readlink -f /sys/class/drm/card1/device/driver)"   # card with nothing bound
-#   -> "driver"        not "" as expected
-```
-
-A card with no driver bound therefore yielded the literal string `driver` —
-neither empty, nor `amdgpu`, nor `nvidia` — so it slipped past the refusal into
-the warn-and-proceed branch, and the "cannot determine the MUX" case was
-**unreachable**. Use `readlink -e`, or test `[ -e ... ]` first, which is what
-the `gpu_driver()` helper ten lines above had already been doing. **A guard
-written and not exercised is not a guard**, and this one was written in the
-same commit as a fix for a guard that advised instead of refusing.
-
-**Declined, with reasons**, so they are not re-investigated:
-
-| Finding | Why not |
-|---|---|
-| `test-apu-burst.sh` baseline flatness | The reviewer offers no threshold and says "a safe correction is not established". The conclusion it guards was re-derived anyway by the 300 s `--hold 0` run |
-| `test-charge-limit.sh` HONOURED wording | Wants the verdict to stop claiming a cause. The result is twice corroborated — a 1171 s flatline *and* KDE dropping "Time To Full" — and the current-based detection exists because of exactly this concern |
-| `notify.c` timeout-read race | Real but microseconds wide, and the suggested fix risks announcing ordinary sysfs writes, which the header forbids. The reviewer labels its own tradeoff "Poor tradeoff" |
-| `notify.c` `execlp` PATH warning (ast-grep) | Not a privilege boundary: a user-session binary running as the user, who can already run anything. `execlp` over `system()` is a deliberate recorded choice |
-| `test-gpu-power.sh` preset/mode both-states | Correctly identifies a genuine tension and asks for a decision rather than a fix. The choice is documented in the restore comment |
-
-### The second review round: four findings, three of them my own — 29 Oct 2026
-
-**A manual trigger on `0cb18fc` produced a real review** (the first two
-triggers were skipped; see the auto-review bullet). Four amber findings, and
-**three were defects introduced by the fixes in the first round** — which is
-the useful thing about this round, not the count.
-
-- **The `fan_mode` restore undid the `fan_preset` restore two lines above it.**
-  Round one fixed "the test does not restore `fan_mode`" by writing the mode
-  back. But `fan_mode_store()` **pins `fan_preset` from the mode**:
-  `fan_mode_presets[]` covers 0-2 and anything above falls back to
-  `FAN_PRESET_AUTO`. So a machine that started on `auto` came back with the
-  preset *pinned*, which hands fan policy to nobody — the profile stops owning
-  the fans.
-
-  **I fixed one half of a coupled pair and broke the other, having declined a
-  finding that described exactly this.** `test-gpu-power.sh:179` said the two
-  states cannot both be restored and asked for a decision; I filed it as
-  "documented" and then created the same bug next door. The reviewer was
-  consistent; I was not.
-
-  The rule, now in both scripts and verified over all 15 reachable
-  combinations:
-
-  | saved preset | saved mode | what restores both |
-  |---|---|---|
-  | pinned | 0-2 | the preset write alone — it sets the mode |
-  | `auto` | 0-2 | the preset write **alone**; writing the mode would pin it |
-  | `auto` | 3+ custom | the mode write — mode 3+ sets the preset to `auto` itself |
-
-  **The preset is the policy and the mode under `auto` is derived**, so the
-  preset is the one to protect. A mode write is only ever needed, and only
-  ever safe, for a custom mode.
-
-- **A `USAGE.md` snippet I wrote printed a blank line where it promised
-  `UNBOUND`.** The bot caught it by *running* it. `driver` is a symlink to a
-  directory, so `cat` cannot read it; the fallback `basename "$(readlink ...)"`
-  then **succeeds with empty output** when the link is absent, so the
-  `|| echo UNBOUND` branch never fires. Replaced with an explicit
-  `[ -L ... ]` test, which also avoids the `&&`/`||` chain. **A documented
-  check that cannot emit its documented answer is worse than no check**, since
-  the reader is told to act on the output.
-
-- **A privacy claim overstated its own scope, and this is the one to
-  remember.** The 29 Oct audit paragraph ended "the serial is not reachable
-  from any ref this clone can see." **False** — it is in 16 commits reachable
-  from `a16-5th-gmate`, which is exactly what the recorded decision
-  *intends*. A **tip** check was run and a **reachability** claim was written
-  from it.
-
-  That is the error this file devotes a whole section to — "Audit history, not
-  just the tree" — committed in the paragraph documenting that very lesson.
-  **Checking the right thing and then describing it as something stronger is
-  its own failure mode**, distinct from checking the wrong thing, and in a
-  privacy record it is the more dangerous of the two: a narrower honest claim
-  invites the follow-up check, an overstated one closes it.
-
-- **A stale "current state" sentence**, since fixed: a paragraph still said
-  the checkout "has been sitting" on `p4-rem-a15` with no end date, while the
-  table above it recorded that branch deleted. Both halves had been true on
-  different days.
-
-**The pattern across both rounds is worth naming.** Round one: two of the
-findings were bugs I had introduced hours earlier. Round two: three were bugs
-my round-one *fixes* introduced. **A fix is a change, and a change needs the
-same adversarial reading as the code it replaces** — the review found things my
-own re-reading did not, every time, and twice it found them by executing the
-thing rather than reading it.
-
-**The `cmos-slots` fix was itself half done, and the finding said so.** Its
-text ended "Make the matching change to the header steps at lines 52-53", and
-the body procedure was fixed while the header's step 5 still read "restore the
-first one **in the same visit**" — verbatim the bug, in the summary a reader
-hits first. **The detailed procedure and its summary are two copies of the
-same instruction**, and fixing one is not fixing the instruction. Read a
-finding's whole text, not its headline: the pointer to the second copy was in
-the last line of it.
-
-**And the follow-up review never ran — it was rate limited.** The trigger
-reported *"Review limit reached. Next included review available in 46
-minutes"*, having first listed the three files it would have covered. **That
-listing reads exactly like a review that ran and found nothing**, which this
-file already warns about under the review bullet, and it is the second time
-the warning has earned its place. So neither `0cb18fc` nor `f7930db` has been
-reviewed, and the `cmos-slots` thread stayed open because the bot could not
-re-evaluate it — not because the fix was rejected.
-
-**Check the bot's own banner before reading silence as approval.** An
-unreviewed push and a clean push look identical from the thread list.
-
-**One decline was reversed on a second pass, and it was the right call.** The
-`test-cmos-slots.sh` finding was filed as low-value procedure text — and the
-procedure it describes is the one remaining open task on this machine, so a
-bug in it would be hit the next time anybody touches the slot hunt. It said:
-restore option A and change option B **in the same BIOS visit**, then take one
-reading that serves as both A's restored baseline and B's "before". That
-cannot work. A reading taken after two changes is attributable to neither, so
-if restoring A moves the byte, the move is reported against B — which is
-exactly the wrong answer, confidently stated.
-
-Fixed to a five-step sequence with a **restore-only reading** in the middle.
-Each option now costs two reboots instead of one, which is the honest price.
-**"Low value" was about the text; the cost was a wrong identification**, and
-those are not the same thing.
-
-**The install-dkms fix was also incomplete, and the bot was right not to mark
-it addressed.** The pre-flight build catches a compile error before anything
-is removed, which is the common cause — but an install can still fail
-afterwards for a reason the pre-flight cannot see (signing, a full disk, a
-DKMS environment difference), and by then the removal has happened. On a
-**re-run** the `modules-load.d` entry from the earlier run survives, so the
-next boot still asks for a module that is gone. The failure path now removes
-that entry and says so, which is the honest end state: no driver installed,
-nothing claiming one loads at boot, and the entry written back by the next
-successful run.
-
-**Worth noting how that was caught**: 13 of the 20 findings were marked
-"Addressed" by the bot and 7 were not, and the unmarked set was the useful
-signal — five were recorded declines, one was a major that *was* fixed (its
-anchor line had simply moved), and one was a major that genuinely was not. **A
-fix that does not match the reviewer's proposed shape still has to close the
-reviewer's failure mode**, and this one only narrowed it.
-
-### Two review findings declined, with reasons — 23 Oct 2026
-
-Recorded so they are not re-raised and re-investigated:
-
-- **"Hide hwmon `temp3` when `gaming_family` is set."** Declined. `temp3` does
-  read `+0.0 °C` here, and the firmware reason is known — `ec_read(0x62)` lands
-  on an undeclared `ERAM` offset. But `gaming_family` covers **every**
-  `GIGABYTE GAMING` model, and the evidence is one machine. Hiding a channel
-  family-wide from a `GA65TH` observation is the same over-generalisation this
-  file warns about for method IDs. The finding itself asks to "confirm the
-  Gaming generations share the relevant ERAM layout first", which is exactly
-  what cannot be confirmed here. A temperature reading 0 is cosmetic, hwmon
-  consumers handle it, and the change would diverge from upstream for a
-  non-bug in code headed upstream. Revisit only with a second machine's dump.
-  **Strengthened 26 Oct 2026**: the Aero firmware's own comment labels EC `0x62`
-  the MLB (motherboard) temperature, so the channel's *meaning* is pinned and
-  it is upstream's label that is right. Hiding it would have been removing a
-  correctly-named channel on the strength of one machine not populating it.
-
-- ~~**"Test the DNF upgrade transaction for `akmod-aorus-laptop`."**~~
-  **Superseded, and my stated reason was wrong.** I recorded here that
-  "`kmodtool` offers no hook for `Obsoletes`, so only
-  `gigabyte-laptop-kmod-common` can obsolete its predecessor". That is false,
-  and the spec's own comment said the same thing. See "`kmodtool` does have an
-  obsolete hook" below.
 
 ### `kmodtool` does have an obsolete hook — `--help` does not list it
 
@@ -6954,9 +6404,6 @@ only one variable moved. The excursions stopped dead: 60 samples, all 60.00 W,
 with `amd_pmf` still bound. So this handler never destabilised anything. The
 case for removing it rests only on the TA-session failure above, which is
 reason enough. See "Settled: the MUX caused the arbitration, not `amd_pmf`".
-
-
-
 
 
 ### `systemctl stop display-manager` does not end a Plasma Wayland session
