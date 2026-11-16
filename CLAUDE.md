@@ -1900,7 +1900,7 @@ catches the `prerm` bug class.
 |---|---|
 | `compile` | `make` against Fedora `kernel-devel`, then `W=1 KCFLAGS=-Werror`. Fails in seconds, so it fails first |
 | `fedora` | both kmodtool-free RPMs built with `dnf builddep` (so `BuildRequires` is validated outside mock) → install the DKMS package → assert the payload landed and `@PKGVER@` was substituted → `dkms build` → build the kmod spec → rebuild its akmod SRPM with `--define kernels` → assert a rebuilt kmod package holds a real `.ko` |
-| `debian` | `dpkg-buildpackage` → inspect the `.deb` before installing → install → assert DKMS registration → `dkms build` (sid only) → exercise every `prerm` job name → **roll back an upgrade and assert the module comes back** → remove → **assert the DKMS registration is gone** → purge |
+| `debian` | `dpkg-buildpackage` → inspect the `.deb` before installing → install → assert DKMS registration → `dkms build` (sid only) → exercise every `prerm` job name → **roll back an upgrade and assert the REGISTRATION comes back** → remove → **assert the DKMS registration is gone** → purge |
 | `arch` | `makepkg --printsrcinfo` and `namcap` parse it → build → assert the package's contents and that `@PKGVER@` was substituted → assert the DKMS pacman hooks exist → install → `pacman -R` and let the hook do the removal |
 
 **The akmod SRPM rebuild is the load-bearing step on the Fedora side.** In
@@ -1916,6 +1916,55 @@ built with upstream's `prerm` restored verbatim it fires and the registration is
 left behind; against the fixed one it passes. **A guard that has not been shown
 to fail is not a guard**, which is this file's own rule and the reason the test
 was run that way rather than merely written.
+
+**The round-trip step asserts the REGISTRATION, not a built module, and trixie
+is what makes that distinction load-bearing rather than pedantic.** The table
+row above said "assert the module comes back" until 16 Nov 2026, which is not
+what the step checks and is not what happens on one of the two suites.
+
+Measured on the run that introduced the step. The two suites take **different
+branches of the shipped `postinst`**, and both pass:
+
+```
+sid      abort-upgrade -- restoring the DKMS registration prerm removed
+         Loading new gigabyte-laptop/0.2.0 DKMS files...
+         Building module(s)... done.
+         Installing /lib/modules/<ver>/updates/dkms/gigabyte-laptop.ko
+         notice: postinst abort-upgrade restored it
+
+trixie   abort-upgrade -- restoring the DKMS registration prerm removed
+         Loading new gigabyte-laptop/0.2.0 DKMS files...
+         Building module(s)...(bad exit status: 2)
+         Error! Bad return status for module build on kernel: 6.12.117+deb13-amd64
+         postinst: could not restore gigabyte-laptop/0.2.0 after abort-upgrade.
+                   The package is installed but the module is not.
+                   Restore it with:
+                     sudo dkms install gigabyte-laptop/0.2.0
+         notice: postinst abort-upgrade restored it
+```
+
+**So trixie exercises the restore's FAILURE path, which is free coverage of
+code nothing else reaches.** Three things it establishes at once, none of which
+the sid run can:
+
+- **`dkms_configure` really can fail here**, because 6.12 predates
+  `platform_profile_ops` — the kernel floor arriving as a build error inside a
+  maintainer script rather than in a compile step.
+- **The no-fail rule holds under a real failure.** The postinst warned on
+  stderr and still exited 0, so the step passed and dpkg would not have been
+  left with a half-configured package. `postinst` states that rule in a comment
+  twice and this is the one place it has been *shown* — note that `prerm`'s
+  contract is the opposite and deliberately so: it stays fatal when `dkms
+  remove` failed and dkms still lists the module.
+- **Asserting the registration was the right call.** A `.ko` assertion would
+  have failed on trixie for a reason that has nothing to do with the rollback
+  contract — the registration is what `prerm` took away, so it is what the
+  rollback owes back.
+
+**And the restore is genuine on both, which a green tick alone does not tell
+you:** `Loading new gigabyte-laptop/0.2.0 DKMS files...` runs *before* the
+build on trixie, so `dkms add` had already landed when the build failed. The
+registration comes back either way; only the module differs.
 
 **And it had a hole of its own, found by review — an assertion of ABSENCE falls
 the wrong way when the query fails.** It was
