@@ -1545,17 +1545,29 @@ A test that moves fan policy, a power tier or a profile ends by putting it back.
 **Restoring the fans means restoring `fan_preset`, not `fan_mode`.** The two are
 coupled: `fan_mode_store()` pins the preset from the mode, so writing the mode
 back can undo the preset restore two lines above it and leave policy pinned to
-nobody. Verified over all 15 reachable combinations:
+nobody.
 
-| saved preset | saved mode | what restores both |
-|---|---|---|
-| pinned | 0-2 | the preset write alone — it sets the mode |
-| `auto` | 0-2 | the preset write **alone**; writing the mode would pin it |
-| `auto` | 3+ custom | the mode write — mode 3+ sets the preset to `auto` itself |
+| saved preset | restore |
+|---|---|
+| pinned | **the preset write alone.** `apply_fan_preset()` takes `fan_preset_modes[]` and sets the mode, from any current mode including a custom one |
+| `auto`, mode was 0-2 | **put the mode back to a non-custom value first, then write `auto`** |
+| `auto`, mode was 3+ | **the mode write alone** — a custom mode sets the preset to `auto` itself |
 
-**The preset is the policy and the mode under `auto` is derived**, so the preset
-is the one to protect. A mode write is only ever needed, and only ever safe, for
-a custom mode.
+**The middle row needs the extra step, and a table keyed only on the saved
+state got it wrong.** `apply_fan_preset()` opens with
+`if (gigabyte->fan_mode > 2) return 0;` — a custom curve deliberately outranks
+a policy selection — so **writing `auto` while the fans are in a custom mode is
+a no-op** and leaves that mode in force. The outcome depends on the mode *at
+restore time*, not only on what was saved.
+
+**No shipped test reaches it**, checked rather than assumed: the only
+`fan_mode` write anywhere in `tests/` is `echo 1` in `test-gpu-power.sh`, which
+is silent and not custom. The rule is wrong for the next test, not for the
+current ones.
+
+And note what `auto` restores: **the policy, not the number.** Under `auto` the
+mode follows the profile, so a saved mode of 0 with a profile mapping to 1 comes
+back as 1. That is `auto` working, not a failed restore.
 
 **Do not put a test in `scripts/` again**, and do not reach for a temporary
 directory either: `tests/test-cmos-slots.sh` is useless unless it survives a
