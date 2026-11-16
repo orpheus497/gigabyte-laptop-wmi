@@ -53,6 +53,20 @@ Mkfile.old
 # ACPI table dumps
 *.dat
 
+# Debian build output. `cd pkg-files && dpkg-buildpackage -b` drops the package
+# and its metadata in the repo ROOT, because debian/rules reaches up with ../
+# and so must run one level down from here. Nothing was ignored before, since
+# nothing had ever built it -- see "Verify packaging" in .github/workflows.
+*.deb
+*.buildinfo
+*.changes
+pkg-files/debian/.debhelper/
+pkg-files/debian/debhelper-build-stamp
+pkg-files/debian/files
+pkg-files/debian/*.debhelper.log
+pkg-files/debian/*.substvars
+pkg-files/debian/gigabyte-laptop-dkms/
+
 # IDE/agent scratch
 .cursor/
 AGENT.md

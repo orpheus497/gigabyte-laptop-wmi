@@ -6,7 +6,13 @@ VERSION=0.2.0
 set -e
 
 case "$1" in
-    remove|upgrade|dconfigure)
+    # "deconfigure", not "dconfigure". dpkg calls this script with a job name,
+    # and the label is the list of jobs it accepts. The misspelling meant the
+    # real "deconfigure" job fell through to the *) catch-all below, which
+    # prints an error and exits 1 -- and a prerm that exits non-zero aborts the
+    # dpkg operation outright. Inherited from upstream 4b817ea alongside the
+    # bracket bug below; upstream fixed this half independently in d184209.
+    remove|upgrade|deconfigure)
         # The space before ] is required, and it was missing: `[ "$x"]` glues
         # the bracket to the argument, so `[` never sees its terminator and
         # exits with "missing ]". In an if-condition that reads as false, so

@@ -1542,6 +1542,33 @@ Ctrl-C.** That is the house rule, and it exists because two hand-written sweeps
 were handed over without it — one left the fans audible with nothing saying why.
 A test that moves fan policy, a power tier or a profile ends by putting it back.
 
+**Restoring the fans means restoring `fan_preset`, not `fan_mode`.** The two are
+coupled: `fan_mode_store()` pins the preset from the mode, so writing the mode
+back can undo the preset restore two lines above it and leave policy pinned to
+nobody.
+
+| saved preset | restore |
+|---|---|
+| pinned | **the preset write alone.** `apply_fan_preset()` takes `fan_preset_modes[]` and sets the mode, from any current mode including a custom one |
+| `auto`, mode was 0-2 | **put the mode back to a non-custom value first, then write `auto`** |
+| `auto`, mode was 3+ | **the mode write alone** — a custom mode sets the preset to `auto` itself |
+
+**The middle row needs the extra step, and a table keyed only on the saved
+state got it wrong.** `apply_fan_preset()` opens with
+`if (gigabyte->fan_mode > 2) return 0;` — a custom curve deliberately outranks
+a policy selection — so **writing `auto` while the fans are in a custom mode is
+a no-op** and leaves that mode in force. The outcome depends on the mode *at
+restore time*, not only on what was saved.
+
+**No shipped test reaches it**, checked rather than assumed: the only
+`fan_mode` write anywhere in `tests/` is `echo 1` in `test-gpu-power.sh`, which
+is silent and not custom. The rule is wrong for the next test, not for the
+current ones.
+
+And note what `auto` restores: **the policy, not the number.** Under `auto` the
+mode follows the profile, so a saved mode of 0 with a profile mapping to 1 comes
+back as 1. That is `auto` working, not a failed restore.
+
 **Do not put a test in `scripts/` again**, and do not reach for a temporary
 directory either: `tests/test-cmos-slots.sh` is useless unless it survives a
 reboot, since identifying a CMOS slot means reading it, rebooting into BIOS
@@ -1614,15 +1641,12 @@ does would retrieve them. The check, for any generated file:
 git ls-files tools/          # a build artifact here is a mistake
 ```
 
-CodeRabbit listed it among the files it reviewed, which is the other tell — a
-review that reports a compiled binary as a reviewed file is reporting a repo
-defect, not a review.
 
 ### Branches
 
 | Branch | Purpose |
 |---|---|
-| `master` | Pristine upstream tracking. **Never commit here.** |
+| `master` | Pristine upstream tracking. **Never commit here, and never merge the integration branch onto it.** Doing so costs the thing it exists for: `git log upstream/master` stops being a clean comparison, the cherry-pick strategy loses its baseline, and the eventual upstream patch series gets harder to extract from a fork point that no longer exists. If a merge is ever genuinely wanted, tag the baseline first — `git branch upstream-pristine 4b817ea` |
 | `a16-5th-gmate` | **Integration branch. All work lands here.** |
 | `a16-5th` | Retired 24 Oct 2026. Local only; deleted on the fork. **Do not delete.** |
 | `a16-5th-kbd-charge-uevent` | PR #2's feature branch, merged. Local only; deleted on the fork. **Do not delete.** |
@@ -1693,109 +1717,29 @@ Note the naming: `upstream` is the *project*, not `origin`. A habitual
 fork, not the project. Upstream updates come from
 `git fetch upstream && git log upstream/master`.
 
+**`upstream/master` itself has moved on, and this paragraph is about our local `master`
+only.** Upstream is at `d184209`, five commits past `4b817ea`, as of 15 Nov 2026; see
+"What upstream has added since the fork point". Our `master` staying put is the point of
+it, but do not read the sentence below as "we are level with upstream".
+
 `master` still sits at upstream's `4b817ea`, untouched — verified after the
 PR #3 merge on both the local and the fork copy. The never-merge rule covers
 `master` only, and PR #3's base was the scratch branch, which is why merging it
 was safe.
 
-### How reviews work on this fork (and PR #1, the first review surface)
-
-[`orpheus497/gigabyte-laptop-wmi#1`](https://github.com/orpheus497/gigabyte-laptop-wmi/pull/1)
-— "[WIP] Functionality for Gigabyte Gaming A16 5th", `master <- a16-5th` — existed
-to be a place CodeRabbit reviewed and the diff could be read, never to be merged.
-**Closed without merging on 2026-10-21**, which honoured that: `merged=False`,
-and `master` is still exactly upstream's `4b817ea` on both the local and the fork
-copy. Verified, not assumed.
-
-**The never-merge rule is the durable part and still stands.** Merging the
-integration branch onto `master` would cost exactly what the table above
-protects: `git log upstream/master` stops being a clean comparison, the
-cherry-pick strategy loses its baseline, and the eventual upstream patch series
-gets harder to extract from a fork point that no longer exists. If a merge is
-ever wanted, preserve the baseline first — `git branch upstream-pristine 4b817ea`
-— and record the decision here.
-
-What the surface produced while it was open: one full-diff review (29 files) and
-one incremental one, four actionable findings, three acted on and one declined
-with reasons. All four are described below under the commits that closed them.
-
-To get another review later, reopen that PR or raise a fresh one from
-`a16-5th-gmate` — to a scratch branch, not `master`. Two things to expect, both
-learned the hard way:
-
-- **Reviews are manual-trigger on this fork**, so expect to ask for every one.
-  Two reasons were recorded; only the first still applies:
-  - *"fewer than 10 stars"* — the free tier does not auto-review small repos.
-    The fork has **0** stars, checked 26 Oct 2026, so this one is not close to
-    lapsing.
-  - *"Auto reviews are disabled on base/target branches other than the default
-    branch"* — **live again as of 29 Oct 2026, pointing the other way.** This
-    bullet was struck through on 26 Oct as retired, and it was not: it is a
-    rule about *the base not being the default branch*, and which PRs that
-    catches flipped when the default branch moved.
-
-    | Date | Default branch | What gets skipped |
-    |---|---|---|
-    | 22 Oct | `master` | a PR **to** the integration branch — seen on PR #2 |
-    | 29 Oct | `a16-5th-gmate` | a PR **to `master`** — seen on PR #4 |
-
-    Both verified against the API rather than assumed:
-    `default_branch` is `a16-5th-gmate`, PR #4's base is `master`, and
-    CodeRabbit edited its summary in place to say *"Review skipped"* on the
-    `cf23ff1` push.
-
-    **This collides with the review-surface strategy**, which is the part that
-    matters. PR #1 and PR #4 both target `master` precisely because the
-    never-merge rule makes it a safe place to read a full diff — and that is
-    now exactly the base that gets auto-skipped. PR #4's 20 findings arrived
-    only because an `@coderabbitai review` comment was posted by hand a few
-    seconds after it was opened.
-
-    **So a push to a `master`-based PR is never reviewed, and silence is not a
-    clean bill of health.** Trigger every review by hand, and read the summary
-    comment for the "Review skipped" banner before believing an empty result —
-    the bot *edits the existing comment in place* rather than adding a new one,
-    so nothing arrives to announce it.
-
-    The lesson the 26 Oct note was reaching for still holds and is sharper
-    now: **a stale reason behind a correct conclusion is how the conclusion
-    survives the day the reason stops being true** — and striking a rule
-    through as "no longer applies" is itself a claim with a shelf life. The
-    rule never changed. Our configuration did, twice.
-
-  Either way: the 🔍 Trigger review checkbox or an `@coderabbitai review`
-  comment. Pushes do not auto-review.
-- **The free tier allows one included review per hour**, and the bot says so
-  exactly: *"Review limit reached ... Next included review available in N
-  minutes"*. A run that hits the limit stops **before reviewing at all** -- it
-  still prints the scope it would have covered, which reads like a review that
-  ran. Check for that warning before trusting an empty result. Spend the hour's
-  review on a batch of real work, not a docs-only push, and do not fire several
-  triggers in quick succession: three in a row exhausted it on 22 Oct 2026 and
-  the fourth, which covered the actual fixes, never ran.
-- The **Autofix** and **Generate docstrings** checkboxes push the bot's own
-  commits to the branch. Leave both unticked; the docstring one in particular
-  would act on a Docstring Coverage check that does not apply to kernel C.
-
-Two consequences of using a PR this way:
-
-- **The review scope is the entire diff from upstream**, `4b817ea` to head —
-  including the deleted pre-rename files (`aorus-laptop.c`, both
-  `aorus-laptop-*.spec`). It was 29 files when PR #1 was open and it is **35**
-  as of 24 Oct 2026, so read the figure off `git diff --stat 4b817ea HEAD`
-  rather than from here. So review findings arrive in large batches covering
-  ground already settled, and some describe a state a later commit superseded.
-  That is expected. **Verify every finding against the current code before
-  acting on it** — several have been stale, and two caught real bugs.
-- **CodeRabbit's "Autofix" checkbox pushes its own commits to the branch under
-  review**, now `a16-5th-gmate`. Leave it unticked; it would interleave with
-  work in progress.
-
 ### CI is green, it validates the packaging — and it never compiles the driver
 
-> **Read the third clause first if you are about to change code.** Everything
+> **Superseded 15 Nov 2026 as a statement about the present, and kept because
+> the diagnosis is still the reason the new workflow exists.** CI *does* compile
+> the driver now — on six of the seven job instances; Debian trixie is
+> packaging-only. See "The packaging is verified end to end now". Everything below is
+> accurate about `debug-driver.yml`, which is unchanged and still the only thing
+> that builds in mock — so read it as a description of that workflow rather than
+> of CI as a whole.
+>
+> ~~**Read the third clause first if you are about to change code.** Everything
 > below about greenness is accurate and still means nothing about whether
-> `gigabyte-laptop.c` builds. See "CI never compiles the driver".
+> `gigabyte-laptop.c` builds.~~
 
 Every pushed head has run the `Release driver (debug)` workflow to success on
 all four jobs. `920ca3b` and `75f870d` were the first two; `fc61b85`, `7e0ad94`,
@@ -1820,10 +1764,11 @@ squash orphans CI history, so **read greenness off the live branch** — the API
 or the Actions tab — and never off hashes recorded in this file. A hash here
 tells you what passed once; it cannot tell you what the branch is.
 
-#### CI never compiles the driver
+#### `debug-driver.yml` never compiles the driver — and this is why the other workflow exists
 
 **Found 26 Oct 2026, and it is the single most practically useful thing in this
-section.** Four green ticks on a code change mean the packaging is well-formed.
+section** — it is the finding `verify-packaging.yml` was built to answer, so it
+is now a *cause* rather than an outstanding hazard. Four green ticks on a code change mean the packaging is well-formed.
 They do **not** mean the driver compiles — nothing in CI ever invokes the
 compiler on it.
 
@@ -1846,10 +1791,21 @@ machine compiles it later. That is correct akmod behaviour and exactly what is
 wanted for distribution; it is also why a syntax error, a wrong type or a `W=1`
 warning shows four green ticks.
 
-**The local `make` is the only compile gate there is**, and every queued code
-change — the `gpu_boost` cap, the typed-read fix, a `battery_cycle` gate — is
-unprotected by CI until it is run. Run it before pushing; do not read a green
-run as a build.
+~~**The local `make` is the only compile gate there is**~~ — **true until
+15 Nov 2026, and no longer: `verify-packaging.yml` compiles the driver,
+including with `W=1 -Werror`.** **It said "on six jobs" and that was wrong in
+both halves — corrected 16 Nov 2026.** There are **seven** job instances
+(`compile`, Fedora ×3, Debian ×2, Arch), and **six** of them compile: Debian
+**trixie does not**, because its 6.12 kernel predates `platform_profile_ops`
+and the compile steps are gated on `steps.kver.outputs.modern == 'yes'`. So
+trixie's green ticks are a **packaging** result only and must not be read as a
+driver build — which is the same "green means what it checked" care the rest of
+this section is about, applied to its own summary. Run it locally anyway, because it answers in seconds
+where CI answers in minutes. What is no longer true is that a push is
+unprotected. ~~Every queued code change — the `gpu_boost` cap, the typed-read
+fix, a `battery_cycle` gate — is unprotected by CI until it is run. Run it
+before pushing; do not read a green run as a build.~~ That was the state on
+26 Oct 2026 and it is what the new workflow exists to end.
 
 **Related, and the same class of silent success:**
 `.github/workflows/debug-driver.yml:15` hardcodes the version —
@@ -1872,7 +1828,15 @@ covers the `Release: 2` bump, the `Obsoletes` bounds, `Source1:
 gigabyte-laptop.conf`, the `%{_builddir}` fix and the new `%post`/`%preun`
 scriptlets. Treat a red build here as a real regression, not CI noise.
 
-**And it is RPM only — the Debian and Arch packaging is untested by anything.**
+**And it is RPM only — which stopped being true twice on 15 Nov 2026.**
+`verify-packaging.yml` now builds, installs, compiles and removes the Debian
+package on sid and trixie, **and** parses, builds, installs and removes the
+Arch package. So this paragraph's gap is **closed**, and the reasoning below is
+kept because it is why the Debian half was added first — read `debian/` and
+`archlinux/` in it as historical. What the Arch job found is under
+"The Arch package cannot be built from its own PKGBUILD".
+
+~~The Debian and Arch packaging is untested by anything.~~
 There are **zero** occurrences of `debian`, `dpkg`, `pbuilder` or `sbuild`
 anywhere under `.github/`, and the one composite action is `build-rpm`. So the
 three trees in `pkg-files/` get wildly unequal coverage: `rpm` is built in mock
@@ -1908,6 +1872,493 @@ failure mode as a guard written and never exercised** — see the `readlink -f`
 episode under PR #4's review, where a refusal that could not fire was committed
 in the same change as a fix for a refusal that only advised.
 
+### The packaging is verified end to end now — 15 Nov 2026
+
+**`.github/workflows/verify-packaging.yml` compiles the driver and exercises
+all three package families, which is what `debug-driver.yml` never did.**
+**Seven** job instances, and **six compile** — which is not the same claim and
+was written as "six jobs" until 16 Nov 2026:
+
+```
+compile                                  make, then again with W=1 -Werror
+Fedora 42 / 43 / 44  (build, install, akmod)      compiles via dkms build
+Debian sid           (build, install, remove)     compiles
+Debian trixie        (build, install, remove)     PACKAGING ONLY -- see below
+Arch                 (parse, build, install, dkms, remove)
+```
+
+**Debian trixie does not compile the driver**, and its green ticks must not be
+read as a build: 6.12 predates `platform_profile_ops` and `power_supply_ext`,
+the kbuild probe answers `modern=no`, and both compile steps are gated on
+`steps.kver.outputs.modern == 'yes'`. The packaging half is
+kernel-independent, which is why trixie still runs it — that is the half that
+catches the `prerm` bug class.
+
+**What each job asserts**, because "green" is only worth what it checked:
+
+| Job | Chain |
+|---|---|
+| `compile` | `make` against Fedora `kernel-devel`, then `W=1 KCFLAGS=-Werror`. Fails in seconds, so it fails first |
+| `fedora` | both kmodtool-free RPMs built with `dnf builddep` (so `BuildRequires` is validated outside mock) → install the DKMS package → assert the payload landed and `@PKGVER@` was substituted → `dkms build` → build the kmod spec → rebuild its akmod SRPM with `--define kernels` → assert a rebuilt kmod package holds a real `.ko` |
+| `debian` | `dpkg-buildpackage` → inspect the `.deb` before installing → install → assert DKMS registration → `dkms build` (sid only) → exercise every `prerm` job name → **roll back an upgrade and assert the REGISTRATION comes back** → remove → **assert the DKMS registration is gone** → purge |
+| `arch` | `makepkg --printsrcinfo` and `namcap` parse it → build → assert the package's contents and that `@PKGVER@` was substituted → assert the DKMS pacman hooks exist → install → `pacman -R` and let the hook do the removal |
+
+**The akmod SRPM rebuild is the load-bearing step on the Fedora side.** In
+akmod mode the kmod spec's `%prep`/`%build`/`%install` iterate zero times, so
+nothing else exercises them. Defining `kernels` makes kmodtool emit
+`kernel_versions`, which is exactly what `akmods` does on a user's machine at
+boot — so that one invocation is both the akmod test and the only coverage that
+spec's build section gets.
+
+**The Debian removal assertion is the load-bearing step on the other side, and
+it was exercised in both directions before it was committed.** Against a `.deb`
+built with upstream's `prerm` restored verbatim it fires and the registration is
+left behind; against the fixed one it passes. **A guard that has not been shown
+to fail is not a guard**, which is this file's own rule and the reason the test
+was run that way rather than merely written.
+
+**The round-trip step asserts the REGISTRATION, not a built module.** The table
+row above said "the module comes back" until 16 Nov 2026, which is not what the
+step checks and not what happens on trixie:
+
+```
+trixie   Loading new gigabyte-laptop/0.2.0 DKMS files...
+         Building module(s)...(bad exit status: 2)
+         postinst: could not restore gigabyte-laptop/0.2.0 after abort-upgrade.
+         notice: postinst abort-upgrade restored it          <- step passes
+```
+
+`dkms add` lands before the build fails, so the registration returns and the
+module does not. **That makes trixie free coverage of the postinst's failure
+branch** — the no-fail rule (warn on stderr, exit 0) is stated in a comment
+twice and this is the one place it has been shown. A `.ko` assertion would have
+failed here for a reason unrelated to the rollback contract. `prerm`'s contract
+is the opposite and deliberately so: it stays fatal when `dkms remove` failed
+and dkms still lists the module.
+
+**And it had a hole of its own, found by review — an assertion of ABSENCE falls
+the wrong way when the query fails.** It was
+`dkms status -m gigabyte-laptop | grep -q gigabyte-laptop`, negated. A query
+that fails while printing nothing to stdout makes `grep` exit non-zero, which
+is indistinguishable from a query that succeeded and found nothing — so a
+cleanup failure would have reported a clean removal. Fixed by capturing the
+output and judging the **query** and its **content** separately, which is
+exactly the discrimination the shipped `prerm` already makes and says so in its
+own comment.
+
+**The asymmetry is the durable part, and the rest of the workflow is clean
+because of it.** The other three `dkms status` checks assert **presence**, so a
+broken query makes them fail loudly — the safe side. Only this one asserted
+absence. Audited all four; this was the only instance:
+
+| Assertion | A failed query lands on |
+|---|---|
+| presence, lines 177 / 379 / 413 | **failure** — fail-safe, no change needed |
+| **absence, the removal check** | **success** — the hole, now fixed |
+
+Two details worth keeping. `stderr` is deliberately kept **out** of the content
+check: `dkms` writes warnings there that can carry the module name inside a
+path, so folding it in with `2>&1` would false-fail a clean removal — which a
+rehearsal caught before it was committed. And a pipeline's exit status is its
+**last** command, so `dkms status ... | tee` cannot fail a step without
+`pipefail`; the presence checks work because the `grep` that follows reads an
+empty file.
+
+#### The Arch package cannot be built from its own PKGBUILD — 15 Nov 2026
+
+**`pkg-files/archlinux/PKGBUILD` had never been parsed by anything, and the
+first thing that parsed it found it unbuildable.** Not "needs a tweak" —
+unbuildable from the source it names, today, by anyone.
+
+**Its `source=` fetches an UPSTREAM GitHub release and installs
+`gigabyte-laptop.c` out of it.** Measured against the real release rather than
+inferred from a tag:
+
+```
+$ curl -sSL .../releases/download/0.2.0/driver.tar.gz | tar -tz
+Makefile
+aorus-laptop.c
+dkms.conf
+```
+
+**Upstream never took the rename**, so its tarball carries the old filename and
+`package()` installs a file that is not in it. There is no release with the new
+name anywhere, either: `release-driver.yml` has never run and no tag has ever
+been pushed to the fork. The PKGBUILD's own comment says exactly this — it is a
+*known* waiting-on-a-release state, not a surprise — but nothing had ever
+demonstrated the consequence.
+
+**`package()` swallows the failure at the function level**, and I wrote this
+up as worse than it is — corrected the same day by the run. Calling the shipped
+`package()` directly against that tarball:
+
+```
+exit=0
+install: cannot stat 'gigabyte-laptop.c': No such file or directory
+resulting package contents:
+  ./etc/modules-load.d/gigabyte-laptop.conf
+  ./usr/src/gigabyte-laptop-0.2.0/Makefile
+  ./usr/src/gigabyte-laptop-0.2.0/dkms.conf
+```
+
+**`package()` exits 0.** A shell function's status is its *last* command's, and
+the last command here is the `modules-load.d` write, which always succeeds.
+
+**What I then claimed, and it is false: "the result is a package that installs
+cleanly and contains no driver source".** That is what happens when the
+function is called *directly*, which is what my local rehearsal did. It is
+**not** what makepkg does. The job builds a second time from a tarball with the
+file removed and the answer is unambiguous:
+
+```
+==> Starting package()...
+install: cannot stat 'gigabyte-laptop.c': No such file or directory
+==> ERROR: A failure occurred in package().
+    Aborting...
+```
+
+**makepkg's errexit catches it**, so the real-world consequence is a failed
+build and no package at all — which is the correct outcome. The swallowed exit
+status is still real and still worth knowing, because anything that calls
+`package()` outside makepkg gets the bad behaviour; it just is not reachable
+through the normal route.
+
+**So the content assertion is a second guard, not the only one** — which is
+what the job's own output says, and the opposite of what I had written before
+measuring. Keeping it is still right: it asserts the *outcome* rather than
+trusting makepkg's mechanism, and it was shown to fail against both a missing
+driver and a stale `@PKGVER@`.
+
+**namcap flags the checksum independently**, which is a second line of evidence
+for the finding below rather than a restatement of it:
+
+```
+namcap: PKGBUILD (gigabyte-laptop-dkms) E: Missing checksums
+```
+
+namcap parses the file without executing it, so the command substitution never
+runs and it sees no literal sum at all — while `makepkg --printsrcinfo`, which
+*does* execute it, prints a valid 64-character one. **The official Arch lint
+calls this an error.**
+
+**`sha256sums` is computed by a `curl` inside the PKGBUILD**, so it runs on
+every *parse* — `makepkg --printsrcinfo`, `namcap`, any AUR tooling. Measured
+both ways locally:
+
+| | result |
+|---|---|
+| network up | a valid 64-char sum, **fetched from the same host as the tarball** |
+| `curl` fails | `sha256sums=('')` — an **empty** checksum |
+
+So it is useless as integrity (whoever can serve a bad tarball serves a
+matching `sum.txt`) and it turns an offline parse into an integrity error
+rather than a network one. The job reports this and does **not** fail on it:
+it is a documented property of the file, and a red run on every push would be
+noise. **The fix is a literal sum, and it needs a release to be a literal
+of** — which is the owner's call, not CI's.
+
+**Two more differences from the other two families, both reported by the job
+rather than assumed**, because they are facts about Arch and this image:
+
+- **There is no `.install` scriptlet, and that is correct — my warning saying
+  otherwise was wrong and is fixed.** `pkg-files/archlinux/` contains the
+  PKGBUILD and nothing else, where the `.deb` has `postinst`/`prerm` and the
+  RPMs have `%post`/`%preun`. The job's first version warned that "no hook
+  picked it up, so the module would never be built on a user's machine". **The
+  hook exists and ran.** The image carries `70-dkms-install.hook`,
+  `70-dkms-upgrade.hook` and `71-dkms-remove.hook`, pacman printed
+  `(3/3) Install DKMS modules` on install and `(1/1) Remove DKMS modules` on
+  removal, and what the install hook hit was
+
+  ```
+  ==> ERROR: Missing 7.3.4-arch1-2 kernel modules tree for module gigabyte-laptop/0.2.0.
+  ```
+
+  — the image has `linux-headers` but not the `linux` package, so there is no
+  `/usr/lib/modules/<ver>` to install into. **That is the same container
+  limitation the Fedora `%post` hits**, already recorded two sections up as
+  "not a defect", and I failed to recognise it in a new coat. The step now
+  *asserts the two hooks exist* — they are the mechanism this package relies on
+  instead of a scriptlet, so their absence would be the real defect — and
+  treats a hook that ran and could not finish as the container artifact it is.
+- **No `backup=()` array**, so pacman deletes
+  `/etc/modules-load.d/gigabyte-laptop.conf` on removal. dpkg keeps it until
+  `--purge`. The job asserts whichever actually happens and flags the
+  difference; dpkg's contract is the friendlier one for a file a user may have
+  edited.
+
+**One trap for anyone reading the `@PKGVER@` assertion.** `release-driver.yml`
+substitutes the version *before* tarring, so on a real release tarball the
+PKGBUILD's own `sed` is a **no-op** and an assertion on `PACKAGE_VERSION` would
+pass for the wrong reason. It only does real work on a tarball built straight
+from the repo — which is what the job stages, so the check means something
+there and would not on a release.
+
+**And the removal assertion was self-defeating in the first version** — the
+third correction the run produced, and the least excusable. It ran
+`dkms remove` by hand *before* `pacman -R`, then asserted the registration was
+gone: an absence it had created itself, which a working `71-dkms-remove.hook`
+and a broken one would both pass. **CLAUDE.md already records this exact
+lesson** from the Debian `prerm` probe — "a check a broken prerm and a working
+one would both pass" — and I reproduced it one file away from the comment
+citing it. pacman's hook does the removal now and the assertion follows it.
+
+**Three corrections from one run, and the pattern is the point**: an
+overstated consequence, a defect claimed where there was none, and a repeat of
+a recorded mistake. All three were in text I wrote *before* measuring, and all
+three would have read as confident findings.
+
+**Rehearsed before it ever ran**, on the parts that do not need Arch — a
+PKGBUILD is a bash script and `package()` only uses `sed` and `install`:
+
+```
+content assertion   listing=bare  complete        -> PASSES
+                    listing=bare  no driver .c    -> FAILS, naming the file
+                    listing=bare  stale @PKGVER@  -> FAILS, naming the cause
+                    listing=dot   (all three)     -> identical
+offline-sum probe   curl fails                    -> warns
+                    curl works                    -> notice, does NOT warn
+```
+
+**The listing format was a guess and is not any more.** The first version
+asserted against `bsdtar -tf` output directly, which bakes in whether makepkg's
+entries carry a leading `./`. Guess wrong and the job fails for a reason with
+nothing to do with the package — so the listing is normalised and the
+assertion was then proven against **both** forms. The rehearsal also caught a
+bug in the rehearsal itself before it caught anything else: the harness left
+the step's own `PKG=$(ls ...)` line in, which overwrote the fixture and failed
+all six cases, including the ones that must pass. **All-fail is as suspicious
+as all-pass.**
+
+#### Building the Debian package: it runs from `pkg-files/`
+
+**Undocumented anywhere until now, and not guessable from the tree.**
+`debian/rules` refers to `../dkms.conf`, `../Makefile`, `../gigabyte-laptop.c`
+and `../gigabyte-laptop.conf`, so `..` has to resolve to the repo root, which
+means the build runs one level down:
+
+```sh
+cd pkg-files && dpkg-buildpackage -us -uc -b
+```
+
+From the repo root those paths land outside the checkout and the build fails.
+The `.deb`, `.buildinfo` and `.changes` are then dropped in the repo **root**,
+which is why `.gitignore` gained entries for them plus six paths under
+`pkg-files/debian/`.
+
+#### The driver's kernel floor, measured
+
+**Between 6.12 and 7.0**, established by compiling rather than by reading a
+changelog:
+
+| kernel | result |
+|---|---|
+| 6.8 | fails: `platform_profile_ops`, `power_supply_ext`, `devm_platform_profile_register`, `devm_battery_hook_register` |
+| **6.12** (Debian trixie) | fails: `storage size of 'gigabyte_laptop_battery_ext' isn't known`, same for `gigabyte_laptop_profile_ops` |
+| 7.0 (Ubuntu) | **builds clean**, 708 KB module |
+| 7.3 (Fedora 43/44) | **builds clean**, including `W=1 -Werror` |
+
+`min_event_size` used to put the floor above 7.0 on its own, and it is now
+commented out — a field set to the value a designated initialiser already gives
+it, so writing it and omitting it produce an identical driver. See the comment
+in `gigabyte_laptop_event_driver`.
+
+**The Debian job probes for this rather than hardcoding a version**, and the
+first version of that probe was broken in a way worth recording, because the
+job stayed green while the thing it gates never ran.
+
+**It grepped a guessed header path, and on Debian that path does not resolve.**
+`grep -rqs 'struct platform_profile_ops' "$K/include/linux/platform_profile.h"`,
+where `$K` is `/lib/modules/<ver>/build`. It answered *"too old"* on **every**
+suite — and the sid log proves it wrong three lines later:
+
+```
+##[notice]Debian sid headers 7.3.4+deb14-amd64
+##[warning]7.3.4+deb14-amd64 predates platform_profile_ops/power_supply_ext;
+          skipping the compile steps and testing the packaging only
+...
+Building initial module gigabyte-laptop/0.2.0 for 7.3.4+deb14-amd64
+Building module(s)... done.
+```
+
+**7.3.4 does not predate anything**, and the postinst built the module against
+those very headers. So both Debian compile steps had never once run, on either
+suite, and "six jobs green" did not mean what it looked like.
+
+**Validating it on Ubuntu is exactly what hid it.** Measured here: Ubuntu's
+`linux-headers-<ver>-generic` **does** carry `include/linux/`, so the grep
+resolves and answers `no` for 6.8 and `yes` for 7.0 — correct, and the reason
+the local check passed.
+
+**The Debian split is the cause, and it is measured rather than assumed.** The
+step prints the layout, and the run says:
+
+```
+/lib/modules/7.3.4+deb14-amd64/build -> /usr/src/linux-headers-7.3.4+deb14-amd64
+include/linux/platform_profile.h ABSENT
+found under /usr/src at:
+  /usr/src/linux-headers-7.3.4+deb14-common/include/linux/platform_profile.h
+```
+
+So `build` points at the **arch** directory, the header is **not there**, and
+it ships in the separate **`-common`** package. That line stays in the step on
+purpose: it is one `::notice::` that keeps the explanation a reading rather
+than a story, and it costs nothing.
+
+**The fix is to ask kbuild instead of the filesystem**: build a throwaway
+module against `$K`, which uses the kernel's own include resolution and cannot
+be fooled by where a distro puts things. Three outcomes, kept distinguishable
+because the dangerous one is a broken probe reading as an old kernel:
+
+| probe | meaning | action |
+|---|---|---|
+| an empty module fails to build | the toolchain or headers are broken | **error** |
+| empty builds, API probe fails | the kernel really is too old | warn, skip the compile steps |
+| API probe builds | the APIs are there | compile the driver for real |
+
+**And the first attempt at *that* was wrong too, in the more dangerous
+direction — caught only by testing it against a kernel it had to reject.** It
+declared *pointers*, `static const struct platform_profile_ops *p;`, and **a
+pointer to an incomplete type is legal C**, so it compiled whether or not the
+struct was ever defined: `modern=yes` on 6.8, where the driver demonstrably
+fails. The driver fails on an old kernel precisely because it **defines
+objects** of those types — `gigabyte_laptop_profile_ops`,
+`gigabyte_laptop_battery_ext` — which needs a complete type. The probe now
+does the same, and reproduces the identical error:
+
+```
+error: storage size of 'probe_ops' isn't known
+error: invalid application of 'sizeof' to incomplete type
+       'const struct platform_profile_ops'
+```
+
+**Rehearsed against all three branches before landing**, on the two kernels
+whose real compile outcomes are known, and the verdicts match the driver's own:
+
+```
+6.8.0-149-generic     probe modern=no    driver FAILS     -> agree
+7.0.0-43-generic      probe modern=yes   driver BUILDS    -> agree
+no-such-kernel-9.9.9  probe exit=1       error branch     -> fires
+```
+
+**Confirmed on CI, 15 Nov 2026**, and the prediction written before the push
+held on both suites: sid now runs *"Compile directly first"* and *"Compile
+through DKMS"* for the first time — `CC [M]`, `LD [M]`, `BTF [M]`, then two
+`.ko` files out of `dkms build` — while trixie still skips both, now because
+the probe genuinely cannot build against 6.12.
+
+**The lesson is one this file already has a name for**, which is why the
+episode is kept rather than quietly fixed: *a guard that has not been shown to
+fail is not a guard.* Both broken versions were written, read, and looked
+right; the first was tested only on a layout where it works, and the second
+only against a kernel it was supposed to accept. Testing a gate against the
+case it must **reject** is the half that catches it.
+
+The packaging half is kernel-independent and is what catches the `prerm` bug
+class, so trixie runs it regardless of the probe.
+
+#### `dkms.conf` hardcodes `KDIR`, so `--kernelsourcedir` does nothing here
+
+`dkms.conf:4` is `MAKE[0]="make KDIR=/lib/modules/${kernelver}/build"`. DKMS
+uses that string as written, so `--kernelsourcedir` changes only DKMS's own
+header check and never the path `make` receives. Passing it got DKMS past
+`exit 21 "Your kernel headers ... cannot be found"` and the build then failed
+anyway on the same missing path.
+
+**Harmless on this machine**, where `kernel-core` supplies
+`/lib/modules/<ver>/build`. It bites a headers-only environment, which is what
+a container is. CI therefore creates the symlink — making the container look
+like a real Fedora install — and runs the shipped `dkms.conf` unmodified, rather
+than overriding it to go green. **Testing what ships beats accommodating it.**
+Using DKMS's own `${kernel_source_dir}` would make the option work, and would
+diverge from upstream; not done, recorded as an option.
+
+**`ln -sfn TARGET DIR` is the wrong way to create it**, from a review finding
+and verified here: when `DIR` is a *real* directory it is not replaced, a link
+appears *inside* it, and DKMS then fails against a path that looks correct. It
+is `test -e ... || ln -s ...` now.
+
+#### kmodtool emits two packages, and only one holds the module
+
+```
+module in     kmod-gigabyte-laptop-7.3.3-100.fc43.x86_64-0.2.0-2.fc43.x86_64.rpm
+no module in  kmod-gigabyte-laptop-0.2.0-2.fc43.x86_64.rpm      <- the meta package
+```
+
+So **anything matching `kmod-gigabyte-laptop-*.rpm` and taking the first hit is
+a coin flip.** This is not hypothetical: an assertion written that way passed on
+Fedora 43 and failed on 44 with identical code, packages and spec. Both releases
+were producing a module the whole time; only the check was broken. **Green by
+luck is worse than red**, because it reports a guard where there is none.
+
+#### Fedora 42 is missing one RPM Fusion package, and is not dead
+
+`buildsys-build-rpmfusion-kerneldevpkgs-akmod-x86_64` is absent from that
+release's RPM Fusion, so `dnf builddep` on the kmod spec fails there while
+`rpmfusion-free-release` and `kmodtool` both install fine. The job falls back to
+`rpmbuild --nodeps` for that one spec with a warning, rather than skipping: the
+metapackage exists to drag in kernel-devel sets for `buildforkernels current`,
+which neither the akmod build nor the SRPM rebuild uses, and skipping would drop
+the only coverage that spec's build section gets. Mock in `debug-driver.yml`
+still validates dependencies properly against an explicit RPM Fusion URL.
+
+**An earlier note here said fc42's RPM Fusion was dead at EOL. That was wrong**
+and is recorded because of how it happened: the first run showed
+`Usable URL not found` — transient mirror noise — and a whole EOL story was
+built on that one reading. The next run disproved it by getting nine steps
+further on the same release. **One observation is not a cause.**
+
+#### The container `%post` scriptlets cannot succeed, and that is not a defect
+
+Both the DKMS and akmod packages run `dkms`/`akmods` for the **running** kernel
+in `%post`. In a container that is the host's kernel with no headers, so both
+exit non-zero and `rpm` reports `scriptlet failed`. Tolerated with `|| true` in
+both places, and nothing is taken on trust in exchange: the steps assert the
+payload landed, the module registered, the SRPM shipped, and the rebuild
+produced a module.
+
+The Debian `postinst` is the opposite case and is **not** tolerated. It is
+written never to fail — a `postinst` that exits non-zero leaves the package
+half-configured — so a non-zero `dpkg -i` there would be a real regression in
+that contract.
+
+#### Four Debian packaging defects, found by building the package for the first time
+
+Nothing had ever built `pkg-files/debian`, so every dpkg tool had been reporting
+these to nobody:
+
+| Defect | Consequence |
+|---|---|
+| `debian/rules` committed mode **644** | Debian requires it executable. The build worked only because `dpkg-buildpackage` chmod'd it in passing, which is also why a build left a *tracked* file showing as modified |
+| changelog trailer had **one** space before the date, needs two | `dpkg-parsechangelog`, `dpkg-gencontrol`, `dpkg-genbuildinfo`, `dpkg-genchanges` and `dpkg-source` each warned |
+| `Version:` in the binary stanza of `debian/control` | Not valid there — the version comes from the changelog — so it was ignored with a warning |
+| no `Section:` or `Priority:` | `dpkg-genchanges` filled both with `-` and warned. A DKMS kernel module is `Section: kernel`, `Priority: optional` |
+
+Fixed and re-verified from a clean checkout: the build is **warning-free** and
+the package contents are unchanged.
+
+**And `/etc/modules-load.d/gigabyte-laptop.conf` is a conffile**, which dpkg
+lists with its md5sum because `dh_installdeb` marks everything under `/etc` as
+one. `dpkg -r` keeps conffiles by design and only `--purge` removes them — so a
+test asserting its absence after remove is testing documented behaviour
+backwards. CI now checks that remove keeps it and purge removes it.
+
+#### It took eight runs, and every one found something
+
+Recorded because the ratio is the point, not the count. **Four were bugs in the
+tests themselves**: the spec not being in `%{_specdir}` (which
+`%{?akmod_install}` needs, since it shells out to `rpmbuild -bs` on that path),
+the inverted conffile semantics, a `prerm` step that ran `dkms remove` and so
+destroyed the state the next step asserted, and the readdir-order assertion
+above. **Three were facts about the environment**: the kernel floor, the
+hardcoded `KDIR`, the missing fc42 metapackage. **Two were wrong diagnoses of
+mine**, both from explaining a single reading — the fc42 EOL story, and nearly
+the readdir one, which was left unasserted so the run could answer it instead.
+
+**Every one of them was found by running, not reading.** That is the same
+lesson as the `prerm` bracket bug, which `sh -n` passes and only execution
+fails, and it is the argument for this workflow existing at all.
+
 #### What actually triggers each workflow — and the `--tags` hazard
 
 Read out of the workflow files rather than inferred, 26 Oct 2026:
@@ -1939,6 +2390,226 @@ regress `fan_pwm`, hwmon PWM channels, `light_sensor`, `power_on_time`,
 the Debian/RPM packaging.
 
 **Cherry-pick features from `a16/master`. Do not merge it.**
+
+### What upstream has added since the fork point — audited 15 Nov 2026
+
+**`upstream/master` is no longer `4b817ea`.** It is **`d184209`**, five commits
+ahead, and nothing in this file recorded that it had moved. The local `master`
+is still at `4b817ea` and should stay there — but "we are level with upstream"
+was an assumption with a shelf life, and it expired on 9 Sep 2026.
+
+```
+d184209  2026-11-06  Debian: fix typo
+f8a9e13  2026-11-06  Handle AORUS 17X VF quirks
+9d480d9  2026-11-06  Lower max fan speed to 229
+c612eec  2026-11-06  Initialize pointer before checking for ejector
+c915f1a  2026-09-09  Remove DSDT files from tree
+```
+
+`4b817ea` is still an ancestor of `upstream/master`, so this is a clean range
+and not a rewrite. **It is the whole delta**, verified by diffing the driver
+file directly from `4b817ea` to `upstream/master` rather than by trusting the
+commit list: the complete change is those three driver commits and nothing more.
+The other upstream branches are either already merged (`debian-pkg`, `fan-pwm`,
+`fix-action`, `untested` — zero unique commits) or abandoned CI experiments
+(`test-rpm`, Feb 2025; `test-workflow`, Apr 2023).
+
+**The direction is take-only.** Upstream is a source of fixes and firmware
+insight for this driver; see "Decided: upstreaming comes last" for what happens
+to the record in the other direction, which is nothing until the goals here are
+met. The question each commit gets asked below is only *does this benefit this
+driver on this machine*.
+
+| Commit | Verdict |
+|---|---|
+| `d184209` prerm `deconfigure` | **taken** — we had the same typo |
+| `c612eec` ejector pointer | already fixed here in `4a96703`, and placed earlier |
+| `9d480d9` 229 duty clamp | not taken — no observable effect on this EC |
+| `f8a9e13` AORUS 17X VF | **cannot work on this firmware.** Not "port later" |
+| `c915f1a` delete the DSDTs | rejected — those dumps are load-bearing here |
+
+**Net: one word.** Three months of upstream work added no capability to this
+laptop, which is the expectation to carry rather than a complaint — upstream is
+working on Intel AORUS hardware.
+
+#### Nothing was lost in the rename and rewrite
+
+**Checked by enumerating, not by reading the diff.** That is the method this
+file arrived at for the privacy audit — enumerate the sources rather than
+guess at patterns — and it transfers: 3309 lines against upstream's 1205 is far
+too big to eyeball, so compare inventories instead.
+
+Every method-ID `#define` upstream declares is declared here, **at the same
+value**, so there is no name that survived with drifted contents. Every sysfs
+node upstream exposes is exposed here, plus six of our own (`perf_mode`,
+`dynamic_boost`, `fan_turbo`, `fan_preset`, `power_preset`,
+`debug_method_write`). Every upstream function has a same-named counterpart. The
+hwmon channel config is identical. The only upstream structure absent here is
+`gigabyte_laptop_aorus_vf[]`, which arrived in `f8a9e13` and is rejected below.
+
+So the divergence is entirely additive on this side. Worth re-running the same
+three comparisons after any future upstream audit; it is cheap and it is the
+only check that would catch a silent loss.
+
+#### `f8a9e13` corroborates the PECM/ERAM split from the other direction
+
+**The one piece of real value in the whole delta, and there is no code in it.**
+Upstream's AORUS commit reads GPU fan duty with `ec_read(0xB4)` instead of going
+through WMI. Asking what byte `0xB4` actually *is* turns the commit into
+independent evidence for a distinction this file already leans on — and it was
+answered entirely out of `AORUS-17X-VF-DSDT.dsl`, the dump upstream deleted in
+`c915f1a`.
+
+`AORUS-17X-VF-DSDT.dsl:125912-125919`, inside
+`OperationRegion (ECF2, EmbeddedControl, Zero, 0x0100)` (`:125728`), which is
+the only field block in that range. **The `//` offsets are added here, not
+firmware text** — these dumps carry no comments on these fields, unlike the
+Aero's genuine `// 0x60 (CPU temp)` annotations quoted under Hazards:
+
+```asl
+Offset (0xB0),
+FAN1,   8,      // EC 0xB0   (annotation)
+FAN2,   8,      // EC 0xB1
+Offset (0xB3),
+FDTY,   8,      // EC 0xB3
+GDTY,   8,      // EC 0xB4   <- what upstream reads
+Offset (0xB7),
+KBBL,   8,      // EC 0xB7
+```
+
+The same names exist on this machine and sit in a **different ACPI address
+space**. `GAMING-A16-5TH-DSDT.dsl:8174-8175` is inside
+`OperationRegion (PECM, SystemMemory, 0xFC7E0800, 0x1000)` (`:8097`), with no
+intervening region or field block (offsets annotated, not firmware text):
+
+```asl
+Offset (0x24),
+PWMB,   8,      // PECM 0x24  (annotation)
+FDTY,   8,      // PECM 0x25
+GDTY,   8,      // PECM 0x26
+Offset (0x29),
+GPUT,   8,      // PECM 0x29  <- matches this file's existing record
+```
+
+and this machine's *entire* `EmbeddedControl` region is two bytes (`:8246`):
+
+```asl
+OperationRegion (ERAM, EmbeddedControl, Zero, 0xFF)
+Field (ERAM, ByteAcc, Lock, Preserve)
+{
+    Offset (0x5F), ERBD, 8,
+    Offset (0x60), SMPR, 8,
+    Offset (0x62)
+}
+```
+
+**So `ec_read(0xB4)` here reaches nothing the firmware describes.** The address
+is inside `ERAM`'s declared `0xFF` size and far past its last *named* field, so
+no AML field covers it — structurally the same position as `0x62`, which is why
+`temp3` is dead. **What that byte actually returns is not recorded here**: an
+`ec_read(0xB4)` has never been run on this machine, so the comparison is one of
+position, not of measured value. Flagged by review on PR #5, and the correction
+is worth taking — asserting a read's result from a field list is the same
+over-claim this file keeps catching.
+
+**The conclusion does not rest on it.** `ec_read` of *any* address cannot reach
+`GDTY`, which lives at a *physical memory* address (`0xFC7E0800 + 0x26`) in a
+region the EC command interface does not address at all — and the DMI gating
+rules the code path out before that even matters.
+
+**Three things this settles, and the first is the durable one:**
+
+- **The PECM-versus-`ERAM` distinction now has evidence from a second
+  generation.** It was previously recorded off this machine alone, as the
+  explanation for `temp3`. Here is a sibling firmware where the identical field
+  names sit in EC RAM and `ec_read` genuinely reaches them — so the split is a
+  real generational change in where Gigabyte puts these fields, not a quirk of
+  one dump. **Field offsets do not transfer across generations any more than
+  method IDs do**, and that is now shown rather than assumed.
+- **`f8a9e13` is not "wrong hardware, port later" — the mechanism is absent.**
+  It is also unreachable twice over before that even matters: the flag is set
+  only when `DMI_PRODUCT_NAME` contains `AORUS 17X AZF` or `AORUS 17X AXF`
+  (`DMI_MATCH_GIGABYTE_LAPTOP_NAME` is a substring match on the product name
+  with an exact board-vendor match), and this machine reports
+  `GIGABYTE GAMING A16 5TH`. Do not revisit it.
+- **It is an instance of "the older dumps are a decoder for this firmware", run
+  backwards:** the older dump explained what a *newer upstream commit* was
+  doing, rather than what our own firmware was hiding.
+
+**One error, caught by validating rather than by re-reading.** Those offsets
+were first written up as `FDTY` 0x24 / `GDTY` 0x25, derived by finding the
+nearest preceding `Offset ()` marker and assuming the field followed it
+immediately. `PWMB, 8` sits in between, so the real offsets are **0x25 and
+0x26**. The check that caught it is the one worth copying: the same arithmetic
+puts `GPUT` at PECM `0x29` on line 8177, and this file **already records `GPUT`
+at `0x29`, line 8177** from separate work. Reproducing a figure the record
+already holds is what validated the method — and the nearest-marker shortcut is
+what produced the error. Read the lines; do not interpolate from a marker.
+
+#### The prerm typo, taken — 15 Nov 2026
+
+`pkg-files/debian/prerm` said `dconfigure` where dpkg's job name is
+`deconfigure`, so that invocation fell past the `case` labels to the `*)`
+catch-all, printed "unknown argument" and exited 1 — and a prerm that exits
+non-zero aborts the dpkg operation outright. Fixed, with the reason in the file.
+
+**It is a second, independent bug in the same `case` label as the missing-space
+one**, inherited from `4b817ea` and sitting one line above the comment block
+that documents the bracket bug.
+
+**Upstream fixed this half and still has the other.** `upstream/master`'s prerm
+reads, today:
+
+```sh
+remove|upgrade|deconfigure)
+    if [ "`dkms status -m $NAME`"]; then
+```
+
+so they edited that `case` statement and the broken test one line below it
+survived the edit. The bracket entry in the upstreaming list is unaffected.
+
+Verified by running the script, which is the only check that works on this class
+of bug — `sh -n` passes on both spellings:
+
+```
+before:  prerm deconfigure  -> exit 1   "unknown argument `deconfigure'"
+after:   prerm deconfigure  -> exit 0
+         prerm remove       -> exit 0
+         prerm upgrade      -> exit 0
+         prerm bogus-job    -> exit 1   (the catch-all still catches)
+```
+
+Parses under `sh` and `dash` both; Debian maintainer scripts run under
+`/bin/sh`, which is dash there, and a comment between `case` and the first label
+is legal in both.
+
+**Reachability is low, and that is not the argument for fixing it.** Nothing
+currently declares a relationship that would make dpkg deconfigure this package,
+so this was unlikely to be hit. It is one word, it was broken, and it was
+inherited rather than chosen.
+
+#### Where upstream has drifted, for future cherry-picks
+
+Four standing differences, recorded so none of them is a surprise later:
+
+| | upstream | here |
+|---|---|---|
+| `fan_custom_speed` range | 0–229, enforced and documented | 0–255, enforced and documented |
+| the DSDT dumps | deleted in `c915f1a` | kept, and used — including in this audit |
+| hardware under active work | AORUS 17X, Intel | GAMING A16 5TH, AMD Rembrandt |
+| driver size | 1205 lines | 3309 lines |
+
+Cherry-picking gets harder rather than easier. `f8a9e13` alone lands in three
+functions this fork has rewritten, and the fan-count detection it extends has
+been moved out of `probe()` into `gigabyte_laptop_detect_fan_count()` so that
+the flags are set before hwmon registration — so upstream's insertion point does
+not exist here in the same place.
+
+**`c612eec` and `9d480d9` are upstream independently converging on two entries
+already in the upstreaming list** — the `gpu_boost_store()` oops and the duty
+clamp. That is recorded as a fact about divergence shrinking, not as a reason to
+do anything: the oops is already fixed here and better placed, and the clamp is
+declined on this hardware for the reasons under Hazards.
 
 ### Code style
 
@@ -1983,6 +2654,31 @@ unversioned.
 ```sh
 sudo bash scripts/install-dkms.sh            # or --no-autoload to skip boot loading
 ```
+
+**It builds before it removes anything**, in a temp directory rather than the
+checkout, so a compile error is non-destructive: the old driver stays installed
+instead of leaving the machine with no module and a `modules-load.d` entry still
+asking for one. It is also the only compile gate that answers in seconds.
+
+**If a later step fails anyway** — signing, a full disk, a DKMS environment
+difference — **the entry is LEFT in place and the script says so**, printing the
+`rm` to run and why it is not run for you. **This paragraph claimed the failure
+path removes it, which is the opposite of what the script does and of what it
+deliberately decided — corrected 16 Nov 2026.** An earlier version of that
+failure path *did* delete the entry, and it was removed for a stated reason: the
+`modules-load.d` file is not ownership-gated *because* the script only ever
+overwrites it with identical content, never deletes it, except under an explicit
+`--no-autoload`. An install failure is not an explicit request, so deleting it
+there would strand a packaged `gigabyte-laptop-dkms` — rpm or dpkg still listing
+a file that is gone, which is the exact harm the ownership check exists to
+prevent. Leaving it costs one journal line at the next boot; deleting a
+package-owned file damages the package database.
+
+**The error is worth naming rather than quietly fixing**: this sentence was
+written on 16 Nov 2026 while *preserving* the fact from a deleted section, and
+it described the behaviour the script had already rejected. Re-homing a fact is
+a rewrite, and a rewrite needs the source checked — the comment stating the
+decision is directly above the code.
 
 **Autoload is on by default and should stay that way.** The module registers its
 platform device by hand in `gigabyte_laptop_init()` and exposes no modalias
@@ -2089,10 +2785,26 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   #46: duties above 229 *stop the fans entirely* on the AERO 17-XA. The driver
   must never program a higher duty for itself, and the one place it picks a duty
   — `fan_turbo` — uses exactly `FAN_DUTY_MAX`. The `fan_custom_speed` node still
-  accepts the full 0–255 as upstream intends, and now **rejects anything above
-  255** rather than passing an arbitrary `u32` to the EC. Deliberately *not*
-  clamped to 229: upstream documents the wider range, and a user asking for a
-  duty above the ceiling on an affected model is making an informed choice.
+  accepts the full 0–255 and **rejects anything above 255** rather than passing
+  an arbitrary `u32` to the EC. Deliberately *not* clamped to 229, ~~because
+  upstream documents the wider range~~ — **that reason expired on 6 Nov 2026
+  and the decision did not.** Upstream `9d480d9` now clamps `fan_custom_speed`
+  at 229 and documents the node as 0–229, so citing upstream for the wider
+  range is simply false now. See "What upstream has added since the fork point".
+
+  **The decision stands on this machine's own measurements instead, which is a
+  better footing than it ever had.** The 255 bound is the one doing real work:
+  the field the value lands in is 8 bits wide, so 255 is the largest number that
+  survives the trip. 229 is a *different* EC's quirk. And nothing on this EC
+  reads the duty proportionally by any route — Step 4 closed four mechanisms,
+  `0x70` ignored targets of 25/50/75 and **stopped both fans at 100** — so a
+  ceiling on a number nothing acts on changes nothing observable here.
+
+  **The code comment still cites upstream and should not.**
+  `fan_custom_speed_store()` reads `// The node's range is 0-255, as upstream
+  documents it`. Left alone deliberately rather than overlooked: this file is the
+  record, the correction is here, and the comment is a one-line fix to make
+  whenever that function is next touched for a real reason.
 
   **The duty scale is read one way and written another, and the halves
   disagree — found 29 Oct 2026, and it is the open question behind this whole
@@ -2367,6 +3079,14 @@ Install via DKMS, which signs automatically with the already-enrolled key:
   **correction of a wrong conclusion about `temp2`**, not a warning against
   trusting it. `ec_read(0xD)` is suspect for the same reason as `0x62`, but is
   only reached when the machine is already in custom fan mode at load time.
+- **Do not hide `temp3` family-wide because it reads 0 here.** It has been
+  proposed and is wrong: `gaming_family` covers **every** `GIGABYTE GAMING`
+  model and the evidence is one machine, which is the same over-generalisation
+  this file warns about for method IDs. The channel's *meaning* is also pinned
+  by the Aero firmware's own comment — EC `0x62` is the MLB (motherboard)
+  temperature — so upstream's label is correct and hiding it would remove a
+  correctly-named channel. A channel reading 0 is cosmetic and hwmon consumers
+  handle it. Revisit only with a second machine's dump.
 - ~~**hwmon `temp2` is labelled GPU and is not a GPU temperature here.**~~
   **Wrong, and reversed 26 Oct 2026. `temp2` *is* the GPU temperature.** The
   24 Oct conclusion below was reached from a firmware field's **name** plus a
@@ -3334,10 +4054,6 @@ an ancestor of it. The never-merge rule covers `master` only; `a16-5th` was the
 integration branch at the time and was exactly where this was meant to land. It
 is `a16-5th-gmate` now — see Branches.
 
-Eleven CodeRabbit findings were addressed across three review rounds before the
-merge — six in `fc61b85`, two in `7e0ad94`, three in `1e3fc39`. One finding was
-never actioned because its text never arrived intact; if it matters it will
-resurface on the next review of this code.
 
 ### What the branch carried — landed and blocked at the time
 
@@ -3561,7 +4277,7 @@ momentary sub-threshold current or a non-`Charging` status reported
 "HONOURED at 84 %" — four points past, which is the definition of `IGNORED`.
 The capacity-flatline fallback was worse: a full battery resting at 100 % would
 have reported `HONOURED`. Reordering is sufficient because `IGNORED` is the
-stricter window. Found in the third review round, not by running the script.
+stricter window. Found by reading the logic, not by running the script.
 
 A `HONOURED` verdict is what makes the four handler defects worth patching. An
 `IGNORED` one means charge limiting is firmware-blocked on this unit and the
@@ -3620,7 +4336,7 @@ The `60 <= limit <= 100` and `mode > 1` range checks stay. Still no firmware
 basis — there is no clamp — but they keep every written value inside its field
 width, which matters more now that the field is known to be live.
 
-**Two later fixes on the same path, from the third review round.** Both are the
+**Two later fixes on the same path.** Both are the
 kind of thing only a second reader catches:
 
 - **The mode write is skipped when the mode is unchanged.** Re-pointing an
@@ -4329,249 +5045,6 @@ page-gated, so it will not see this device. Its `GigabyteAorusLaptopController`
 is USB-only on page `0xFF01` with an 8-byte report `0x08`. `opengigabyte`
 supports only USB `1044:*`/`0414:*`. *All reported, not independently verified.*
 
-### PR #4's review: 20 findings, and two of them caught my own regressions
-
-**Raised 29 Oct 2026 as `master <- a16-5th-gmate`** — a review surface, not a
-merge, exactly as PR #1 was. **The never-merge rule still covers `master`**;
-see "Why the fork is ported, not merged". CI was green on all four jobs with no
-conflict, which means the packaging is well-formed and says **nothing** about
-whether the driver builds — see "CI never compiles the driver".
-
-Two were marked **major** and both were real:
-
-- **`USAGE.md` promised a dGPU restore that does not work here.** It said
-  restoring "either way works" via `gpu_boost 4` or a PCI rescan. This session
-  had already measured both failing, and the obvious next step — the PCI bind —
-  wedging in D state. So the document was telling a user to do the thing that
-  costs a reboot, then the thing that cannot be killed. **This is the worst
-  defect found in the whole session**, because it was in the one file written
-  for someone else to act on, and the correct content was already sitting in
-  this file.
-- **`install-dkms.sh` removed the installed driver before building the new
-  one.** A compile error left the machine with no driver *and* a
-  `modules-load.d` entry still asking for it, so the next boot failed in
-  `systemd-modules-load` with nothing explaining why.
-
-  **The reviewer's own fix was wrong and they said so**: reordering the removal
-  after the install needs "a separate path for same-version reinstalls, which
-  DKMS does not allow to coexist". Correct — and the removal exists precisely
-  to clear the `@PKGVER@` registration. **The fix was to build first**, in a
-  temp directory (the script runs as root, so an in-tree `make` would leave
-  root-owned objects in the checkout). The failure becomes non-destructive
-  instead of being reordered away. It is also the only compile gate there is.
-
-**Two amber findings were defects this session had introduced**, which is the
-part worth carrying forward — a nit label is about how much it matters to the
-reviewer, not about whose bug it is:
-
-- **`tests/test-dynamic-boost.sh` still described the driver it had just
-  fixed.** Its header said "the driver inverts before sending, so a node write
-  of 1 reaches the firmware as 0", and its verdict recommended adding
-  `!enable` to `dynamic_boost_store()`. That inversion was **removed hours
-  earlier**, by this very script's result. So the script that found the bug
-  would have told the next reader to re-introduce it. **Fixing a driver and
-  leaving the tool's reasoning describing the old one is the same
-  stale-premise failure this file keeps catching** — and here the stale text
-  was an instruction.
-- **`tests/test-dgpu-detach.sh` set `DETACHED=1` before the eject write and
-  never cleared it on failure**, so a *failed* write sent `gpu_boost 4` to a
-  still-attached card and reported a restore for a detach that never happened.
-  The early flag is deliberate and stays — an interrupt between a landed eject
-  and the next line must still restore — so the fix is to unset it on the
-  failure path. **Both orderings were needed; only one had been thought
-  through.**
-
-  The same file also *advised* that the panel must be on the iGPU and then
-  detached anyway. That is the "advise rather than refuse" pattern the process
-  check in the same script had already been rewritten to eliminate, so it now
-  reads the connected eDP's driver and refuses, honouring
-  `GIGABYTE_DETACH_FORCE` like every other gate.
-
-**One fix opened a hole, caught by replaying the logic rather than by reading
-it.** Gating the `dynamic_boost` direction verdicts on the control window left
-two combinations falling through to an `else` whose text asserted "both test
-settings let the limit wander" — false for both of them. Enumerating all 16
-quiet/wander combinations found it immediately, and two branches were added so
-every branch's text is true of its own numbers. **Adding a condition to one
-branch of a chain changes what reaches the others**, and a four-variable chain
-is past the size where reading it is enough.
-
-**And the new refusal was itself broken, caught by testing it rather than
-reading it.** `readlink -f` canonicalises a path whose *final* component is
-missing and prints it anyway, so
-
-```sh
-basename "$(readlink -f /sys/class/drm/card1/device/driver)"   # card with nothing bound
-#   -> "driver"        not "" as expected
-```
-
-A card with no driver bound therefore yielded the literal string `driver` —
-neither empty, nor `amdgpu`, nor `nvidia` — so it slipped past the refusal into
-the warn-and-proceed branch, and the "cannot determine the MUX" case was
-**unreachable**. Use `readlink -e`, or test `[ -e ... ]` first, which is what
-the `gpu_driver()` helper ten lines above had already been doing. **A guard
-written and not exercised is not a guard**, and this one was written in the
-same commit as a fix for a guard that advised instead of refusing.
-
-**Declined, with reasons**, so they are not re-investigated:
-
-| Finding | Why not |
-|---|---|
-| `test-apu-burst.sh` baseline flatness | The reviewer offers no threshold and says "a safe correction is not established". The conclusion it guards was re-derived anyway by the 300 s `--hold 0` run |
-| `test-charge-limit.sh` HONOURED wording | Wants the verdict to stop claiming a cause. The result is twice corroborated — a 1171 s flatline *and* KDE dropping "Time To Full" — and the current-based detection exists because of exactly this concern |
-| `notify.c` timeout-read race | Real but microseconds wide, and the suggested fix risks announcing ordinary sysfs writes, which the header forbids. The reviewer labels its own tradeoff "Poor tradeoff" |
-| `notify.c` `execlp` PATH warning (ast-grep) | Not a privilege boundary: a user-session binary running as the user, who can already run anything. `execlp` over `system()` is a deliberate recorded choice |
-| `test-gpu-power.sh` preset/mode both-states | Correctly identifies a genuine tension and asks for a decision rather than a fix. The choice is documented in the restore comment |
-
-### The second review round: four findings, three of them my own — 29 Oct 2026
-
-**A manual trigger on `0cb18fc` produced a real review** (the first two
-triggers were skipped; see the auto-review bullet). Four amber findings, and
-**three were defects introduced by the fixes in the first round** — which is
-the useful thing about this round, not the count.
-
-- **The `fan_mode` restore undid the `fan_preset` restore two lines above it.**
-  Round one fixed "the test does not restore `fan_mode`" by writing the mode
-  back. But `fan_mode_store()` **pins `fan_preset` from the mode**:
-  `fan_mode_presets[]` covers 0-2 and anything above falls back to
-  `FAN_PRESET_AUTO`. So a machine that started on `auto` came back with the
-  preset *pinned*, which hands fan policy to nobody — the profile stops owning
-  the fans.
-
-  **I fixed one half of a coupled pair and broke the other, having declined a
-  finding that described exactly this.** `test-gpu-power.sh:179` said the two
-  states cannot both be restored and asked for a decision; I filed it as
-  "documented" and then created the same bug next door. The reviewer was
-  consistent; I was not.
-
-  The rule, now in both scripts and verified over all 15 reachable
-  combinations:
-
-  | saved preset | saved mode | what restores both |
-  |---|---|---|
-  | pinned | 0-2 | the preset write alone — it sets the mode |
-  | `auto` | 0-2 | the preset write **alone**; writing the mode would pin it |
-  | `auto` | 3+ custom | the mode write — mode 3+ sets the preset to `auto` itself |
-
-  **The preset is the policy and the mode under `auto` is derived**, so the
-  preset is the one to protect. A mode write is only ever needed, and only
-  ever safe, for a custom mode.
-
-- **A `USAGE.md` snippet I wrote printed a blank line where it promised
-  `UNBOUND`.** The bot caught it by *running* it. `driver` is a symlink to a
-  directory, so `cat` cannot read it; the fallback `basename "$(readlink ...)"`
-  then **succeeds with empty output** when the link is absent, so the
-  `|| echo UNBOUND` branch never fires. Replaced with an explicit
-  `[ -L ... ]` test, which also avoids the `&&`/`||` chain. **A documented
-  check that cannot emit its documented answer is worse than no check**, since
-  the reader is told to act on the output.
-
-- **A privacy claim overstated its own scope, and this is the one to
-  remember.** The 29 Oct audit paragraph ended "the serial is not reachable
-  from any ref this clone can see." **False** — it is in 16 commits reachable
-  from `a16-5th-gmate`, which is exactly what the recorded decision
-  *intends*. A **tip** check was run and a **reachability** claim was written
-  from it.
-
-  That is the error this file devotes a whole section to — "Audit history, not
-  just the tree" — committed in the paragraph documenting that very lesson.
-  **Checking the right thing and then describing it as something stronger is
-  its own failure mode**, distinct from checking the wrong thing, and in a
-  privacy record it is the more dangerous of the two: a narrower honest claim
-  invites the follow-up check, an overstated one closes it.
-
-- **A stale "current state" sentence**, since fixed: a paragraph still said
-  the checkout "has been sitting" on `p4-rem-a15` with no end date, while the
-  table above it recorded that branch deleted. Both halves had been true on
-  different days.
-
-**The pattern across both rounds is worth naming.** Round one: two of the
-findings were bugs I had introduced hours earlier. Round two: three were bugs
-my round-one *fixes* introduced. **A fix is a change, and a change needs the
-same adversarial reading as the code it replaces** — the review found things my
-own re-reading did not, every time, and twice it found them by executing the
-thing rather than reading it.
-
-**The `cmos-slots` fix was itself half done, and the finding said so.** Its
-text ended "Make the matching change to the header steps at lines 52-53", and
-the body procedure was fixed while the header's step 5 still read "restore the
-first one **in the same visit**" — verbatim the bug, in the summary a reader
-hits first. **The detailed procedure and its summary are two copies of the
-same instruction**, and fixing one is not fixing the instruction. Read a
-finding's whole text, not its headline: the pointer to the second copy was in
-the last line of it.
-
-**And the follow-up review never ran — it was rate limited.** The trigger
-reported *"Review limit reached. Next included review available in 46
-minutes"*, having first listed the three files it would have covered. **That
-listing reads exactly like a review that ran and found nothing**, which this
-file already warns about under the review bullet, and it is the second time
-the warning has earned its place. So neither `0cb18fc` nor `f7930db` has been
-reviewed, and the `cmos-slots` thread stayed open because the bot could not
-re-evaluate it — not because the fix was rejected.
-
-**Check the bot's own banner before reading silence as approval.** An
-unreviewed push and a clean push look identical from the thread list.
-
-**One decline was reversed on a second pass, and it was the right call.** The
-`test-cmos-slots.sh` finding was filed as low-value procedure text — and the
-procedure it describes is the one remaining open task on this machine, so a
-bug in it would be hit the next time anybody touches the slot hunt. It said:
-restore option A and change option B **in the same BIOS visit**, then take one
-reading that serves as both A's restored baseline and B's "before". That
-cannot work. A reading taken after two changes is attributable to neither, so
-if restoring A moves the byte, the move is reported against B — which is
-exactly the wrong answer, confidently stated.
-
-Fixed to a five-step sequence with a **restore-only reading** in the middle.
-Each option now costs two reboots instead of one, which is the honest price.
-**"Low value" was about the text; the cost was a wrong identification**, and
-those are not the same thing.
-
-**The install-dkms fix was also incomplete, and the bot was right not to mark
-it addressed.** The pre-flight build catches a compile error before anything
-is removed, which is the common cause — but an install can still fail
-afterwards for a reason the pre-flight cannot see (signing, a full disk, a
-DKMS environment difference), and by then the removal has happened. On a
-**re-run** the `modules-load.d` entry from the earlier run survives, so the
-next boot still asks for a module that is gone. The failure path now removes
-that entry and says so, which is the honest end state: no driver installed,
-nothing claiming one loads at boot, and the entry written back by the next
-successful run.
-
-**Worth noting how that was caught**: 13 of the 20 findings were marked
-"Addressed" by the bot and 7 were not, and the unmarked set was the useful
-signal — five were recorded declines, one was a major that *was* fixed (its
-anchor line had simply moved), and one was a major that genuinely was not. **A
-fix that does not match the reviewer's proposed shape still has to close the
-reviewer's failure mode**, and this one only narrowed it.
-
-### Two review findings declined, with reasons — 23 Oct 2026
-
-Recorded so they are not re-raised and re-investigated:
-
-- **"Hide hwmon `temp3` when `gaming_family` is set."** Declined. `temp3` does
-  read `+0.0 °C` here, and the firmware reason is known — `ec_read(0x62)` lands
-  on an undeclared `ERAM` offset. But `gaming_family` covers **every**
-  `GIGABYTE GAMING` model, and the evidence is one machine. Hiding a channel
-  family-wide from a `GA65TH` observation is the same over-generalisation this
-  file warns about for method IDs. The finding itself asks to "confirm the
-  Gaming generations share the relevant ERAM layout first", which is exactly
-  what cannot be confirmed here. A temperature reading 0 is cosmetic, hwmon
-  consumers handle it, and the change would diverge from upstream for a
-  non-bug in code headed upstream. Revisit only with a second machine's dump.
-  **Strengthened 26 Oct 2026**: the Aero firmware's own comment labels EC `0x62`
-  the MLB (motherboard) temperature, so the channel's *meaning* is pinned and
-  it is upstream's label that is right. Hiding it would have been removing a
-  correctly-named channel on the strength of one machine not populating it.
-
-- ~~**"Test the DNF upgrade transaction for `akmod-aorus-laptop`."**~~
-  **Superseded, and my stated reason was wrong.** I recorded here that
-  "`kmodtool` offers no hook for `Obsoletes`, so only
-  `gigabyte-laptop-kmod-common` can obsolete its predecessor". That is false,
-  and the spec's own comment said the same thing. See "`kmodtool` does have an
-  obsolete hook" below.
-
 ### `kmodtool` does have an obsolete hook — `--help` does not list it
 
 `kmodtool` 1.2.1 implements **`--obsolete-name`** and **`--obsolete-version`**,
@@ -4683,10 +5156,10 @@ Sorted by how likely each is to be accepted, for when that time comes:
 
 | Candidate | Why it should go up |
 |---|---|
-| `gpu_boost_store()` oops (#45) | Dereferenced `gigabyte` before assigning it; any write oopsed the kernel |
+| `gpu_boost_store()` oops (#45) | Dereferenced `gigabyte` before assigning it; any write oopsed the kernel. **Upstream fixed this itself in `c612eec`, 6 Nov 2026** — no longer a divergence. Ours (`4a96703`) assigns earlier still, right after `kstrtouint`, so no path can reach a use before it |
 | `gpu_boost` split detach/restore pair | **Fixed 29 Oct 2026 — the node now takes the full 0-4 the firmware implements.** Was: `mode >= 3` blocked only when `has_dgpu_ejector` is set, then `if (mode > 3)` permitted 3 — a dGPU eject — while rejecting 4, its restore. The defect was the asymmetry, not the feature. See Hazards |
 | Typed read refuses a BUFFER | An unimplemented ID echoes its argument into an `int` and returns success, so an absent method reads as a genuine `0`. **Pitch it as a latent correctness hole, not a live misdetection** — ~~it fixes a live `0xFA` silent-fan misdetection on every model outside the three early-exit DMI families~~, which was checked on 29 Oct 2026 and does not hold: the models that reach that read are old Aero and P-series, and the one dump from that range implements `0xFA` in `WMBC` (`Aero-15-Classic-DSDT.dsl:60296`), so the read works there. Must also exempt the two methods that legitimately answer with a BUFFER — `0x63` and `0xFC` |
-| Duty clamp (#46) | Duties above `FAN_DUTY_MAX` stop the fans on an AERO 17-XA |
+| Duty clamp (#46) | Duties above `FAN_DUTY_MAX` stop the fans on an AERO 17-XA. **Upstream implemented this itself in `9d480d9`, 6 Nov 2026**, as a bare `229` literal in two places with no constant — so this is no longer a gap, and we still decline the clamp here for the reasons under Hazards |
 | Void-WMBD tolerance | `set_devstate()` reported `-EINVAL` for a third of this firmware's setters; see below |
 | Probe hardening | One absent optional method no longer aborts the whole module |
 | `memcpy` clamp | Size-aware getter; the old `void *` hid a five-byte caller |
@@ -4694,7 +5167,7 @@ Sorted by how likely each is to be accepted, for when that time comes:
 | `hwmon_read()` error propagation | Returned success with `*val` unwritten on a failed read |
 | NULL-safe DMI family match | Four unchecked `strcmp`s on `DMI_PRODUCT_FAMILY` |
 | `fan_lock` | Three entry points doing read-modify-write on `fan_mode` unserialised |
-| **Debian `prerm` never ran `dkms remove`** | `if [ "$(dkms status -m $NAME)"]; then` — **the space before `]` is missing**, so `[` never sees its terminator, exits with `missing ']'`, and the if-condition reads false. `dkms remove` was therefore **skipped on every remove and upgrade**, leaving the registration behind. Verified by running it: `sh: [: missing ']'`. **Present verbatim in upstream `4b817ea`**, so it is upstream's bug and not the rename's, and it hits any Debian user who removes or upgrades the package. The smallest possible patch and the easiest of this list to argue |
+| **Debian `prerm` never ran `dkms remove`** | `if [ "$(dkms status -m $NAME)"]; then` — **the space before `]` is missing**, so `[` never sees its terminator, exits with `missing ']'`, and the if-condition reads false. `dkms remove` was therefore **skipped on every remove and upgrade**, leaving the registration behind. Verified by running it: `sh: [: missing ']'`. **Present verbatim in upstream `4b817ea`**, so it is upstream's bug and not the rename's, and it hits any Debian user who removes or upgrades the package. The smallest possible patch and the easiest of this list to argue. **Fixed here, and still present on `upstream/master` as of 15 Nov 2026.** Locally `pkg-files/debian/prerm` captures the status into `registered` and tests `[ -n "$registered" ]`, so the bracket is terminated and `dkms remove` runs — verified by CI, which installs the package, removes it and asserts the DKMS registration is gone. Upstream's `d184209` edited that very `case` statement (the `dconfigure` typo one line above) and the broken test survived the edit, which is evidence it will not be found without a patch. The typo half is fixed here too; see "The prerm typo, taken". Both halves of this row describe upstream's state, not ours |
 
 The rename, the `fan_preset` ring and the hotkey input device are this fork's
 own direction and should **not** be offered upstream without asking first — the
@@ -5997,9 +6470,6 @@ only one variable moved. The excursions stopped dead: 60 samples, all 60.00 W,
 with `amd_pmf` still bound. So this handler never destabilised anything. The
 case for removing it rests only on the TA-session failure above, which is
 reason enough. See "Settled: the MUX caused the arbitration, not `amd_pmf`".
-
-
-
 
 
 ### `systemctl stop display-manager` does not end a Plasma Wayland session

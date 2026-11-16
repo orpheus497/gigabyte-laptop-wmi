@@ -1,0 +1,829 @@
+# Verify the packaging by building, installing and compiling it -- which is what
+# debug-driver.yml does NOT do.
+#
+# debug-driver.yml builds the RPMs in mock and is a real check of the spec's
+# metadata, but it never invokes the compiler on gigabyte-laptop.c. The reason
+# is gigabyte-laptop-kmod.spec setting `%global buildforkernels akmod`: in akmod
+# mode kmodtool emits no `kernel_versions`, so the %prep, %build and %install
+# loops iterate zero times and only %{?akmod_install} runs. That is correct
+# akmod behaviour -- the end user's machine compiles later -- and it is why a
+# syntax error or a wrong struct member showed four green ticks.
+#
+# This workflow closes that, on both package families:
+#
+#   compile   plain `make` against a distro kernel-devel. Cheapest gate, runs
+#             first, and the only one that fails in seconds.
+#   fedora    build the three RPMs, install the DKMS one, compile through DKMS,
+#             then rebuild the akmod SRPM for a named kernel -- which is exactly
+#             the mechanism akmods uses on a user's machine at boot.
+#   debian    build the .deb, install it, compile through DKMS, then REMOVE it
+#             and assert the DKMS registration is gone. That last assertion is
+#             the one that would have caught the `[ "$x"]` prerm bug, which
+#             survived upstream and every green run here because nothing in CI
+#             had ever read that file.
+#   arch      parse and lint the PKGBUILD, build it, install it, compile
+#             through DKMS, remove it. The PKGBUILD cannot be built from its
+#             own source= line -- it fetches an UPSTREAM release and installs
+#             gigabyte-laptop.c out of it, and upstream's published 0.2.0
+#             tarball carries aorus-laptop.c, measured -- so the job stages the
+#             repo's own tarball and uses the shipped PKGBUILD otherwise
+#             verbatim. The assertion that matters is on the built package's
+#             CONTENTS, because package() ends with a command that always
+#             succeeds and so swallows a failed install.
+#
+# Kernel floor: the driver needs APIs newer than 6.8 (the platform_profile
+# class API, power_supply_ext, devm_battery_hook_register). Each job prints the
+# kernel it compiled against, so a failure on an older release is legible as a
+# portability fact rather than a mystery.
+name: Verify packaging
+
+on: push
+
+# Read-only is all this needs: it checks out, installs packages, compiles and
+# builds packages. Nothing uploads an artifact, cuts a release or writes to the
+# repository. Declared explicitly because an absent permissions block inherits
+# the repository default, which is wider -- flagged by zizmor via a review on
+# PR #5. debug-driver.yml keeps write-all because its publish job does upload.
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    name: Compile the driver
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install a kernel-devel and a toolchain
+        run: dnf -y install kernel-devel gcc make
+
+      - name: Compile
+        run: |
+          set -eu
+          # The container's `uname -r` is the HOST kernel and has no headers
+          # here, so the Makefile's default KDIR is wrong by construction.
+          # Take the newest kernel-devel actually installed instead.
+          KVER=$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-devel | sort -V | tail -1)
+          echo "::notice::compiling against kernel-devel $KVER"
+          make KDIR="/usr/src/kernels/$KVER"
+          test -f gigabyte-laptop.ko || { echo "no module produced"; exit 1; }
+          modinfo ./gigabyte-laptop.ko | sed -n '1,8p'
+
+      - name: Compile again with W=1, warnings fatal
+        run: |
+          set -eu
+          KVER=$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-devel | sort -V | tail -1)
+          make KDIR="/usr/src/kernels/$KVER" clean
+          # KCFLAGS rather than editing the Makefile: upstream's Makefile is
+          # four lines and is not the place for a CI-only flag.
+          make KDIR="/usr/src/kernels/$KVER" W=1 KCFLAGS="-Werror"
+
+  fedora:
+    name: Fedora ${{ matrix.version }} (build, install, akmod)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [44, 43, 42]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install build and packaging dependencies
+        id: deps
+        run: |
+          set -eu
+          dnf -y install kernel-devel gcc make rpm-build dkms \
+                         dnf-plugins-core redhat-rpm-config elfutils-libelf-devel
+          # kmodtool and buildsys-build-rpmfusion-kerneldevpkgs-* live in RPM
+          # Fusion, not Fedora proper, and gigabyte-laptop-kmod.spec needs both:
+          # it *calls* kmodtool from %{expand:%(...)}, so without it the spec
+          # cannot even be parsed. debug-driver.yml gets them by pointing mock at
+          # an explicit RPM Fusion URL; a container has to enable the repo.
+          #
+          # Tolerated, not required, so that a release whose RPM Fusion is
+          # genuinely unreachable still gets its DKMS half tested.
+          #
+          # Note what this does and does not detect. kmodtool being installable
+          # does NOT mean every BuildRequires resolves: on Fedora 42 kmodtool
+          # installs while buildsys-build-rpmfusion-kerneldevpkgs-akmod-x86_64
+          # is absent, so this probe says yes and `dnf builddep` still fails
+          # later. That is handled where it happens rather than by widening this
+          # check, because the two failures want different responses -- no
+          # kmodtool means the spec cannot be parsed at all, while a missing
+          # buildsys metapackage is skippable.
+          KMOD=yes
+          dnf -y install "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" || KMOD=no
+          [ "$KMOD" = yes ] && { dnf -y install kmodtool || KMOD=no; }
+          command -v kmodtool >/dev/null 2>&1 || KMOD=no
+          echo "kmod=$KMOD" >> "$GITHUB_OUTPUT"
+          [ "$KMOD" = yes ] \
+            && echo "::notice::RPM Fusion and kmodtool available -- kmod and akmod steps will run" \
+            || echo "::warning::RPM Fusion/kmodtool unavailable on this release (EOL?); skipping the kmod and akmod steps, testing the DKMS package only"
+
+      - name: Record the kernel this release ships
+        id: kver
+        env:
+          RELEASE: ${{ matrix.version }}
+        run: |
+          set -eu
+          KVER=$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-devel | sort -V | tail -1)
+          echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+          echo "::notice::Fedora $RELEASE kernel-devel $KVER"
+
+      - name: Stage the source tarball the specs expect
+        run: |
+          set -eu
+          # Version comes from the spec, not a literal. debug-driver.yml hardcodes
+          # `s/@PKGVER@/0.2.0/`, so it tests the substitution against a constant
+          # and would stay green through a version bump that desynced the two.
+          VER=$(rpm -q --qf '%{VERSION}\n' --specfile pkg-files/rpm/gigabyte-laptop-dkms.spec | head -1)
+          echo "::notice::spec version $VER"
+          sed -e "s/@PKGVER@/$VER/" -i dkms.conf
+          grep -q '@PKGVER@' dkms.conf && { echo "substitution failed"; exit 1; }
+          mkdir -p ~/rpmbuild/SOURCES ~/rpmbuild/SPECS
+          tar -czf ~/rpmbuild/SOURCES/driver.tar.gz \
+              Makefile gigabyte-laptop.c dkms.conf gigabyte-laptop.conf
+          cp gigabyte-laptop.conf ~/rpmbuild/SOURCES/
+          # The specs have to live in %{_specdir}, not just be passed by path.
+          # %{?akmod_install} -- the only thing the kmod spec's %install runs in
+          # akmod mode -- shells out to `rpmbuild -bs %{_specdir}/<name>.spec` to
+          # regenerate the source RPM it ships. Built straight from pkg-files/
+          # that path does not exist and %install dies with
+          # "failed to stat .../SPECS/gigabyte-laptop-kmod.spec". CI found this.
+          cp pkg-files/rpm/*.spec ~/rpmbuild/SPECS/
+          echo "VER=$VER" >> "$GITHUB_ENV"
+
+      - name: Build the two kmodtool-free RPMs
+        run: |
+          set -eu
+          for s in gigabyte-laptop-dkms gigabyte-laptop-kmod-common; do
+            echo "=== $s ==="
+            # builddep rather than --nodeps, so BuildRequires is genuinely
+            # validated here as well as in mock.
+            dnf -y builddep "$HOME/rpmbuild/SPECS/$s.spec"
+            rpmbuild -bb "$HOME/rpmbuild/SPECS/$s.spec"
+          done
+          find ~/rpmbuild/RPMS -name '*.rpm' -printf '%f\n' | sort
+
+      - name: Install the DKMS package and check it registers
+        run: |
+          set -eu
+          rpm -Uvh --nodeps ~/rpmbuild/RPMS/noarch/gigabyte-laptop-dkms-*.rpm || true
+          # %post runs `dkms install` for the RUNNING kernel, which in a
+          # container is the host's and has no headers -- so a non-zero rpm exit
+          # here is an artifact of the container, not a packaging defect. What
+          # must hold is that the payload landed and the module is registered.
+          test -f "/usr/src/gigabyte-laptop-${VER}/gigabyte-laptop.c"
+          test -f "/usr/src/gigabyte-laptop-${VER}/dkms.conf"
+          test -f /etc/modules-load.d/gigabyte-laptop.conf
+          grep -q "PACKAGE_VERSION=\"${VER}\"" "/usr/src/gigabyte-laptop-${VER}/dkms.conf"
+          dkms status -m gigabyte-laptop | tee /tmp/dkms.status
+          grep -q gigabyte-laptop /tmp/dkms.status
+
+      - name: Compile through DKMS, the way a user gets it
+        env:
+          KVER: ${{ steps.kver.outputs.kver }}
+        run: |
+          set -eu
+          # Fedora's kernel-devel unpacks to /usr/src/kernels/<ver>, while the
+          # /lib/modules/<ver>/build symlink comes from the matching KERNEL
+          # package -- which a container does not install. Create it, so the
+          # container looks like a real Fedora system.
+          #
+          # --kernelsourcedir is NOT the fix, and trying it first showed why:
+          # it got DKMS past its own header check, then the build still failed
+          # because dkms.conf hardcodes KDIR=/lib/modules/${kernelver}/build
+          # (dkms.conf:4), so that is the path `make` receives whatever DKMS was
+          # told. Supplying the symlink tests the shipped dkms.conf exactly as
+          # users get it, rather than overriding it to make the test pass.
+          # Guarded with test -e rather than `ln -sfn`, on a review finding
+          # that is right: `ln -sfn TARGET DIR` where DIR is a REAL directory
+          # does not replace it, it silently creates DIR/TARGET inside it, and
+          # dkms then fails on a path that looks correct. Verified here. It never
+          # triggers in this container, where nothing exists at that path -- but
+          # it would on any runner that has a kernel installed, which is exactly
+          # the case the symlink is imitating.
+          mkdir -p "/lib/modules/$KVER"
+          test -e "/lib/modules/$KVER/build" \
+            || ln -s "/usr/src/kernels/$KVER" "/lib/modules/$KVER/build"
+          dkms build -m gigabyte-laptop -v "$VER" -k "$KVER"
+          find /var/lib/dkms/gigabyte-laptop -name 'gigabyte-laptop.ko*' -print
+
+      - name: Build the kmod spec and rebuild its akmod SRPM
+        if: steps.deps.outputs.kmod == 'yes'
+        env:
+          KVER: ${{ steps.kver.outputs.kver }}
+        run: |
+          set -eu
+          # This spec calls kmodtool, so it is built here rather than in the
+          # loop above, which must work on a release with no live RPM Fusion.
+          #
+          # builddep first, because validating BuildRequires is worth having --
+          # but fall back to --nodeps rather than skipping the step. On Fedora 42
+          # kmodtool installs fine while
+          # buildsys-build-rpmfusion-kerneldevpkgs-akmod-x86_64 is simply absent
+          # from that release's RPM Fusion, so builddep fails on a metapackage
+          # that contributes nothing here: it exists to drag in kernel-devel sets
+          # for `buildforkernels current`, and neither the akmod build nor the
+          # SRPM rebuild below uses that mode. Skipping the step would drop the
+          # only coverage of this spec's build section; --nodeps keeps it, and
+          # mock in debug-driver.yml does the real dependency validation against
+          # an explicit RPM Fusion URL.
+          if dnf -y builddep "$HOME/rpmbuild/SPECS/gigabyte-laptop-kmod.spec"; then
+            rpmbuild -bb "$HOME/rpmbuild/SPECS/gigabyte-laptop-kmod.spec"
+          else
+            echo "::warning::BuildRequires did not resolve on this release; building the kmod spec with --nodeps (mock still validates deps in debug-driver.yml)"
+            rpmbuild -bb --nodeps "$HOME/rpmbuild/SPECS/gigabyte-laptop-kmod.spec"
+          fi
+          # The akmod package's whole payload is a source RPM; akmods rebuilds it
+          # for the running kernel. Passing --define "kernels <ver>" is what makes
+          # kmodtool emit kernel_versions, so this is the one route that exercises
+          # the kmod spec's %prep/%build/%install for real.
+          # The akmod package's %post invokes akmods to build for the RUNNING
+          # kernel, which in a container is the host's and has no headers, so it
+          # exits 1 and rpm reports "scriptlet failed". That is a container
+          # artifact, exactly like the DKMS package's %post above, so it is
+          # tolerated -- and nothing is taken on trust: the assertions below are
+          # that the SRPM landed and that it rebuilds into a kmod containing a
+          # real module, which is the whole contract of an akmod package.
+          rpm -Uvh --nodeps ~/rpmbuild/RPMS/x86_64/akmod-gigabyte-laptop-*.rpm || true
+          rpm -q akmod-gigabyte-laptop \
+            || { echo "the akmod package did not install at all"; exit 1; }
+          SRPM=$(find /usr/src/akmods -name 'gigabyte-laptop-kmod-*.src.rpm' | head -1)
+          test -n "$SRPM" || { echo "akmod package shipped no SRPM"; exit 1; }
+          echo "::notice::rebuilding $SRPM for $KVER"
+          # With `kernels` defined, the spec's BuildRequires on the rpmfusion
+          # buildsys package is skipped by its own %{!?kernels:...} guard, so
+          # this rebuild needs no extra repo -- which is the point: it is what
+          # akmods runs on a user's machine.
+          rpmbuild --rebuild \
+                   --define "kernels $KVER" "$SRPM"
+          # This assertion used `find ... | head -1`, which is order-dependent
+          # whenever the rebuild emits more than one matching package -- and
+          # kmodtool is expected to, since it generates a kernel-versioned
+          # subpackage alongside a meta one. That is a defect in the check
+          # regardless of cause: Fedora 43 passed it and 44 failed it on the
+          # same code and the same spec, so at least one of those outcomes was
+          # decided by readdir order, and a guard like that is not a guard.
+          #
+          # Which release genuinely produced a module is NOT settled here, and
+          # is deliberately not asserted: it needs kmodtool, which this
+          # environment does not have. The loop below makes the answer visible
+          # instead of guessing -- it names every package it found and whether
+          # each holds a module, and requires that at least one does.
+          FOUND=no
+          for k in $(find ~/rpmbuild/RPMS -name 'kmod-gigabyte-laptop-*.rpm'); do
+            if rpm -qlp "$k" 2>/dev/null | grep -qE 'gigabyte-laptop\.ko'; then
+              echo "  module in $(basename "$k")"
+              FOUND=yes
+            else
+              echo "  (no module in $(basename "$k") -- expected for the meta package)"
+            fi
+          done
+          [ "$FOUND" = yes ] \
+            || { echo "no rebuilt kmod package contains gigabyte-laptop.ko"; exit 1; }
+
+  debian:
+    name: Debian ${{ matrix.suite }} (build, install, remove)
+    runs-on: ubuntu-latest
+    container:
+      image: debian:${{ matrix.suite }}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [sid, trixie]
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install build and packaging dependencies
+        run: |
+          set -eu
+          apt-get update -qq
+          # dh-sequence-dkms, which debian/control Build-Depends on, is a virtual
+          # package provided by dh-dkms.
+          apt-get install -y --no-install-recommends \
+            build-essential debhelper dh-dkms dkms fakeroot \
+            linux-headers-amd64 kmod
+
+      - name: Record the kernel this suite ships, and whether it is new enough
+        id: kver
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          set -eu
+          KVER=$(ls -1 /lib/modules | sort -V | tail -1)
+          echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+          echo "::notice::Debian $SUITE headers $KVER"
+          # Probe for the two APIs that set the floor rather than guessing a
+          # version number. Measured: trixie ships 6.12 and has NEITHER, so the
+          # driver cannot build there; 7.0 and 7.3 have both and it builds clean.
+          # The floor therefore sits between 6.12 and 7.0.
+          #
+          # The packaging half -- build, install, DKMS registration, prerm,
+          # remove -- is kernel-independent and is the half that catches the bug
+          # class this job exists for, so it runs on every suite regardless. Only
+          # the compile steps are skipped, and loudly.
+          #
+          # Ask KBUILD, not the filesystem. This step used to grep
+          # "$K/include/linux/platform_profile.h" and answered "too old" on
+          # EVERY suite, silently skipping both compile steps -- including on
+          # sid, whose 7.3.4 headers then built the module successfully in the
+          # postinst a few log lines later. The cause is measured, by the
+          # notice below: $K is the ARCH header directory, which does not
+          # carry include/linux at all -- those ship in the separate
+          # linux-headers-<ver>-common package. Validating the grep on Ubuntu,
+          # whose arch package DOES carry include/linux, is what hid it.
+          # Building a throwaway module uses the kernel's own include
+          # resolution and cannot be fooled by where a distro puts things.
+          #
+          # Three outcomes, kept distinguishable on purpose, because the failure
+          # that matters is a broken probe quietly reading as an old kernel:
+          #   an empty module fails  -> the environment is broken, so error out
+          #   empty ok, API probe no -> the kernel really is too old, warn+skip
+          #   API probe yes          -> compile the driver for real
+          K="/lib/modules/$KVER/build"
+          # Keep printing the layout. It is what turned the paragraph above
+          # from a plausible story into a reading, and it is one notice.
+          echo "::notice::$K -> $(readlink -f "$K"); include/linux/platform_profile.h $(test -e "$K/include/linux/platform_profile.h" && echo present || echo ABSENT); found under /usr/src at: $(ls -d /usr/src/linux-headers-*/include/linux/platform_profile.h 2>/dev/null | tr '\n' ' ')"
+          probe=$(mktemp -d)
+          printf 'obj-m += t.o\n' > "$probe/Kbuild"
+          printf '#include <linux/module.h>\nMODULE_LICENSE("GPL");\n' > "$probe/t.c"
+          if ! make -C "$K" M="$probe" modules > "$probe/empty.log" 2>&1; then
+            cat "$probe/empty.log"
+            echo "::error::an empty module will not build against $KVER, so this job cannot tell an old kernel from a broken toolchain"
+            exit 1
+          fi
+          # printf, not a heredoc: a heredoc delimiter has to sit at column 0
+          # of the script, which is outside this YAML block scalar and would
+          # end the block.
+          # DEFINE objects of the two types, do not declare pointers to them.
+          # A pointer to an incomplete type is legal C, so a probe built from
+          # pointers compiles whether or not the struct is ever defined -- it
+          # answered "yes" on 6.8, where the driver demonstrably fails. The
+          # driver fails on an old kernel precisely because it defines objects
+          # (gigabyte_laptop_profile_ops, gigabyte_laptop_battery_ext), which
+          # needs a COMPLETE type: "storage size of ... isn't known". sizeof
+          # forces the same requirement and keeps the objects referenced.
+          printf '%s\n' \
+            '#include <linux/module.h>' \
+            '#include <linux/platform_profile.h>' \
+            '#include <linux/power_supply.h>' \
+            'static const struct platform_profile_ops probe_ops;' \
+            'static const struct power_supply_ext probe_ext;' \
+            'const unsigned long gigabyte_floor_probe[] =' \
+            '        { sizeof(probe_ops), sizeof(probe_ext) };' \
+            'MODULE_LICENSE("GPL");' > "$probe/t.c"
+          if make -C "$K" M="$probe" modules > "$probe/api.log" 2>&1; then
+            MODERN=yes
+            echo "::notice::$KVER has platform_profile_ops and power_supply_ext -- compiling"
+          else
+            MODERN=no
+            cat "$probe/api.log"
+            echo "::warning::$KVER lacks platform_profile_ops or power_supply_ext; skipping the compile steps and testing the packaging only"
+          fi
+          echo "modern=$MODERN" >> "$GITHUB_OUTPUT"
+
+      - name: Compile directly first
+        if: steps.kver.outputs.modern == 'yes'
+        env:
+          KVER: ${{ steps.kver.outputs.kver }}
+        run: |
+          set -eu
+          make KDIR="/lib/modules/$KVER/build"
+          test -f gigabyte-laptop.ko
+          make KDIR="/lib/modules/$KVER/build" clean
+
+      - name: Build the .deb
+        run: |
+          set -eu
+          # debian/rules refers to ../dkms.conf, ../Makefile and
+          # ../gigabyte-laptop.c, so the build runs from pkg-files/ and `..`
+          # resolves to the repo root. Building from the repo root instead puts
+          # those paths outside the checkout and fails. Nothing documented this.
+          cd pkg-files
+          dpkg-buildpackage -us -uc -b
+          ls -la ../*.deb
+
+      - name: Inspect the package before installing it
+        run: |
+          set -eu
+          DEB=$(ls -1 ./*.deb | head -1)
+          dpkg-deb -c "$DEB"
+          VER=$(dpkg-deb -f "$DEB" Version | sed -e 's/-[^-]*$//')
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          # The DKMS tree must be named without the Debian revision, or it stops
+          # matching the name every other packaging path registers.
+          dpkg-deb -c "$DEB" | grep -q "usr/src/gigabyte-laptop-${VER}/"
+          dpkg-deb --fsys-tarfile "$DEB" \
+            | tar -xO "./usr/src/gigabyte-laptop-${VER}/dkms.conf" \
+            | grep -q "PACKAGE_VERSION=\"${VER}\"" \
+            || { echo "@PKGVER@ was not substituted"; exit 1; }
+
+      - name: Install it and check it registers with DKMS
+        run: |
+          set -eu
+          dpkg -i ./*.deb
+          # postinst deliberately never fails: it runs dkms for the RUNNING
+          # kernel, which in a container is the host's. A non-zero exit here
+          # would be a real regression in that contract, so no `|| true`.
+          test -f /etc/modules-load.d/gigabyte-laptop.conf
+          dkms status -m gigabyte-laptop | tee /tmp/dkms.status
+          grep -q gigabyte-laptop /tmp/dkms.status
+
+      - name: Compile through DKMS
+        if: steps.kver.outputs.modern == 'yes'
+        env:
+          KVER: ${{ steps.kver.outputs.kver }}
+        run: |
+          set -eu
+          dkms build -m gigabyte-laptop -v "$VER" -k "$KVER"
+          find /var/lib/dkms/gigabyte-laptop -name 'gigabyte-laptop.ko*' -print
+
+      - name: Exercise every prerm argument dpkg can pass
+        run: |
+          set -eu
+          # `sh -n` passes on both the `dconfigure` typo and the `[ "$x"]`
+          # bracket bug, so a parse check proves nothing here. Running the
+          # script is the only thing that does.
+          #
+          # Run it against a NAME that is not registered, so this tests the
+          # case-label dispatch and nothing else. Invoking the real prerm with
+          # "remove" would actually run `dkms remove`, which would leave the
+          # next step asserting an absence it had itself created -- a check a
+          # broken prerm and a working one would both pass. Found by rehearsing
+          # this job rather than by reading it.
+          sed -e 's/^NAME=.*/NAME=gigabyte-laptop-ci-dispatch-probe/' \
+              /var/lib/dpkg/info/gigabyte-laptop-dkms.prerm > /tmp/prerm-probe
+          for a in remove upgrade deconfigure; do
+            sh /tmp/prerm-probe "$a" \
+              || { echo "prerm rejected the '$a' job"; exit 1; }
+          done
+          sh /tmp/prerm-probe bogus-job \
+            && { echo "prerm accepted an unknown job"; exit 1; } || true
+          # The probe must not have touched the real registration.
+          dkms status -m gigabyte-laptop | grep -q gigabyte-laptop \
+            || { echo "the dispatch probe mutated DKMS state"; exit 1; }
+
+      - name: Roll back an upgrade and assert the module comes back
+        run: |
+          set -eu
+          # The abort branch of postinst was empty, so a rolled-back upgrade
+          # left the package installed and configured with its DKMS
+          # registration gone. This exercises the real pair -- the shipped
+          # prerm removing it and the shipped postinst putting it back -- and
+          # asserts the round trip, because a restore path that has never run
+          # is not a restore path.
+          #
+          # Unlike the dispatch probe above, this one uses the REAL module name
+          # on purpose: the point is to mutate the registration and see it
+          # restored. It ends where it started, so the removal assertion in the
+          # next step is unaffected.
+          PRERM=/var/lib/dpkg/info/gigabyte-laptop-dkms.prerm
+          POSTINST=/var/lib/dpkg/info/gigabyte-laptop-dkms.postinst
+
+          registered() { dkms status -m gigabyte-laptop | grep -q gigabyte-laptop; }
+
+          registered || { echo "precondition failed: not registered to begin with"; exit 1; }
+
+          sh "$PRERM" upgrade 0.2.0-2
+          registered && { echo "prerm upgrade did not remove the registration"; exit 1; }
+          echo "::notice::prerm upgrade removed the registration, as it should"
+
+          # dkms install can legitimately fail in a container (and on trixie the
+          # module was never built), so assert the REGISTRATION returns -- which
+          # is the thing prerm took away -- not a built .ko.
+          sh "$POSTINST" abort-upgrade 0.2.0-2
+          registered || { echo "postinst abort-upgrade did NOT restore the registration"; exit 1; }
+          echo "::notice::postinst abort-upgrade restored it"
+
+      - name: Remove it and assert the DKMS registration is gone
+        run: |
+          set -eu
+          dpkg -r gigabyte-laptop-dkms
+          # THE assertion. The bracket bug meant `dkms remove` was skipped on
+          # every remove and upgrade, leaving the registration behind while dpkg
+          # reported the package gone.
+          #
+          # Capture the status output and judge the QUERY and its CONTENT
+          # separately. `dkms status ... | grep -q` conflates them: a query that
+          # fails while printing nothing to stdout makes grep exit non-zero,
+          # which reads exactly like a query that succeeded and found nothing,
+          # so a cleanup failure would pass. That is the same discrimination the
+          # shipped prerm makes for the same reason -- see the comment there.
+          # Rehearsed against a stub `dkms` in all four states before landing.
+          #
+          # stderr is kept OUT of the content check deliberately: dkms writes
+          # warnings there that can carry the module name in a path, which would
+          # false-fail a clean removal. It is only reported on a failed query.
+          err=$(mktemp)
+          if ! remaining=$(dkms status -m gigabyte-laptop 2>"$err"); then
+            echo "dkms status failed, so the removal cannot be confirmed:"
+            cat "$err"
+            exit 1
+          fi
+          case "$remaining" in
+            *gigabyte-laptop*)
+              echo "prerm left the DKMS registration behind:"
+              echo "$remaining"
+              exit 1 ;;
+          esac
+          # The modules-load.d entry is a CONFFILE -- dh_installdeb marks
+          # everything under /etc as one, and dpkg lists it with its md5sum.
+          # `dpkg -r` leaves conffiles behind on purpose; that is the whole
+          # remove-versus-purge distinction. Asserting its absence here was
+          # testing dpkg's documented behaviour backwards, and CI caught it.
+          test -f /etc/modules-load.d/gigabyte-laptop.conf \
+            || { echo "remove deleted a conffile it should have kept"; exit 1; }
+          dpkg --purge gigabyte-laptop-dkms
+          test ! -f /etc/modules-load.d/gigabyte-laptop.conf \
+            || { echo "purge left the conffile behind"; exit 1; }
+
+  arch:
+    name: Arch (build, install, dkms)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install build and packaging dependencies
+        run: |
+          set -eu
+          pacman -Syu --noconfirm --needed dkms linux-headers namcap git
+          # makepkg refuses to run as root, by design. base-devel supplies
+          # fakeroot, so a plain user is all that is missing.
+          useradd -m builder
+          install -d -o builder -g builder /tmp/build
+
+      - name: Parse the shipped PKGBUILD and lint it
+        run: |
+          set -eu
+          cp pkg-files/archlinux/PKGBUILD /tmp/build/
+          chown builder:builder /tmp/build/PKGBUILD
+          cd /tmp/build
+          # --printsrcinfo is the cheapest proof the file parses at all, and it
+          # prints the metadata makepkg derives. Nothing had ever run it.
+          su builder -s /bin/bash -c 'cd /tmp/build && makepkg --printsrcinfo' \
+            | sed -e 's/^/  /'
+          # namcap is advisory, so it reports and never fails the job.
+          namcap PKGBUILD | sed -e 's/^/  namcap: /' || true
+
+      - name: Record what parsing costs, because it reaches the network
+        run: |
+          set -eu
+          # sha256sums is computed by a `curl` INSIDE the PKGBUILD, so it runs
+          # on every parse -- makepkg, namcap, any AUR tooling. Two consequences
+          # measured locally before this job existed:
+          #   * offline, or GitHub down, the checksum comes back EMPTY
+          #   * online, the sum is fetched from the same host as the tarball,
+          #     so it cannot detect a tampered release
+          # Reported rather than asserted: it is a known property of the file,
+          # not a regression, and failing here would be noise on every run.
+          install -d -o builder -g builder /tmp/stub
+          printf '#!/bin/sh\nexit 6\n' > /tmp/stub/curl
+          chmod 0755 /tmp/stub/curl
+          sums=$(su builder -s /bin/bash -c '
+                   cd /tmp/build
+                   PATH="/tmp/stub:$PATH"
+                   . ./PKGBUILD 2>/dev/null
+                   printf "%s" "${sha256sums[0]}"')
+          if [ -z "$sums" ]; then
+            echo "::warning::PKGBUILD computes sha256sums with curl at parse time; with the network down it yields an EMPTY checksum. A literal sum belongs here."
+          else
+            echo "::notice::the offline-parse probe did not reproduce an empty checksum; sha256sums came back as '$sums'"
+          fi
+
+      - name: Stage the tarball, because the shipped source= cannot be fetched
+        run: |
+          set -eu
+          # The PKGBUILD fetches a GitHub release of the UPSTREAM repository and
+          # then installs gigabyte-laptop.c out of it. Measured against the real
+          # release: upstream's published 0.2.0 driver.tar.gz contains
+          #
+          #     Makefile  aorus-laptop.c  dkms.conf
+          #
+          # so the file package() installs is not in it -- upstream never took
+          # the rename, and release-driver.yml has never run here, so no release
+          # with the new name exists anywhere. The PKGBUILD's own comment says
+          # as much. It is therefore UNBUILDABLE from its shipped source= today.
+          #
+          # Stage the repo's own tarball under the name makepkg expects, built
+          # exactly the way debug-driver.yml and release-driver.yml build it.
+          # makepkg finds a source already present in the build directory and
+          # skips the download, so the PKGBUILD itself is used verbatim --
+          # --skipchecksums is needed only because a locally built tarball can
+          # never match a published sum.
+          tar -czf /tmp/build/driver.tar.gz \
+            Makefile gigabyte-laptop.c dkms.conf gigabyte-laptop.conf
+          chown builder:builder /tmp/build/driver.tar.gz
+          tar -tzf /tmp/build/driver.tar.gz | sed -e 's/^/  staged: /'
+
+      - name: Build the package
+        run: |
+          set -eu
+          cd /tmp/build
+          su builder -s /bin/bash -c 'cd /tmp/build && makepkg -f --nodeps --skipchecksums --noconfirm'
+          ls -la ./*.pkg.tar.* | sed -e 's/^/  /'
+
+      - name: Inspect the package before installing it
+        run: |
+          set -eu
+          cd /tmp/build
+          PKG=$(ls -1 ./*.pkg.tar.* | head -1)
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+          # Normalise the listing instead of assuming its shape. makepkg tars
+          # from inside $pkgdir, and whether the entries carry a leading "./"
+          # is not something to guess: an assertion written against the wrong
+          # form fails for a reason that has nothing to do with the package.
+          bsdtar -tf "$PKG" | sed -e 's|^\./||' > /tmp/build/contents
+          grep -v '^\.' /tmp/build/contents | sed -e 's/^/  /'
+          VER=$(su builder -s /bin/bash -c 'cd /tmp/build && . ./PKGBUILD 2>/dev/null && printf %s "$pkgver"')
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          # THE assertion for this job, and it is load-bearing rather than
+          # decorative. package() runs
+          #     install -Dt DIR -m644 Makefile gigabyte-laptop.c dkms.conf
+          # and a function's exit status is its LAST command's -- here the
+          # modules-load.d write, which always succeeds. So a missing source
+          # file is swallowed at the function level, and whether makepkg's own
+          # errexit catches it is measured in the next step. Asserting the
+          # CONTENTS catches a silently incomplete package either way.
+          for f in "usr/src/gigabyte-laptop-${VER}/Makefile" \
+                   "usr/src/gigabyte-laptop-${VER}/gigabyte-laptop.c" \
+                   "usr/src/gigabyte-laptop-${VER}/dkms.conf" \
+                   "etc/modules-load.d/gigabyte-laptop.conf"; do
+            grep -qx "$f" /tmp/build/contents \
+              || { echo "::error::the package does not contain $f"; exit 1; }
+          done
+          # @PKGVER@ must have been substituted. Note this only bites for a
+          # tarball built straight from the repo: release-driver.yml substitutes
+          # it before tarring, so on a real release the PKGBUILD's sed is a
+          # no-op and this would pass for the wrong reason.
+          conf=$(grep -m1 -E "(^|\./)usr/src/gigabyte-laptop-${VER}/dkms\.conf$" \
+                   <(bsdtar -tf "$PKG"))
+          bsdtar -xOf "$PKG" "$conf" \
+            | grep -q "PACKAGE_VERSION=\"${VER}\"" \
+            || { echo "::error::@PKGVER@ was not substituted"; exit 1; }
+
+      - name: Does makepkg abort when a source file is missing?
+        run: |
+          set -eu
+          # Answers the question the step above leaves open, and decides whether
+          # that content assertion is the only guard or merely a second one.
+          # Build again from a tarball with gigabyte-laptop.c removed -- which
+          # is precisely upstream's published release -- in a throwaway
+          # directory so the real package is untouched.
+          install -d -o builder -g builder /tmp/probe
+          cp /tmp/build/PKGBUILD /tmp/probe/
+          tar -czf /tmp/probe/driver.tar.gz Makefile dkms.conf gigabyte-laptop.conf
+          chown -R builder:builder /tmp/probe
+          cd /tmp/probe
+          if su builder -s /bin/bash -c 'cd /tmp/probe && makepkg -f --nodeps --skipchecksums --noconfirm' \
+               > /tmp/probe/log 2>&1; then
+            echo "::warning::makepkg exited 0 with gigabyte-laptop.c absent -- package() swallows the install failure and makepkg does not catch it. The content assertion in the previous step is the ONLY thing standing between this and an inert package."
+            bsdtar -tf /tmp/probe/*.pkg.tar.* | grep -v '^\.' | sed -e 's/^/  built anyway: /'
+          else
+            echo "::notice::makepkg aborted on the missing source file, so its errexit does catch this; the content assertion is a second guard rather than the only one"
+            tail -5 /tmp/probe/log | sed -e 's/^/  /'
+          fi
+
+      - name: Record the kernel this image ships, and whether it is new enough
+        id: kver
+        run: |
+          set -eu
+          KVER=$(ls -1 /usr/lib/modules | sort -V | tail -1)
+          echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+          echo "::notice::Arch headers $KVER"
+          # dkms.conf hardcodes KDIR=/lib/modules/${kernelver}/build, so that
+          # exact path has to resolve. On Arch /lib is a symlink to /usr/lib, so
+          # it should -- asserted rather than assumed, because this is the very
+          # thing that needed a hand-made symlink on the Fedora containers.
+          test -d "/lib/modules/$KVER/build" \
+            || { echo "::error::/lib/modules/$KVER/build does not resolve, so the shipped dkms.conf cannot work here"; exit 1; }
+          # Same kbuild probe as the Debian job: ask the kernel's own build
+          # system, never a guessed header path, and DEFINE objects of the two
+          # types rather than pointers to them -- a pointer to an incomplete
+          # type is legal C and would answer "yes" on a kernel that cannot
+          # build the driver.
+          K="/lib/modules/$KVER/build"
+          probe=$(mktemp -d)
+          printf 'obj-m += t.o\n' > "$probe/Kbuild"
+          printf '#include <linux/module.h>\nMODULE_LICENSE("GPL");\n' > "$probe/t.c"
+          if ! make -C "$K" M="$probe" modules > "$probe/empty.log" 2>&1; then
+            cat "$probe/empty.log"
+            echo "::error::an empty module will not build against $KVER, so this job cannot tell an old kernel from a broken toolchain"
+            exit 1
+          fi
+          printf '%s\n' \
+            '#include <linux/module.h>' \
+            '#include <linux/platform_profile.h>' \
+            '#include <linux/power_supply.h>' \
+            'static const struct platform_profile_ops probe_ops;' \
+            'static const struct power_supply_ext probe_ext;' \
+            'const unsigned long gigabyte_floor_probe[] =' \
+            '        { sizeof(probe_ops), sizeof(probe_ext) };' \
+            'MODULE_LICENSE("GPL");' > "$probe/t.c"
+          if make -C "$K" M="$probe" modules > "$probe/api.log" 2>&1; then
+            echo "modern=yes" >> "$GITHUB_OUTPUT"
+            echo "::notice::$KVER has platform_profile_ops and power_supply_ext -- compiling"
+          else
+            echo "modern=no" >> "$GITHUB_OUTPUT"
+            cat "$probe/api.log"
+            echo "::warning::$KVER lacks platform_profile_ops or power_supply_ext; skipping the compile steps and testing the packaging only"
+          fi
+
+      - name: Install it and see whether it registers with DKMS
+        id: install
+        run: |
+          set -eu
+          cd /tmp/build
+          pacman -U --noconfirm "$PKG"
+          test -f /etc/modules-load.d/gigabyte-laptop.conf
+          # This package carries NO install scriptlet -- there is no .install
+          # file in pkg-files/archlinux at all, where the .deb has postinst and
+          # the RPMs have %post. On Arch that is correct, because the dkms
+          # package ships pacman hooks keyed on usr/src/*/dkms.conf. Since the
+          # hooks ARE the mechanism this package depends on in place of a
+          # scriptlet, assert they exist rather than hoping.
+          for h in 70-dkms-install.hook 71-dkms-remove.hook; do
+            test -f "/usr/share/libalpm/hooks/$h" \
+              || { echo "::error::$h is absent, so nothing registers this package with DKMS and it has no scriptlet of its own"; exit 1; }
+          done
+          if ! status=$(dkms status -m gigabyte-laptop 2>&1); then
+            echo "::error::dkms status failed, so registration cannot be judged:"; echo "$status"; exit 1
+          fi
+          case "$status" in
+            *gigabyte-laptop*)
+              echo "::notice::the dkms pacman hook registered the module: $status" ;;
+            *)
+              # The hook ran -- pacman prints "Install DKMS modules" -- and
+              # failed with "Missing <ver> kernel modules tree", because the
+              # image has linux-headers but not the linux package, so there is
+              # no /usr/lib/modules/<ver> to install into. That is the same
+              # container limitation the Fedora %post hits and is tolerated for
+              # the same reason: it is not a packaging defect. Register by hand
+              # so the compile below still tests the shipped source.
+              echo "::notice::the hook ran and could not complete in a container with headers but no kernel modules tree; adding the module by hand so the compile still runs"
+              dkms add -m gigabyte-laptop -v "$VER" ;;
+          esac
+
+      - name: Compile through DKMS, the way a user gets it
+        if: steps.kver.outputs.modern == 'yes'
+        env:
+          KVER: ${{ steps.kver.outputs.kver }}
+        run: |
+          set -eu
+          dkms build -m gigabyte-laptop -v "$VER" -k "$KVER"
+          find /var/lib/dkms/gigabyte-laptop -name 'gigabyte-laptop.ko*' -print \
+            | sed -e 's/^/  /'
+          find /var/lib/dkms/gigabyte-laptop -name 'gigabyte-laptop.ko*' \
+            | grep -q . || { echo "::error::dkms build produced no module"; exit 1; }
+
+      - name: Remove it and assert the DKMS registration is gone
+        run: |
+          set -eu
+          # Let pacman's own 71-dkms-remove.hook do the work. The first
+          # version of this step ran `dkms remove` by hand FIRST and then
+          # asserted the registration was gone -- which is an absence it had
+          # created itself, and a check a working hook and a broken one would
+          # both pass. The Debian job already learned this exact lesson with
+          # its prerm probe; I repeated it here one file away from the comment
+          # that records it.
+          pacman -R --noconfirm gigabyte-laptop-dkms
+          # Judge the QUERY and its CONTENT separately. `dkms status | grep -q`
+          # conflates them: a failed query printing nothing to stdout makes grep
+          # exit non-zero, which reads exactly like a query that succeeded and
+          # found nothing -- so a cleanup failure would pass. Same shape as the
+          # Debian job's assertion and the shipped prerm's own guard.
+          err=$(mktemp)
+          if ! remaining=$(dkms status -m gigabyte-laptop 2>"$err"); then
+            echo "::error::dkms status failed, so the removal cannot be confirmed:"
+            cat "$err"; exit 1
+          fi
+          case "$remaining" in
+            *gigabyte-laptop*)
+              echo "::error::the DKMS registration survived removal:"; echo "$remaining"; exit 1 ;;
+          esac
+          # pacman has no conffile concept: /etc files are deleted on removal
+          # unless the PKGBUILD lists them in backup=(). This one does not, so
+          # the config goes. Asserted as the real behaviour, and flagged --
+          # dpkg keeps it until purge, which is the friendlier contract for a
+          # file a user may have edited.
+          if [ -e /etc/modules-load.d/gigabyte-laptop.conf ]; then
+            echo "::notice::pacman kept /etc/modules-load.d/gigabyte-laptop.conf on removal"
+          else
+            echo "::warning::pacman deleted /etc/modules-load.d/gigabyte-laptop.conf on removal, because the PKGBUILD has no backup=() array. dpkg keeps it until purge."
+          fi
+          if [ -d "/usr/src/gigabyte-laptop-${VER}" ]; then
+            echo "::error::the source tree survived removal"
+            exit 1
+          fi
