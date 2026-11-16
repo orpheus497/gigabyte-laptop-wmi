@@ -1792,8 +1792,15 @@ wanted for distribution; it is also why a syntax error, a wrong type or a `W=1`
 warning shows four green ticks.
 
 ~~**The local `make` is the only compile gate there is**~~ — **true until
-15 Nov 2026, and no longer: `verify-packaging.yml` compiles on six jobs,
-including `W=1 -Werror`.** Run it locally anyway, because it answers in seconds
+15 Nov 2026, and no longer: `verify-packaging.yml` compiles the driver,
+including with `W=1 -Werror`.** **It said "on six jobs" and that was wrong in
+both halves — corrected 16 Nov 2026.** There are **seven** job instances
+(`compile`, Fedora ×3, Debian ×2, Arch), and **six** of them compile: Debian
+**trixie does not**, because its 6.12 kernel predates `platform_profile_ops`
+and the compile steps are gated on `steps.kver.outputs.modern == 'yes'`. So
+trixie's green ticks are a **packaging** result only and must not be read as a
+driver build — which is the same "green means what it checked" care the rest of
+this section is about, applied to its own summary. Run it locally anyway, because it answers in seconds
 where CI answers in minutes. What is no longer true is that a push is
 unprotected. ~~Every queued code change — the `gpu_boost` cap, the typed-read
 fix, a `battery_cycle` gate — is unprotected by CI until it is run. Run it
@@ -2621,10 +2628,27 @@ sudo bash scripts/install-dkms.sh            # or --no-autoload to skip boot loa
 **It builds before it removes anything**, in a temp directory rather than the
 checkout, so a compile error is non-destructive: the old driver stays installed
 instead of leaving the machine with no module and a `modules-load.d` entry still
-asking for one. If a later step fails anyway — signing, a full disk — the
-failure path removes that entry too, so the end state is honest: no driver, and
-nothing claiming one loads at boot. It is also the only compile gate that
-answers in seconds.
+asking for one. It is also the only compile gate that answers in seconds.
+
+**If a later step fails anyway** — signing, a full disk, a DKMS environment
+difference — **the entry is LEFT in place and the script says so**, printing the
+`rm` to run and why it is not run for you. **This paragraph claimed the failure
+path removes it, which is the opposite of what the script does and of what it
+deliberately decided — corrected 16 Nov 2026.** An earlier version of that
+failure path *did* delete the entry, and it was removed for a stated reason: the
+`modules-load.d` file is not ownership-gated *because* the script only ever
+overwrites it with identical content, never deletes it, except under an explicit
+`--no-autoload`. An install failure is not an explicit request, so deleting it
+there would strand a packaged `gigabyte-laptop-dkms` — rpm or dpkg still listing
+a file that is gone, which is the exact harm the ownership check exists to
+prevent. Leaving it costs one journal line at the next boot; deleting a
+package-owned file damages the package database.
+
+**The error is worth naming rather than quietly fixing**: this sentence was
+written on 16 Nov 2026 while *preserving* the fact from a deleted section, and
+it described the behaviour the script had already rejected. Re-homing a fact is
+a rewrite, and a rewrite needs the source checked — the comment stating the
+decision is directly above the code.
 
 **Autoload is on by default and should stay that way.** The module registers its
 platform device by hand in `gigabyte_laptop_init()` and exposes no modalias

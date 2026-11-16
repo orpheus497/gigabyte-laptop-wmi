@@ -73,7 +73,43 @@ case "$1" in
         dkms_configure
     ;;
 
-    abort-upgrade|abort-remove|abort-deconfigure)
+    # dpkg calls these when an operation it has already begun is rolled back,
+    # and each one has to undo whatever prerm did on the way in (Debian policy,
+    # ch-maintainerscripts, "Details of unpack phase"). This branch was empty,
+    # so a rolled-back upgrade or deconfiguration left the package installed and
+    # configured with its DKMS registration and built module GONE.
+    #
+    #   abort-upgrade      prerm upgrade ran on THIS version and removed the
+    #                      registration; the new version's unpack then failed,
+    #                      so this version is what the system keeps. By far the
+    #                      more reachable of the two.
+    #   abort-deconfigure  prerm deconfigure ran, same removal, and the unpack
+    #                      it was making way for failed.
+    #
+    # dkms_configure is called exactly as the configure branch calls it, so the
+    # restore path and the install path cannot drift.
+    #
+    # Nothing here may fail the postinst: a non-zero exit leaves the package
+    # half-configured and dpkg complaining on every later operation, which is
+    # worse than an unrestored module. So a failed restore warns and names the
+    # one command that fixes it.
+    abort-upgrade|abort-deconfigure)
+        echo "postinst: $1 -- restoring the DKMS registration prerm removed"
+        if ! dkms_configure; then
+            echo "postinst: could not restore $NAME/$VERSION after $1." >&2
+            echo "          The package is installed but the module is not." >&2
+            echo "          Restore it with:" >&2
+            echo "            sudo dkms install $NAME/$VERSION" >&2
+        fi
+    ;;
+
+    # abort-remove is deliberately a no-op, and that asymmetry is the point.
+    # dpkg calls it when prerm FAILED, and this prerm exits non-zero on exactly
+    # one path: `dkms remove` failed and dkms still lists the module. So the
+    # registration was never removed and there is nothing to put back. Calling
+    # dkms_configure here would re-run add/build/install over a registration
+    # that is already present, for no reason.
+    abort-remove)
     ;;
 
     *)

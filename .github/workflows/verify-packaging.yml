@@ -473,6 +473,38 @@ jobs:
           dkms status -m gigabyte-laptop | grep -q gigabyte-laptop \
             || { echo "the dispatch probe mutated DKMS state"; exit 1; }
 
+      - name: Roll back an upgrade and assert the module comes back
+        run: |
+          set -eu
+          # The abort branch of postinst was empty, so a rolled-back upgrade
+          # left the package installed and configured with its DKMS
+          # registration gone. This exercises the real pair -- the shipped
+          # prerm removing it and the shipped postinst putting it back -- and
+          # asserts the round trip, because a restore path that has never run
+          # is not a restore path.
+          #
+          # Unlike the dispatch probe above, this one uses the REAL module name
+          # on purpose: the point is to mutate the registration and see it
+          # restored. It ends where it started, so the removal assertion in the
+          # next step is unaffected.
+          PRERM=/var/lib/dpkg/info/gigabyte-laptop-dkms.prerm
+          POSTINST=/var/lib/dpkg/info/gigabyte-laptop-dkms.postinst
+
+          registered() { dkms status -m gigabyte-laptop | grep -q gigabyte-laptop; }
+
+          registered || { echo "precondition failed: not registered to begin with"; exit 1; }
+
+          sh "$PRERM" upgrade 0.2.0-2
+          registered && { echo "prerm upgrade did not remove the registration"; exit 1; }
+          echo "::notice::prerm upgrade removed the registration, as it should"
+
+          # dkms install can legitimately fail in a container (and on trixie the
+          # module was never built), so assert the REGISTRATION returns -- which
+          # is the thing prerm took away -- not a built .ko.
+          sh "$POSTINST" abort-upgrade 0.2.0-2
+          registered || { echo "postinst abort-upgrade did NOT restore the registration"; exit 1; }
+          echo "::notice::postinst abort-upgrade restored it"
+
       - name: Remove it and assert the DKMS registration is gone
         run: |
           set -eu
