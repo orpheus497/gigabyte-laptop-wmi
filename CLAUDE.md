@@ -1731,8 +1731,8 @@ was safe.
 
 > **Superseded 15 Nov 2026 as a statement about the present, and kept because
 > the diagnosis is still the reason the new workflow exists.** CI *does* compile
-> the driver now, on six jobs across three Fedora releases and two Debian
-> suites. See "The packaging is verified end to end now". Everything below is
+> the driver now — on six of the seven job instances; Debian trixie is
+> packaging-only. See "The packaging is verified end to end now". Everything below is
 > accurate about `debug-driver.yml`, which is unchanged and still the only thing
 > that builds in mock — so read it as a description of that workflow rather than
 > of CI as a whole.
@@ -1875,14 +1875,24 @@ in the same change as a fix for a refusal that only advised.
 ### The packaging is verified end to end now — 15 Nov 2026
 
 **`.github/workflows/verify-packaging.yml` compiles the driver and exercises
-both package families, which is what `debug-driver.yml` never did.** Six jobs,
-all green on runs #7 and #8:
+all three package families, which is what `debug-driver.yml` never did.**
+**Seven** job instances, and **six compile** — which is not the same claim and
+was written as "six jobs" until 16 Nov 2026:
 
 ```
 compile                                  make, then again with W=1 -Werror
-Fedora 42 / 43 / 44  (build, install, akmod)
-Debian sid / trixie  (build, install, remove)
+Fedora 42 / 43 / 44  (build, install, akmod)      compiles via dkms build
+Debian sid           (build, install, remove)     compiles
+Debian trixie        (build, install, remove)     PACKAGING ONLY -- see below
+Arch                 (parse, build, install, dkms, remove)
 ```
+
+**Debian trixie does not compile the driver**, and its green ticks must not be
+read as a build: 6.12 predates `platform_profile_ops` and `power_supply_ext`,
+the kbuild probe answers `modern=no`, and both compile steps are gated on
+`steps.kver.outputs.modern == 'yes'`. The packaging half is
+kernel-independent, which is why trixie still runs it — that is the half that
+catches the `prerm` bug class.
 
 **What each job asserts**, because "green" is only worth what it checked:
 
@@ -1890,7 +1900,8 @@ Debian sid / trixie  (build, install, remove)
 |---|---|
 | `compile` | `make` against Fedora `kernel-devel`, then `W=1 KCFLAGS=-Werror`. Fails in seconds, so it fails first |
 | `fedora` | both kmodtool-free RPMs built with `dnf builddep` (so `BuildRequires` is validated outside mock) → install the DKMS package → assert the payload landed and `@PKGVER@` was substituted → `dkms build` → build the kmod spec → rebuild its akmod SRPM with `--define kernels` → assert a rebuilt kmod package holds a real `.ko` |
-| `debian` | `dpkg-buildpackage` → inspect the `.deb` before installing → install → assert DKMS registration → `dkms build` → exercise every `prerm` job name → remove → **assert the DKMS registration is gone** → purge |
+| `debian` | `dpkg-buildpackage` → inspect the `.deb` before installing → install → assert DKMS registration → `dkms build` (sid only) → exercise every `prerm` job name → **roll back an upgrade and assert the module comes back** → remove → **assert the DKMS registration is gone** → purge |
+| `arch` | `makepkg --printsrcinfo` and `namcap` parse it → build → assert the package's contents and that `@PKGVER@` was substituted → assert the DKMS pacman hooks exist → install → `pacman -R` and let the hook do the removal |
 
 **The akmod SRPM rebuild is the load-bearing step on the Fedora side.** In
 akmod mode the kmod spec's `%prep`/`%build`/`%install` iterate zero times, so
